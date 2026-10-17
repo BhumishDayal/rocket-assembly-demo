@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rocket Assembly</title>
+    <meta name="description" content="Animation demo: click a part, watch it fly in, crystallize and lock onto the rocket." />
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <canvas id="scene" aria-label="3D rocket assembly"></canvas>
+
+    <header class="brand">
+      <h1>Rocket assembly</h1>
+      <p>Click a part to build it · <kbd>Space</kbd> explode / assemble · <kbd>B</kbd> build all · <kbd>R</kbd> reset</p>
+    </header>
+
+    <aside class="parts" id="parts" aria-label="Parts"></aside>
+
+    <div class="hud" id="hud"><span id="hud-text">Pad ready</span></div>
+
+    <footer class="bar">
+      <button id="btn-build-all" type="button">Build all</button>
+      <button id="btn-explode" type="button" disabled>Explode</button>
+      <button id="btn-reset" type="button" class="quiet">Reset</button>
+      <button id="btn-sound" type="button" class="quiet" aria-pressed="true">Sound on</button>
+    </footer>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
