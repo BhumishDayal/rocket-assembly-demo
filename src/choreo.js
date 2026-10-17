@@ -79,8 +79,9 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   function sourcePoint(part) {
     const fwd = camera.getWorldDirection(new THREE.Vector3());
     const right = new THREE.Vector3().crossVectors(fwd, camera.up).normalize();
+    // Right of the card column, so the particle stream never crosses the card text.
     return new THREE.Vector3(0, part.slotY + part.height * 0.5 + 1.2, 0)
-      .addScaledVector(right, -9)
+      .addScaledVector(right, -6.5)
       .addScaledVector(fwd, -2.5);
   }
 

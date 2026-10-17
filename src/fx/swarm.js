@@ -226,7 +226,9 @@ export function createSwarm({ maxCount = 12000 } = {}) {
       geometry.setDrawRange(0, used);
 
       uniforms.uFlight.value = flight;
-      uniforms.uSize.value = THREE.MathUtils.clamp(height * 0.012, 0.02, 0.08);
+      // Size from the part's overall extent, with a floor so short parts (an engine cluster ~1 unit tall)
+      // still read at a 20-30 unit camera distance.
+      uniforms.uSize.value = THREE.MathUtils.clamp(Math.max(height, extent * 0.8) * 0.012, 0.05, 0.085);
       uniforms.uSwirl.value = extent * 0.06;
       uniforms.uColor.value.set(color);
       time = 0;
