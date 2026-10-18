@@ -9,12 +9,14 @@ import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { catalog, presetIds, getPreset, presetToBuild, applyOption } from "./data/catalog.js";
 import { evaluateBuild, stageDetails, stackMass_kg } from "./physics.js";
 import { optionsWithCompat } from "./compat.js";
+import { simulateAscent } from "./ascent.js";
 import { SCALE, buildManifest, sceneBounds } from "./layout.js";
 import { createMaterials, createPart, createPad, createStars } from "./parts.js";
 import { createChoreographer } from "./choreo.js";
 import { createSfx } from "./fx/sfx.js";
 import { createSelector } from "./ui/select.js";
 import { createCard } from "./ui/card.js";
+import { createScrub } from "./ui/scrub.js";
 import * as f from "./ui/format.js";
 
 const query = new URLSearchParams(location.search);
@@ -208,7 +210,11 @@ const selector = createSelector({
   // The fairing is a derived wrapper: clicking it (assembled) selects the payload inside. Its own card is
   // reachable in the exploded view, where the halves swing out.
   resolve: (part) =>
-    part?.kind === "fairing" && !choreo.state.exploded ? parts.find((p) => p.kind === "payload" && p.built) ?? part : part,
+    choreo.state.launch
+      ? null // nothing to inspect in flight
+      : part?.kind === "fairing" && !choreo.state.exploded
+        ? parts.find((p) => p.kind === "payload" && p.built) ?? part
+        : part,
   onGhostClick(part) {
     if (choreo.canBuild(part)) choreo.build(part);
   },
@@ -224,6 +230,16 @@ const selector = createSelector({
   },
 });
 
+// Scrub the exploded view: vertical drag on empty space, or wheel / two-finger scroll (design E17).
+createScrub({
+  canvas,
+  controls,
+  isEmpty: (x, y) => !selector.hit(x, y),
+  start: () => choreo.scrubStart(),
+  by: (d) => choreo.scrubBy(d),
+  end: () => choreo.scrubEnd(),
+});
+
 // ---------- UI ----------
 const btnRockets = document.getElementById("btn-rockets");
 const rocketsEl = document.getElementById("rockets");
@@ -233,7 +249,8 @@ const btnReset = document.getElementById("btn-reset");
 const btnSound = document.getElementById("btn-sound");
 const hudText = document.getElementById("hud-text");
 
-btnBuildAll.addEventListener("click", () => choreo.buildAll());
+// Build all becomes Launch once the stack is complete.
+btnBuildAll.addEventListener("click", () => (isComplete() ? launch() : choreo.buildAll()));
 
 // Rockets: the presets as an in-place list above the bar. One line each: name, stages, height est.,
 // payload → mission (all from the records and the layout). Choosing one loads it and builds it.
@@ -320,8 +337,13 @@ function syncUi() {
   btnExplode.disabled = built === 0 || (busy > 0 && !exploded);
   btnExplode.textContent = exploded ? "Assemble" : "Explode";
   btnExplode.classList.toggle("on", exploded);
-  btnBuildAll.disabled = built === parts.length || busy > 0 || exploded;
-  if (!swapping) hudText.innerHTML = hudHtml();
+  const launched = Boolean(choreo.state.launch);
+  btnBuildAll.textContent = built === parts.length ? "Launch" : "Build all";
+  btnBuildAll.disabled = busy > 0 || exploded || launched;
+  btnExplode.disabled ||= launched;
+  if (launched) {
+    if (telemetry.final) hudText.innerHTML = telemetry.final;
+  } else if (!swapping) hudText.innerHTML = hudHtml();
   // A selected part that is being removed (or gone after reset) loses its card.
   const sel = selector.selected;
   if (sel && (!sel.built || (sel.busy && !swapping) || !parts.includes(sel))) selector.clear();
@@ -372,6 +394,67 @@ function reset() {
   else choreo.reset();
 }
 
+// ---------- launch ----------
+// One ascent simulation per launch (ascent.js; every number it shows is an estimate), played by choreo.
+const telemetry = { final: null, last: 0 };
+const pad2 = (n) => String(Math.floor(n)).padStart(2, "0");
+function telemetryHtml(tel) {
+  if (tel.countdown != null) return `<strong>${f.esc(current.preset.name)}</strong> · <strong>T−${tel.countdown}</strong>`;
+  const t = Math.max(0, tel.t);
+  return [
+    `<strong>T+${pad2(t / 60)}:${pad2(t % 60)}</strong>`,
+    `${f.num(Math.max(0, tel.alt_m) / 1000, 1)}\u00a0km`,
+    f.ms(tel.vel_ms),
+    `${f.num(tel.g, 1)}\u00a0g`,
+    tel.label ? `<strong>${f.esc(tel.label)}</strong>` : "",
+    "est.",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+function outcomeHtml({ outcome, inOrbit, summary, alt_m }) {
+  const mission = catalog.missions.find((m) => m.id === current.build.missionId);
+  const orbit = Number.isFinite(summary.perigee_km) ? `${f.num(summary.perigee_km, 0)}\u00a0×\u00a0${f.num(summary.apogee_km, 0)}\u00a0km` : "";
+  const short = summary.mission?.shortBy_ms;
+  if (inOrbit && outcome === "orbit") {
+    return `<strong class="go">ORBIT</strong> · ${orbit} est.${Number.isFinite(summary.remainingDeltaV_ms) ? ` · Δv left ${f.ms(summary.remainingDeltaV_ms)}` : ""}`;
+  }
+  if (inOrbit) {
+    return `Parking orbit ${orbit} est. · <strong class="nogo">Δv short by ${f.ms(short)}</strong>${mission ? ` for ${f.esc(mission.name)}` : ""}`;
+  }
+  if (outcome === "shortfall") return `<strong class="nogo">Δv short by ${f.ms(short ?? 0)}</strong> · est.`;
+  const maxAlt_km = Math.max(...(lastSim?.samples ?? []).map((x) => x.alt_m)) / 1000;
+  return maxAlt_km < 0.05
+    ? `<strong class="nogo">Pad abort</strong> · thrust below weight (TWR ${f.twr(current.verdict.liftoffTWR)})`
+    : `<strong class="nogo">Did not reach space</strong> · max ${f.num(maxAlt_km, 1)}\u00a0km est.`;
+}
+let lastSim = null;
+function onTelemetry(tel) {
+  if (tel.final) {
+    telemetry.final = outcomeHtml(tel);
+    hudText.innerHTML = telemetry.final;
+    return;
+  }
+  const now = performance.now();
+  if (now - telemetry.last < 80) return;
+  telemetry.last = now;
+  hudText.innerHTML = telemetryHtml(tel);
+}
+async function launch() {
+  if (!isComplete() || choreo.state.busy || choreo.state.launch) return;
+  setRocketsOpen(false);
+  if (choreo.state.exploded && !(await choreo.assemble())) return;
+  const sim = simulateAscent(current.build, catalog);
+  if (!sim.samples.length) {
+    hudText.innerHTML = `<strong class="nogo">Cannot fly</strong> · ${f.esc(sim.summary.error ?? "no trajectory")}`;
+    return;
+  }
+  lastSim = sim;
+  telemetry.final = null;
+  selector.clear();
+  choreo.launch(sim, { pad: pad.group, onTelemetry });
+}
+
 function onPartKey(part) {
   if (part.built) {
     if (choreo.isTopBuilt(part)) choreo.remove(part);
@@ -394,6 +477,7 @@ addEventListener("keydown", (e) => {
   } else if (k === "b") choreo.buildAll();
   else if (k === "r") reset();
   else if (k === "m") btnSound.click();
+  else if (k === "l") launch();
   else if (k === "[") switchPreset(-1);
   else if (k === "]") switchPreset(1);
 });
@@ -440,10 +524,11 @@ function frame() {
   controls.update();
   // Depth cue: fog (background colour) in a band around the orbit target, sized by what is framed, so the far
   // side of the rocket and its far lines fade toward black while the near silhouette stays bright.
-  const R = choreo.framedRadius();
+  // The band is wide at home and while building (the pad stays visible) and tight on a focus or exploded view.
+  const { r: R, mode } = choreo.framing();
   const dist = camera.position.distanceTo(controls.target);
   scene.fog.near = Math.max(0.1, dist - 0.6 * R);
-  scene.fog.far = dist + 3 * R;
+  scene.fog.far = dist + (mode === "focus" || mode === "exploded" ? 3 : 6) * R;
   if (pad?.ringMat) pad.ringMat.opacity = 0.55 + 0.3 * (0.5 + 0.5 * Math.sin(t * 1.6));
   if (composer) composer.render();
   else renderer.render(scene, camera);

@@ -24,6 +24,7 @@ import { animate, spring } from "animejs";
 import { createHologramMaterial } from "./fx/hologram.js";
 import { createBoltFlash } from "./fx/flash.js";
 import { COLORS, LOOK, setShellOpacity as setShell } from "./parts.js";
+import { attachPlumes, createPadLight, P0 } from "./plume.js";
 
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const D = (ms) => (reduced ? ms * 0.55 : ms);
@@ -63,7 +64,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   const flash = createBoltFlash();
   scene.add(flash.object3d);
 
-  const state = { busy: 0, exploded: false, auto: false, gen: 0, shake: 0 };
+  const state = { busy: 0, exploded: false, scrubbing: false, auto: false, launch: null, gen: 0, shake: 0 };
   const live = new Set();
   const selectColor = new THREE.Color(COLORS.select ?? 0xffb020);
   const highlighted = new Set();
@@ -240,12 +241,18 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     return Math.max(dv, dh) + r;
   }
   // The centre sits `shift` of the view (default 2 %) below the span's middle, so the base clears the bar.
-  let framedR = initialBounds?.radius_u ?? 1; // radius of what the camera frames now (main's fog band uses it)
-  function frameSpan(y0, y1, r, frac, { shift = 0.02, ...opts } = {}) {
-    framedR = r;
+  // What the camera frames now (main's fog band): its radius and mode ("stack" | "part" | "focus" | "exploded").
+  let framedR = initialBounds?.radius_u ?? 1;
+  let framedMode = "stack";
+  function spanFraming(y0, y1, r, frac, shift = 0.02) {
     const dist = Math.max(controls.minDistance, fitDist(Math.max(y1 - y0, 0.05), r, frac));
     const tanHalf = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
-    return frameTo({ ty: (y0 + y1) / 2 - shift * 2 * dist * tanHalf, dist, ...opts });
+    return { ty: (y0 + y1) / 2 - shift * 2 * dist * tanHalf, dist };
+  }
+  function frameSpan(y0, y1, r, frac, { shift = 0.02, mode = "stack", ...opts } = {}) {
+    framedR = r;
+    framedMode = mode;
+    return frameTo({ ...spanFraming(y0, y1, r, frac, shift), ...opts });
   }
   const stackHeight = () => Math.max(bounds?.height_u ?? 0, topY(), 1);
   const stackRadius = () => bounds?.radius_u ?? 1;
@@ -256,7 +263,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   // Incoming part: 60 % of the view, a slight orbit, and the hero angle (8° lower, so rings read as ellipses).
   function framePart(part) {
     orbitSign = -orbitSign;
-    return frameSpan(part.slotY, part.slotY + part.height, part.radius, 0.6, { orbit: 0.2 * orbitSign, pitch: HERO_PITCH });
+    return frameSpan(part.slotY, part.slotY + part.height, part.radius, 0.6, { orbit: 0.2 * orbitSign, pitch: HERO_PITCH, mode: "part" });
   }
   // Click focus: frame the part where it is now (assembled or exploded), from its visible meshes.
   // { frac, shift } let a phone keep the part in the upper half, above the bottom-sheet card.
@@ -267,14 +274,14 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     for (const piece of part.pieces) if (piece.mesh.visible) focusBox.expandByObject(piece.mesh);
     if (focusBox.isEmpty()) return;
     const r = Math.max(Math.abs(focusBox.min.x), Math.abs(focusBox.max.x), Math.abs(focusBox.min.z), Math.abs(focusBox.max.z));
-    return frameSpan(focusBox.min.y, focusBox.max.y, r, frac, { shift });
+    return frameSpan(focusBox.min.y, focusBox.max.y, r, frac, { shift, mode: "focus" });
   }
   function unfocus() {
     return state.exploded ? frameExploded() : frameStack();
   }
   let explodedSpan = null; // { top, r } of the current exploded view
   function frameExploded() {
-    return explodedSpan ? frameSpan(0, explodedSpan.top, explodedSpan.r, 0.85) : frameStack();
+    return explodedSpan ? frameSpan(0, explodedSpan.top, explodedSpan.r, 0.85, { mode: "exploded" }) : frameStack();
   }
   // Home: the whole stack-to-be at 85 %, the first ghost waiting on the pad.
   function home() {
@@ -575,7 +582,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   }
 
   async function remove(part) {
-    if (state.busy || state.exploded || !isTopBuilt(part)) return false;
+    if (state.busy || state.exploded || state.launch || !isTopBuilt(part)) return false;
     const gen = state.gen;
     state.busy++;
     part.busy = true;
@@ -621,78 +628,144 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     return { lifts, top };
   }
 
-  async function explode() {
-    if (state.busy || state.exploded || topY() === 0) return false;
+  // One exploded progress xs.v, 0 = assembled → 1 = exploded, drives every piece (Space springs it, scrub sets
+  // it directly). Each piece follows with an offset (lower parts first, then by arrival rank), so a scrub reads
+  // as the lens cascade; the springs may overshoot past 1, never below 0 (pieces would sink into each other).
+  const X_PART = 0.22; // offset spread across parts
+  const X_PIECE = 0.1; // offset spread inside a part
+  const X_WINDOW = 1 - X_PART - X_PIECE;
+  const xs = { v: 0 };
+  let xAnim = null;
+  let xParts = []; // the built parts the current exploded layout was computed for
+  let xFrames = null; // { stack, exploded } camera framings the scrub interpolates between
+  function prepareExplode() {
+    xParts = parts.filter((p) => p.built);
+    const { lifts, top } = explodeLayout(xParts);
+    const spread = Math.max(0, ...xParts.flatMap((p) => p.pieces.map((q) => q.explode.dist * Math.hypot(q.explode.dir.x, q.explode.dir.z))));
+    explodedSpan = { top, r: stackRadius() + spread };
+    const np = xParts.length;
+    xParts.forEach((part, pi) => {
+      const lift = lifts.get(part);
+      const n = part.arrival.length;
+      for (const piece of part.arrival) {
+        const rot = new THREE.Quaternion().setFromAxisAngle(Y, piece.turn * 0.35);
+        piece.xTo = piece.rest.position.clone().addScaledVector(piece.explode.dir, piece.explode.dist).applyQuaternion(rot);
+        piece.xTo.y += piece.axis + lift;
+        piece.xQ = rot.multiply(piece.rest.quaternion);
+        piece.xOff = (np > 1 ? pi / (np - 1) : 0) * X_PART + (n > 1 ? piece.rank / (n - 1) : 0) * X_PIECE;
+      }
+    });
+    xFrames = {
+      stack: { ...spanFraming(0, stackHeight(), stackRadius(), 0.83), r: stackRadius() },
+      exploded: { ...spanFraming(0, top, explodedSpan.r, 0.85), r: explodedSpan.r },
+    };
+  }
+  function applyExplode() {
+    const v = xs.v;
+    const vc = Math.min(1, Math.max(0, v));
+    const over = Math.max(0, v - 1) * 1.5;
+    for (const part of xParts) {
+      for (const piece of part.pieces) {
+        const t = Math.min(1, Math.max(0, (vc - piece.xOff) / X_WINDOW)) + over;
+        piece.mesh.position.lerpVectors(piece.rest.position, piece.xTo, t);
+        piece.mesh.quaternion.slerpQuaternions(piece.rest.quaternion, piece.xQ, Math.min(1, t));
+      }
+      if (!highlighted.has(part)) {
+        part.shellAnim?.cancel();
+        part.shell.v = SHELL.built + (SHELL.exploded - SHELL.built) * vc;
+        setShellOpacity(part, part.shell.v);
+        if (part.dim && part.dim.v !== 1) applyLines(part);
+      }
+    }
+  }
+  // The scrub camera: between the stack framing and the exploded framing, following the progress.
+  function scrubCamera() {
+    const a = xFrames.stack;
+    const b = xFrames.exploded;
+    const k = smooth(Math.min(1, Math.max(0, xs.v)));
+    camAnim?.cancel();
+    controls.target.set(0, a.ty + (b.ty - a.ty) * k, 0);
+    camDir.copy(camera.position).sub(controls.target).normalize();
+    camera.position.copy(controls.target).addScaledVector(camDir, a.dist + (b.dist - a.dist) * k);
+    framedR = a.r + (b.r - a.r) * k;
+    framedMode = k > 0.5 ? "exploded" : "stack";
+  }
+
+  // Spring the progress to 0 or 1 (Space, or a released scrub). Busy while it runs.
+  async function settleExplode(to) {
     const gen = state.gen;
+    xAnim?.cancel();
+    live.delete(xAnim);
     state.busy++;
     state.exploded = true;
     changed();
-    sfx.play("explode");
-    controls.autoRotate = true;
-    controls.autoRotateSpeed = 0.9;
-    const built = parts.filter((p) => p.built);
-    for (const part of built) fadeShell(part, highlighted.has(part) ? SHELL.focus : SHELL.exploded, D(700));
-    const { lifts, top } = explodeLayout(built);
-    const spread = Math.max(0, ...built.flatMap((p) => p.pieces.map((q) => q.explode.dist * Math.hypot(q.explode.dir.x, q.explode.dir.z))));
-    explodedSpan = { top, r: stackRadius() + spread };
-    frameExploded();
-    const jobs = [];
-    built.forEach((part, pi) => {
-      const lift = lifts.get(part);
-      const step = Math.min(24, 700 / Math.max(1, part.arrival.length));
-      for (const piece of part.arrival) {
-        const rot = new THREE.Quaternion().setFromAxisAngle(Y, piece.turn * 0.35);
-        const target = piece.rest.position.clone().addScaledVector(piece.explode.dir, piece.explode.dist).applyQuaternion(rot);
-        target.y += piece.axis + lift;
-        const q0 = piece.mesh.quaternion.clone();
-        const q1 = rot.multiply(piece.rest.quaternion);
-        const delay = D(pi * 90 + piece.rank * step);
-        const k = { v: 0 };
-        jobs.push(
-          run(piece.mesh.position, { x: target.x, y: target.y, z: target.z, delay, ease: spring({ stiffness: 85, damping: 11 }) }),
-          run(k, { v: 1, duration: D(900), delay, ease: "outCubic", onUpdate: () => piece.mesh.quaternion.slerpQuaternions(q0, q1, k.v) }),
-        );
-      }
-    });
-    await Promise.all(jobs);
+    if (to === 1) {
+      sfx.play("explode");
+      frameExploded();
+    } else {
+      sfx.play("assemble");
+      frameStack();
+    }
+    controls.autoRotate = false;
+    const p = run(xs, { v: to, ease: to === 1 ? spring({ stiffness: 85, damping: 11 }) : spring({ stiffness: 130, damping: 12 }), onUpdate: applyExplode });
+    xAnim = p.anim;
+    await p;
     if (gen !== state.gen) return false;
+    xAnim = null;
+    xs.v = to;
+    applyExplode();
     state.busy--;
+    if (to === 1) {
+      controls.autoRotate = true;
+      controls.autoRotateSpeed = 0.9;
+    } else {
+      state.exploded = false;
+      xParts = [];
+      sfx.play("clunk", { gain: 0.7 });
+      state.shake = 0.6;
+    }
     changed();
     return true;
   }
 
-  async function assemble() {
-    if (state.busy || !state.exploded) return false;
-    const gen = state.gen;
-    state.busy++;
-    changed();
-    sfx.play("assemble");
-    const built = parts.filter((p) => p.built);
-    for (const part of built) fadeShell(part, highlighted.has(part) ? SHELL.focus : SHELL.built, D(700));
-    const jobs = [];
-    built.forEach((part, pi) => {
-      const step = Math.min(18, 500 / Math.max(1, part.arrival.length));
-      for (const piece of part.arrival) {
-        const delay = D(pi * 70 + piece.rank * step); // bottom-up
-        const k = { v: 0 };
-        const q0 = piece.mesh.quaternion.clone();
-        const r = piece.rest.position;
-        jobs.push(
-          run(piece.mesh.position, { x: r.x, y: r.y, z: r.z, delay, ease: spring({ stiffness: 130, damping: 12 }) }),
-          run(k, { v: 1, duration: D(700), delay, ease: "inOutCubic", onUpdate: () => piece.mesh.quaternion.slerpQuaternions(q0, piece.rest.quaternion, k.v) }),
-        );
-      }
-    });
-    await Promise.all(jobs);
-    if (gen !== state.gen) return false;
+  function explode() {
+    if (state.busy || state.scrubbing || state.launch || xs.v >= 1 || topY() === 0) return Promise.resolve(false);
+    if (xs.v === 0) prepareExplode();
+    return settleExplode(1);
+  }
+
+  function assemble() {
+    if (state.busy || state.scrubbing || !state.exploded) return Promise.resolve(false);
+    return settleExplode(0);
+  }
+
+  // Scrub (drag / wheel on empty space): scrubStart → scrubBy(delta of progress)… → scrubEnd (snaps past 0.5).
+  function scrubStart() {
+    if (state.scrubbing) return true;
+    if ((state.busy && !xAnim) || state.auto || state.launch || topY() === 0) return false; // builds, swaps, launch own the stack
+    if (xAnim) {
+      xAnim.cancel();
+      live.delete(xAnim);
+      xAnim = null;
+      state.busy--;
+    }
+    if (xs.v <= 0) prepareExplode();
+    state.scrubbing = true;
+    state.exploded = true;
     controls.autoRotate = false;
-    state.exploded = false;
-    state.busy--;
-    sfx.play("clunk", { gain: 0.7 });
-    state.shake = 0.6;
-    frameStack();
     changed();
     return true;
+  }
+  function scrubBy(delta) {
+    if (!state.scrubbing) return;
+    xs.v = Math.min(1, Math.max(0, xs.v + delta));
+    applyExplode();
+    scrubCamera();
+  }
+  function scrubEnd() {
+    if (!state.scrubbing) return;
+    state.scrubbing = false;
+    settleExplode(xs.v > 0.5 ? 1 : 0);
   }
 
   const toggleExplode = () => (state.exploded ? assemble() : explode());
@@ -732,7 +805,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   // (same shape) are restacked; changed ones are replaced (old unscrews out, new flies in at its new slot).
   // Resolves to { parts, replaced: Map(oldPart -> newPart) }, or false if it could not run / was cancelled.
   async function applyManifest(specs) {
-    if (state.busy || state.exploded || !makePart) return false;
+    if (state.busy || state.exploded || state.launch || !makePart) return false;
     const gen = state.gen;
     state.busy++;
     const wasComplete = parts.length > 0 && parts.every((p) => p.built);
@@ -832,6 +905,331 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   // swap(part, newSpec): one slot changes and nothing else moves (applyManifest when sizes shift).
   const swap = (part, newSpec) => applyManifest(parts.map((p) => (p === part ? newSpec : p)));
 
+  // ---------- launch (design A1–A3) ----------
+  // Plays a simulateAscent() result (ascent.js, all estimates). Countdown, per-engine ignition with plumes, the
+  // hold-down release at liftoff, then the rocket follows the sampled altitude in scene units: it rises in a
+  // fixed frame for ~60 % of its height, then the camera tracks it while the pad drops away; it pitches over
+  // along the flight-path angle. MECO kills a stage's plumes, SEP drops the spent stage (it falls away and
+  // tumbles), the next stage lights, the fairing halves swing off. Long burns are time-compressed (first
+  // seconds and event clusters near real time). Outcome: orbit → slow drift; suborbital/impact → arcs back and
+  // fades. Telemetry goes out through onTelemetry every frame; the caller renders it.
+  const EVENT_LABEL = { ignition: "IGNITION", liftoff: "LIFTOFF", maxq: "MAX-Q", meco: "MECO", sep: "STAGE SEP", ignition2: "IGNITION", fairing: "FAIRING SEP", seco: "SECO", orbit: "ORBIT", shortfall: "SHORTFALL", impact: "IMPACT" };
+  const COUNTDOWN_S = 3;
+  const SCALE_HEIGHT_M = 8434; // isothermal atmosphere, for the plume's ambient pressure only (visual)
+  let L = null;
+
+  // [sim t, real t] keyframes at every event: real time up to 6 s after liftoff, log-compressed gaps after.
+  function playbackKeys(events, tEnd) {
+    const lift = events.find((e) => e.type === "liftoff")?.t ?? 0;
+    const ts = [...new Set([0, lift + 6, ...events.map((e) => e.t), tEnd])].filter((t) => t >= 0 && t <= tEnd).sort((a, b) => a - b);
+    const keys = [[0, 0]];
+    for (let i = 1; i < ts.length; i++) {
+      const gap = ts[i] - ts[i - 1];
+      const real = ts[i] <= lift + 6 ? gap : Math.min(gap, 1 + 1.3 * Math.log2(1 + gap / 6));
+      keys.push([ts[i], keys[keys.length - 1][1] + real]);
+    }
+    return keys;
+  }
+  function simTime(keys, real) {
+    if (real <= 0) return real;
+    for (let i = 1; i < keys.length; i++) {
+      const [s1, r1] = keys[i];
+      if (real <= r1) {
+        const [s0, r0] = keys[i - 1];
+        return s0 + ((real - r0) / Math.max(1e-6, r1 - r0)) * (s1 - s0);
+      }
+    }
+    const [sl, rl] = keys[keys.length - 1];
+    return sl + (real - rl);
+  }
+  function sampleAt(samples, t) {
+    let lo = 0;
+    let hi = samples.length - 1;
+    if (t <= samples[0].t) return samples[0];
+    if (t >= samples[hi].t) return samples[hi];
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (samples[mid].t <= t) lo = mid;
+      else hi = mid;
+    }
+    const a = samples[lo];
+    const b = samples[hi];
+    const k = (t - a.t) / Math.max(1e-9, b.t - a.t);
+    const mix = (x, y) => (Number.isFinite(x) && Number.isFinite(y) ? x + (y - x) * k : x);
+    return { ...a, t, alt_m: mix(a.alt_m, b.alt_m), vel_ms: mix(a.vel_ms, b.vel_ms), acc_ms2: mix(a.acc_ms2, b.acc_ms2), gamma_deg: mix(a.gamma_deg, b.gamma_deg), throttle: a.throttle };
+  }
+
+  // Local y range of what is still flying (flight-group coordinates), for the tracking camera.
+  function flyingSpan() {
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const part of parts) {
+      if (L.gone.has(part)) continue;
+      lo = Math.min(lo, part.group.position.y);
+      hi = Math.max(hi, part.group.position.y + part.height);
+    }
+    return { lo, hi };
+  }
+  function retarget() {
+    const { lo, hi } = flyingSpan();
+    L.trackLocalY = (lo + hi) / 2;
+    L.trackDist = Math.max(controls.minDistance, fitDist(hi - lo, stackRadius(), 0.72));
+  }
+
+  function ignite(stage, t) {
+    const part = parts.find((p) => p.kind === "engines" && p.stageIndex === stage);
+    if (!part) return;
+    const plumes = attachPlumes(part);
+    for (const plume of plumes) L.plumes.push({ plume, stage, ignite: t + plume.engine * (stage === 0 ? 0.07 : 0.05), dead: false });
+    if (stage === 0 && L.pad && plumes.length) {
+      L.padLight = createPadLight({ baseRadius_u: bounds?.baseRadius_u ?? 1, bellExitRadius_u: Math.max(...plumes.map((p) => p.exitRadius_u ?? 0.1)) });
+      L.pad.add(L.padLight.object3d);
+    }
+  }
+  // A spent stage (or the fairing) leaves the flight group and drifts back and down in world space, tumbling.
+  function drop(part, { spread = false } = {}) {
+    L.gone.add(part);
+    root.attach(part.group);
+    const down = new THREE.Vector3(0, -1, 0).applyQuaternion(L.flight.quaternion);
+    const axis = new THREE.Vector3().crossVectors(down, L.tiltAxis).normalize();
+    const d = { part, t: 0, down, axis: axis.lengthSq() ? axis : L.tiltAxis.clone(), spread };
+    L.debris.push(d);
+  }
+  function updateDebris(dt) {
+    for (const d of L.debris) {
+      if (!d.part.group.visible) continue;
+      d.t += dt;
+      d.part.group.position.addScaledVector(d.down, dt * (0.4 + d.t * 1.6));
+      d.part.group.rotateOnWorldAxis(d.axis, dt * 0.25);
+      if (d.spread) {
+        for (const piece of d.part.pieces) {
+          if (Math.abs(piece.explode.dir.x) < 0.3) continue; // fairing halves and their doors swing out
+          piece.mesh.position.addScaledVector(piece.explode.dir, dt * 0.9);
+          piece.mesh.rotateZ(Math.sign(piece.explode.dir.x) * dt * -0.5);
+        }
+      }
+      if (d.t > 4) d.part.group.visible = false;
+    }
+  }
+
+  function onEvent(e) {
+    L.label = EVENT_LABEL[e.type] ?? e.type.toUpperCase();
+    L.labelUntil = L.real + 2.5;
+    switch (e.type) {
+      case "ignition":
+        ignite(0, e.t);
+        sfx.play("whoosh", { rate: 0.5, gain: 1.2 });
+        break;
+      case "liftoff":
+        sfx.play("clunk"); // hold-down release
+        state.shake = 1;
+        break;
+      case "meco":
+        for (const pl of L.plumes) if (pl.stage === e.stage) pl.dead = true;
+        break;
+      case "sep": {
+        const spent = parts.filter((p) => p.stageIndex === e.stage && !L.gone.has(p));
+        for (const part of spent) drop(part);
+        sfx.play("clunk", { rate: 0.8, gain: 0.8 });
+        retarget();
+        break;
+      }
+      case "ignition2": {
+        const next = e.stage ?? Math.max(...[...L.gone].map((p) => p.stageIndex ?? -1)) + 1;
+        ignite(next, e.t);
+        sfx.play("whoosh", { rate: 0.7 });
+        break;
+      }
+      case "fairing": {
+        const fairing = parts.find((p) => p.kind === "fairing" && !L.gone.has(p));
+        if (fairing) drop(fairing, { spread: true });
+        sfx.play("whoosh", { rate: 1.3, gain: 0.6 });
+        retarget();
+        break;
+      }
+      case "seco":
+        for (const pl of L.plumes) pl.dead = true;
+        break;
+    }
+  }
+
+  function launchUpdate(dt) {
+    if (L.done) {
+      if (L.drifting) L.flight.rotateY(dt * 0.15); // slow roll in orbit; the outcome line stays in the HUD
+      updateDebris(dt);
+      return;
+    }
+    L.real += dt;
+    const t = simTime(L.keys, L.real);
+    if (t < 0) {
+      L.onTelemetry({ countdown: Math.ceil(-t) });
+      return;
+    }
+    while (L.next < L.events.length && L.events[L.next].t <= t) onEvent(L.events[L.next++]);
+    const last = L.samples[L.samples.length - 1];
+    const s = sampleAt(L.samples, Math.min(t, last.t));
+
+    // Motion: rise in frame, then the pad drops away under a tracking camera.
+    const alt_u = Math.max(0, s.alt_m) * scale;
+    const rise = Math.min(alt_u, L.riseMax);
+    const below = alt_u - rise;
+    L.flight.position.y = L.pivotY + rise;
+    L.flight.quaternion.setFromAxisAngle(L.tiltAxis, THREE.MathUtils.degToRad(90 - (s.gamma_deg ?? 90)) * L.tiltSign);
+    if (L.pad) {
+      if (below > 300) L.padGone = true; // far downrange: never comes back under a falling stage
+      L.pad.position.y = -below;
+      L.pad.visible = !L.padGone;
+    }
+
+    // Plumes and pad light.
+    const ambient = P0 * Math.exp(-Math.max(0, s.alt_m) / SCALE_HEIGHT_M);
+    const camD = camera.position.distanceTo(controls.target);
+    let padThrottle = 0;
+    for (const pl of L.plumes) {
+      const ramp = THREE.MathUtils.clamp((t - pl.ignite) / 0.25, 0, 1);
+      const thr = pl.dead ? 0 : ramp * (s.stage === pl.stage || t < 1 ? Math.max(0.4, s.throttle ?? 1) : 0);
+      pl.plume.update(dt, { throttle: thr, ambientPressure_Pa: ambient, cameraDistance: camD });
+      if (pl.stage === 0) padThrottle = Math.max(padThrottle, thr);
+    }
+    L.padLight?.update(dt, padThrottle, Math.max(0, s.alt_m));
+    if (padThrottle > 0 && s.alt_m < 300) state.shake = Math.max(state.shake, 0.35 * padThrottle * (1 - s.alt_m / 300));
+    updateDebris(dt);
+
+    // Camera: tracking once the rocket leaves the launch frame.
+    if (below > 0 || L.tracking) {
+      if (!L.tracking) {
+        L.tracking = true;
+        camAnim?.cancel();
+        retarget();
+      }
+      const goal = L.flight.localToWorld(new THREE.Vector3(0, L.trackLocalY, 0));
+      const k = 1 - Math.exp(-dt * 2.5);
+      controls.target.lerp(goal, k);
+      const d = camera.position.distanceTo(controls.target);
+      camDir.copy(camera.position).sub(controls.target).normalize();
+      camera.position.copy(controls.target).addScaledVector(camDir, d + (L.trackDist - d) * k);
+    }
+
+    L.onTelemetry({
+      t,
+      alt_m: s.alt_m,
+      vel_ms: s.vel_ms,
+      g: (s.acc_ms2 ?? 0) / 9.80665,
+      label: L.real < L.labelUntil ? L.label : s.gLimited ? "THROTTLING" : "",
+    });
+
+    if (t >= last.t) finishLaunch(s);
+  }
+
+  function finishLaunch(s) {
+    L.done = true;
+    for (const pl of L.plumes) pl.dead = true;
+    const types = new Set(L.events.map((e) => e.type));
+    const summary = L.sim.summary;
+    const inOrbit = types.has("orbit");
+    L.drifting = inOrbit;
+    const maxAlt = Math.max(...L.samples.map((x) => x.alt_m));
+    if (inOrbit) {
+      controls.autoRotate = true;
+      controls.autoRotateSpeed = 0.35;
+    } else if (maxAlt < 50) {
+      // Pad abort: thrust below weight, the engines shut down and it stays on the pad.
+      state.shake = 0.3;
+    } else {
+      // Suborbital or never reached space: it fell back; fade out where it ends.
+      const fade = { v: 1 };
+      run(fade, {
+        v: 0,
+        duration: D(1200),
+        ease: "inQuad",
+        onUpdate: () => {
+          for (const part of parts) if (!L?.gone.has(part)) setShellOpacity(part, SHELL.built * fade.v);
+        },
+        onComplete: () => {
+          if (L) L.flight.visible = false;
+        },
+      });
+    }
+    state.busy--;
+    state.launch = "done";
+    L.onTelemetry({ final: true, outcome: summary.outcome, inOrbit, summary, alt_m: s.alt_m });
+    changed();
+    L.resolve?.(summary.outcome);
+  }
+
+  // launch(sim, { pad, onTelemetry }) -> Promise<outcome>. The stack must be complete and assembled.
+  function launch(sim, { pad = null, onTelemetry = () => {} } = {}) {
+    if (state.busy || state.exploded || state.launch || !parts.length || !parts.every((p) => p.built) || !sim?.samples?.length) {
+      return Promise.resolve(false);
+    }
+    for (const part of [...highlighted]) clearHighlight(part);
+    for (const part of parts) if (part.dim) {
+      part.dim.v = 1;
+      applyLines(part);
+    }
+    state.busy++;
+    state.launch = "flying";
+    const H = stackHeight();
+    const flight = new THREE.Group();
+    flight.name = "flight";
+    const pivotY = H * 0.45;
+    flight.position.set(0, pivotY, 0);
+    root.add(flight);
+    for (const part of parts) flight.attach(part.group);
+    const fwd = camera.getWorldDirection(new THREE.Vector3());
+    fwd.y = 0;
+    if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
+    fwd.normalize();
+    L = {
+      sim,
+      samples: sim.samples,
+      events: sim.events,
+      keys: playbackKeys(sim.events, sim.samples[sim.samples.length - 1].t),
+      real: -COUNTDOWN_S,
+      next: 0,
+      flight,
+      pad,
+      pivotY,
+      riseMax: H * 0.6,
+      tiltAxis: fwd,
+      tiltSign: 1,
+      plumes: [],
+      padLight: null,
+      debris: [],
+      gone: new Set(),
+      label: "",
+      labelUntil: 0,
+      onTelemetry,
+      tracking: false,
+      done: false,
+    };
+    controls.autoRotate = false;
+    frameSpan(0, H + L.riseMax, stackRadius(), 0.85, { pitch: HERO_PITCH, mode: "stack" });
+    changed();
+    return new Promise((resolve) => (L.resolve = resolve));
+  }
+
+  // Undo a launch (reset / preset switch): plumes and pad light gone, parts back on the pad.
+  function endLaunch() {
+    if (!L) return;
+    for (const pl of L.plumes) pl.plume.dispose();
+    L.padLight?.dispose();
+    if (L.pad) {
+      L.pad.position.y = 0;
+      L.pad.visible = true;
+    }
+    for (const part of parts) {
+      root.attach(part.group);
+      part.group.position.set(0, part.slotY, 0);
+      part.group.quaternion.identity();
+      part.group.visible = true;
+    }
+    root.remove(L.flight);
+    L.resolve?.(false);
+    L = null;
+    state.launch = null;
+  }
+
   // ---------- build all / build up to / reset ----------
   // Pipelined: the next part starts flying the moment the previous part's body has seated, while that part's
   // details are still landing. The camera follows each part and settles on the stack once, at the end.
@@ -876,12 +1274,17 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
 
   // Back to the empty pad (camera untouched).
   function clear() {
+    endLaunch();
     state.gen++;
     cancelAll();
     controls.autoRotate = false;
     state.busy = 0;
     state.exploded = false;
+    state.scrubbing = false;
     state.auto = false;
+    xs.v = 0;
+    xAnim = null;
+    xParts = [];
     state.shake = 0;
     for (const part of [...highlighted]) clearHighlight(part);
     for (const part of [...leaving]) retirePart(part); // still flying out of an interrupted swap
@@ -953,6 +1356,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       if (part.ghost.visible) part.ghost.position.y = part.slotY + Math.sin(t * 2.6) * 0.05;
     }
     if (highlighted.size) updateHighlights(t);
+    if (L) launchUpdate(dt);
     flash.update(dt);
     if (state.shake > 0.002) {
       state.shake *= Math.exp(-dt * 8);
@@ -979,12 +1383,17 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     focus,
     unfocus,
     framedRadius: () => framedR,
+    framing: () => ({ r: framedR, mode: framedMode }),
     build,
     buildUpTo,
     remove,
     explode,
     assemble,
     toggleExplode,
+    scrubStart,
+    scrubBy,
+    scrubEnd,
+    launch,
     swap,
     applyManifest,
     restack,

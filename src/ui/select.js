@@ -1,7 +1,7 @@
 // Click-to-select on the 3D stack, without stealing orbit drags.
 //   createSelector({ canvas, camera, parts, onSelect(part|null), onGhostClick(part), onHover?(hit|null), resolve?(part) })
 //   resolve maps a clicked part to the part to select (main: the closed fairing selects the payload inside).
-//     -> { setParts(parts), select(part), clear(), refresh(), get selected(), dispose() }
+//     -> { setParts(parts), select(part), clear(), refresh(), hit(x, y), get selected(), dispose() }
 // - A click is a pointerup less than 5 px from its pointerdown (same pointer, no second finger in between),
 //   so orbiting never selects.
 // - Targets: visible meshes of built parts, plus the ghost of the next buildable part (choreo sets
@@ -181,6 +181,8 @@ export function createSelector({ canvas, camera, parts, onSelect, onGhostClick, 
   return {
     setParts,
     select,
+    // What is under a client point: { part, ghost } or null (the scrubber starts only on empty space).
+    hit: (x, y) => pick(x, y),
     clear: () => select(null),
     get selected() {
       return selected;

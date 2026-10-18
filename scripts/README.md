@@ -1,11 +1,14 @@
 # scripts
 
-Three checks, all plain Node (>= 22), no dependencies.
+Five node checks (plain Node >= 22, no dependencies) and one browser page for looking at plumes.
 
 | Script | What it checks | Run | Exit |
 |---|---|---|---|
 | `check-physics.mjs` | `src/physics.js` against golden numbers from the team app's TypeScript physics | `node scripts/check-physics.mjs` | 0 match, 1 mismatch |
 | `check-compat.mjs` | `src/compat.js`: every preset all-ok (demo-build: exactly its one "wider than the stage below"), each rule's reason, option ordering | `node scripts/check-compat.mjs` | 0 pass, 1 fail |
+| `check-ascent.mjs` | `src/ascent.js`: every preset flies without NaN, expected outcomes (F9 and Delta IV orbit, Atlas V 401 and demo-build shortfall), Falcon 9 MECO 130–170 s and max g 3–6, edge builds, < 50 ms per run; prints a per-preset flight table | `node scripts/check-ascent.mjs` | 0 pass, 1 fail |
+| `check-plume.mjs` | `src/plume.js` + `src/silhouette.js` (UI4): no NaN; plume width grows as ambient pressure falls, Mach diamonds fade with pressure, length grows with throttle; one plume per bell (twin-chamber engines get two); pad light follows throttle; silhouettes at true scale. Runs over all presets × 4 ambient pressures (sea level, 50 kPa, 10 kPa, vacuum) × 3 throttles (0, 0.5, 1) | `node scripts/check-plume.mjs` | 0 pass, 1 fail |
+| `plume-harness.html` | Visual check of the plume (UI4): a built stack firing one stage with the demo's lights and bloom; not part of the demo. Serve the repo with Vite on a free port (never 5173) and open `/scripts/plume-harness.html?build=falcon-9&p=101325&throttle=1` (sea level) or `&p=0` (vacuum). Params: `build`, `stage`, `p` (Pa), `throttle` (0–1), `alt` (m above the pad), `ty`/`dist` (camera), `twin=1` (adds a silhouette); `window.__ready` is set after ~40 frames | browser | – |
 | `smoke.mjs` | The demo in a real headless Chrome: build, verdict, card, options, explode, preset switch, reset | `node scripts/smoke.mjs --serve "?build=falcon-9" /tmp/smoke/f9` | 0 pass, 1 fail, 2 harness error |
 
 ## check-physics.mjs

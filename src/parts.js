@@ -620,6 +620,28 @@ function nozzleProfile({ L, Re, rt, rc, bellL, convL, chamberL, domeL, vacuum })
   return { bell, chamber, dome, rAtBell, all: [...bell, ...chamber.slice(1), ...dome.slice(1)], yTop: y1 + fl + domeL, y1 };
 }
 
+// Bell exit radius (m) and twin-bell offset: diameter_m is the exit diameter, except "overall" envelopes
+// (bell drawn at a visual 84 % of it) and twins (two bells side by side inside the envelope).
+function bellGeometry(exitD_m, chambers = 1, overall = false) {
+  const twin = chambers > 1;
+  const Re = twin ? exitD_m / 4 / 1.03 : overall ? exitD_m * 0.42 : exitD_m / 2;
+  return { Re, off: twin ? Re * 1.03 : 0, twin };
+}
+
+// Bell exits of an engines part in part-local scene units (exit plane y = 0): [{ engine, x, z, r }], two per
+// engine on twin-chamber engines. Used by plume.js to put one plume under every bell.
+export function bellExits(spec) {
+  const g = spec?.geom;
+  if (spec?.kind !== "engines" || !g) return [];
+  const { Re, off, twin } = bellGeometry(g.exitD_m, g.chambers, g.diameterKind === "overall");
+  const out = [];
+  g.positions.forEach((p, i) => {
+    const ry = p.r > 0 ? -p.a - Math.PI / 2 : 0; // same turn as the engine's pieces (buildEngines)
+    for (const z of twin ? [-off, off] : [0]) out.push({ engine: i, x: (p.x + z * Math.sin(ry)) * S, z: (p.z + z * Math.cos(ry)) * S, r: Re * S });
+  });
+  return out;
+}
+
 // One engine's sub-assemblies, each its own geometry in engine-local metres (exit plane y=0, gimbal top y=L,
 // turbopump on local +X, gas generator on −X, valve block on −Z). Shared by every engine of the same shape.
 //   sea-level: nozzle extension, regen bell, chamber, injector, valve block, turbopump, gas generator (+ turbine
@@ -632,10 +654,7 @@ const kitCache = new Map();
 function engineKit({ exitD_m, L, vacuum, chambers = 1, overall = false }) {
   const key = [exitD_m, L, vacuum, chambers, overall].join("|");
   if (kitCache.has(key)) return kitCache.get(key);
-  const twin = chambers > 1;
-  // diameter_m is the exit diameter, except "overall" envelopes (bell drawn at a visual 84 % of it) and twins.
-  const Re = twin ? exitD_m / 4 / 1.03 : overall ? exitD_m * 0.42 : exitD_m / 2;
-  const off = twin ? Re * 1.03 : 0;
+  const { Re, off, twin } = bellGeometry(exitD_m, chambers, overall);
   // Visual proportions of the engine length (no data): bell share, converging section, chamber, dome.
   const bellL = L * (vacuum ? 0.74 : 0.6);
   const convL = L * (vacuum ? 0.04 : 0.06);
