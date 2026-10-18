@@ -1013,9 +1013,86 @@ export function flightTimeline(build, catalog, opts = {}) {
     totalScreen_s: round(clock.total, 3),
     totalSim_s: round(pieces.at(-1).t1, 3),
     arrival,
+    // for flightSummaryText: the parking orbit (ascent.js) and the highest / fastest point of the ascent
+    parking: inOrbit ? { perigee_km: round(s.perigee_km, 1), apogee_km: Number.isFinite(s.apogee_km) ? round(s.apogee_km, 1) : null, t_sim: round(tEndAscent, 1) } : null,
+    peak: { alt_km: round(Math.max(...AS.map((x) => x.alt_m)) / 1000, 1), speed_ms: Math.round(Math.max(...AS.map((x) => x.vel_ms))) },
+    mission: mission?.id ?? null,
     _clock: clock, // for checks
     est: true,
   };
+}
+
+// What happened, in plain words, from the timeline's own numbers (UI 3: the headline for the HUD, the sentences
+// for the result card and the "assembly:report" bridge event, so the narration tells the real outcome).
+//   flightSummaryText(timeline) -> { headline, sentences: [2-3 short sentences] }
+// Every sentence that quotes a modelled number ends "(est.)".
+const BODY_NAME = { earth: "Earth", moon: "the Moon", mars: "Mars" };
+const MISSION_NAME = { leo: "Low Earth orbit", gto: "Geostationary transfer orbit", "earth-escape": "Earth escape", "moon-transfer": "Moon transfer", "lunar-orbit": "Lunar orbit", "mars-transfer": "Mars transfer" };
+export const GEO_ALT_KM = Math.round(GEO_R - R_EQ);
+const tPlus = (t) => `T+${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+const est = (text) => `${text} (est.).`;
+export function flightSummaryText(f) {
+  const e = f.endState;
+  const at = (type) => f.events?.find((x) => x.type === type);
+  if (f.blocked || e.type === "aborted") {
+    return f.blocked
+      ? { headline: e.line, sentences: [`The design check stopped the launch: ${f.reason}.`, "Nothing left the pad."] }
+      : { headline: "Pad abort", sentences: [est("The engines lit but their thrust never beat the rocket's weight"), "The hold-downs stayed shut and nothing left the pad."] };
+  }
+  const out = [];
+  const p = f.parking;
+  if (p) out.push(est(`Reached a ${num(p.perigee_km)} × ${p.apogee_km == null ? "escape" : num(p.apogee_km)} km parking orbit at ${tPlus(p.t_sim)}`));
+  const dep = at("departure-burn");
+  const dry = at("propellant-depleted");
+  const apo = at("apogee");
+  const days = (name) => {
+    const g = f.segments.find((x) => x.name === name);
+    return g ? (g.t1_sim - g.t0_sim) / 86400 : null;
+  };
+  const mission = MISSION_NAME[f.mission] ?? "The mission";
+  if (e.type === "lost") {
+    const i = e.impact;
+    return {
+      headline: "Lost · never reached orbit",
+      sentences: [
+        est(`It climbed to ${num(f.peak.alt_km)} km at up to ${num(f.peak.speed_ms)} m/s, short of orbital speed`),
+        est(`It fell back through the atmosphere and came down ${i.surface === "sea" ? `${num(i.downrange_km)} km downrange` : "near the pad"}`),
+      ],
+    };
+  }
+  if (e.type === "transfer-failed") {
+    const short = num(e.shortBy_ms);
+    if (at("moon-flyby")) {
+      out.push(est(`The departure burn added ${num(dep.dv_ms)} m/s, but ${short} m/s short of what lunar orbit insertion needs`));
+      out.push(est(`It crossed the Moon's orbit ${num(at("moon-flyby").distance_km)} km from the Moon and flew on past`));
+    } else if (e.apogee_km == null) {
+      out.push(est(`The departure burn ran dry ${short} m/s short; it escaped Earth too slowly to reach Mars and is adrift`));
+    } else {
+      const goal = f.mission === "gto" ? `below the ${num(GEO_ALT_KM)} km needed` : f.kind === "moon" ? (e.apogee_km + R.earth < MOON_DIST ? `short of the Moon, ${num(MOON_DIST)} km away` : "but the Moon was not there") : f.kind === "mars" ? "far short of an escape from Earth" : "short of an escape from Earth";
+      out.push(est(`The departure burn ran dry ${short} m/s short; apogee ${num(e.apogee_km)} km, ${goal}; the vehicle fell back toward Earth`));
+    }
+    return { headline: `Transfer failed · short by ${short} m/s`, sentences: out.slice(0, 3) };
+  }
+  if (e.type === "landed" && e.body === "earth") {
+    const L = e.landing;
+    if (f.mission === "gto") out.push(est(`The departure burn added ${num(dep.dv_ms)} m/s; apogee ${num(apo.apogee_km)} km`));
+    else if (f.mission === "earth-escape") out.push(est(`The spacecraft left on its own ${num(at("spacecraft-departure").dv_ms)} m/s escape burn`));
+    else if (at("payload-release")) out.push(est(`The payload was released at ${tPlus(at("payload-release").t_sim)}`));
+    const where = L.site === "pad" ? "back on the pad" : `on the drone ship ${num(L.downrange_km)} km downrange`;
+    out.push(est(`The stage returned and landed ${where} at ${L.touchdown_ms.toFixed(1)} m/s`));
+    return { headline: `${mission} reached · landed ${L.site === "pad" ? "on the pad" : "on the drone ship"}`, sentences: out };
+  }
+  // Moon / Mars
+  const coast = days("transfer");
+  out.push(est(`The departure burn added ${num(dep.dv_ms)} m/s; the coast to ${BODY_NAME[f.kind]} took ${coast < 2 ? `${num(coast * 24)} hours` : `${coast.toFixed(1)} days`}${f.kind === "mars" ? " on a shortened, not-to-scale path" : ""}`));
+  if (e.type === "in-orbit-of") {
+    out.push(est(`It braked into a ${f.kind === "moon" ? num(LUNAR_ORBIT_ALT) : num(MARS_ORBIT_ALT)} km orbit of ${BODY_NAME[f.kind]} with its own engine`));
+    return { headline: `In orbit of ${BODY_NAME[f.kind]}`, sentences: out };
+  }
+  const td = at("touchdown");
+  const chute = at("chute-open");
+  out.push(est(f.kind === "mars" && chute ? `It came through entry, opened its parachute at ${num(chute.vel_ms)} m/s and touched down at ${num(td.vel_ms)} m/s` : `It descended from a ${num(LUNAR_ORBIT_ALT)} km orbit and touched down at ${num(td.vel_ms)} m/s`));
+  return { headline: `Landed on ${BODY_NAME[f.kind]}`, sentences: out };
 }
 
 // A part's 2 s drop-away at its detach time. Body frame: +y = the vehicle's nose axis, +x = the vehicle's right

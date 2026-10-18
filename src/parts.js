@@ -2774,7 +2774,9 @@ export function createPart(spec, mats) {
     delete p.ax;
     delete p.sym;
   }
-  return { ...spec, group, pieces, built: false, busy: false };
+  const part = { ...spec, group, pieces, built: false, busy: false };
+  registerForDetail(part);
+  return part;
 }
 
 // Pieces with an articulated deploy (see the header for the hinge formula), in deploy order.
@@ -2930,6 +2932,66 @@ export function setShellOpacity(part, value) {
     for (const e of [p.mesh.userData.edges, p.mesh.userData.edgesFine]) if (e) e.material.opacity = clamp((e.userData.base * value) / SHELL_OPACITY, 0, 1);
   }
 }
+
+// ---------- detail level (frame-time guard, ?lite=1) ----------
+
+// setDetailLevel(level, target?): 2 = everything; 1 = instanced detail (rivets, bolts, clamps, straps) hidden
+// and edge lines only on shells; 0 = no instanced detail, no lines, and the smallest 40 % of each part's
+// "detail"-kind pieces (by bounding radius) not drawn. Hiding moves an object to HIDDEN_LAYER, which no camera,
+// shadow camera or default Raycaster sees: nothing recompiles, `visible` stays the choreography's (build
+// animations and the look switch keep working), hidden pieces keep animating and are never picked, and the
+// original layers come back exactly on the way up. target: a part, an array of parts, or none for every live
+// part (createPart registers them and applies the current level to new parts). Returns the level set.
+const HIDDEN_LAYER = 31;
+let detailLevel = 2;
+const liveParts = new Set(); // WeakRef<part>
+function registerForDetail(part) {
+  // the smallest 40 % of the detail-kind pieces, by bounding radius (scene units)
+  const small = part.pieces
+    .filter((p) => p.kind === "detail")
+    .map((p) => {
+      const g = p.mesh.geometry;
+      if (!g.boundingSphere) g.computeBoundingSphere();
+      return [p, g.boundingSphere.radius];
+    })
+    .sort((a, b) => a[1] - b[1]);
+  part.lodSmall = new Set(small.slice(0, Math.floor(small.length * 0.4)).map(([p]) => p));
+  if (typeof WeakRef !== "undefined") liveParts.add(new WeakRef(part));
+  if (detailLevel !== 2) applyDetailLevel(part, detailLevel);
+}
+function hideOn(o, hide) {
+  if (!o) return;
+  const u = (o.userData.lod ??= { mask: o.layers.mask });
+  o.layers.mask = hide ? 1 << HIDDEN_LAYER : u.mask;
+}
+function applyDetailLevel(part, level) {
+  for (const p of part.pieces) {
+    const m = p.mesh;
+    hideOn(m, level === 0 && part.lodSmall?.has(p));
+    const shell = m.userData.kind === "shell";
+    for (const e of [m.userData.edges, m.userData.edgesFine]) hideOn(e, level === 0 || (level === 1 && !shell));
+    for (const d of m.userData.details ?? []) hideOn(d, level < 2);
+  }
+  part.detailLevel = level;
+}
+export function setDetailLevel(level = 2, target = null) {
+  const lv = Number.isFinite(+level) ? clamp(Math.round(+level), 0, 2) : 2;
+  let parts;
+  if (target) parts = [].concat(target);
+  else {
+    detailLevel = lv;
+    parts = [];
+    for (const ref of liveParts) {
+      const part = ref.deref();
+      if (part) parts.push(part);
+      else liveParts.delete(ref);
+    }
+  }
+  for (const part of parts) if (part?.pieces) applyDetailLevel(part, lv);
+  return lv;
+}
+export const getDetailLevel = () => detailLevel;
+export const DETAIL_HIDDEN_LAYER = HIDDEN_LAYER;
 
 // ---------- environment ----------
 

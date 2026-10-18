@@ -1,4 +1,4 @@
-// Check for src/flight.js: every preset plus one build per ending (Moon orbiter, Mars lander, Mars orbiter, LEO and
+// Check for src/flight.js (and its flightSummaryText, once per ending): every preset plus one build per ending (Moon orbiter, Mars lander, Mars orbiter, LEO and
 // GTO flights that bring the rocket home to the pad or a drone ship (round 20), Earth escape, a fall back, a single stage that never makes orbit, a lunar-orbit build short of insertion, a Mars
 // build short of Mars, a pad hold-down, a blocked build) runs; the ending matches arrival.js and the build's
 // consequence (lost: impact on the ground or sea; transfer-failed: the burn runs dry and the orbit falls back below
@@ -23,7 +23,7 @@ registerHooks({
 });
 const { catalog, presetIds, getPreset, presetToBuild } = await import("../src/data/catalog.js");
 const { simulateAscent } = await import("../src/ascent.js");
-const { flightTimeline, surfaceFrame, altitude } = await import("../src/flight.js");
+const { flightTimeline, flightSummaryText, surfaceFrame, altitude, GEO_ALT_KM } = await import("../src/flight.js");
 
 const failures = [];
 const expect = (ok, msg) => {
@@ -51,6 +51,33 @@ const GEO_R = Math.cbrt(398600.4418 * ((23.9345 * 3600) / (2 * Math.PI)) ** 2);
 const TOTAL = { earth: 35, moon: 55, mars: 65 };
 const FPS = 60;
 const SUB = 8;
+
+// flightSummaryText: a headline and 2-3 plain sentences built from the timeline's own numbers; every sentence that
+// quotes a number ends "(est.)" (the blocked case quotes the verdict, not a model value).
+const n0 = (v) => Math.round(v).toLocaleString("en-US");
+function checkSummary(id, f) {
+  const t = flightSummaryText(f);
+  const all = [t.headline, ...t.sentences].join(" | ");
+  expect(typeof t.headline === "string" && t.headline.length > 0 && t.headline.length <= 70, `${id}: summary headline "${t.headline}"`);
+  expect(Array.isArray(t.sentences) && t.sentences.length >= 2 && t.sentences.length <= 3, `${id}: ${t.sentences?.length} summary sentences`);
+  expect(!/NaN|undefined|Infinity|null|\[object/.test(all), `${id}: summary has a broken value: ${all}`);
+  for (const x of t.sentences) {
+    expect(x.length <= 160 && /\.$/.test(x), `${id}: summary sentence "${x}"`);
+    if (!f.blocked && /\d/.test(x)) expect(/\(est\.\)\.$/.test(x), `${id}: a number without (est.): "${x}"`);
+  }
+  const e = f.endState;
+  const has = (str) => expect(all.includes(str), `${id}: summary lacks "${str}": ${all}`);
+  if (e.type === "transfer-failed") {
+    has(n0(e.shortBy_ms));
+    if (e.apogee_km != null && !f.events.some((x) => x.type === "moon-flyby")) has(n0(e.apogee_km));
+    if (f.mission === "gto") has(n0(GEO_ALT_KM));
+  }
+  if (e.type === "landed" && e.body === "earth") has(e.landing.site === "pad" ? "pad" : `${n0(e.landing.downrange_km)} km downrange`);
+  if (e.type === "landed" && e.body !== "earth") has(e.body === "moon" ? "the Moon" : "Mars");
+  if (e.type === "lost") has(`${n0(e.impact.downrange_km)} km downrange`);
+  if (e.type === "aborted") expect(/Pad abort/.test(t.headline), `${id}: aborted headline "${t.headline}"`);
+  return t;
+}
 
 // Ocean or land under a landing: the app's own Earth topography map (src/assets/planets/earth_bump.jpg, 0 over
 // the oceans; read the way world.js isOceanAt reads it: u = 0 at 180 W, row 0 north, red < 0.02). Node has no
@@ -282,9 +309,11 @@ function check(id, f, want) {
   expect(Math.abs(altitude("earth", s0.pos_km)) < 1e-3, `${id}: pad altitude ${altitude("earth", s0.pos_km)}`);
   expect(Math.abs(s0.yaw_deg - 90) < 1 && s0.pitch_deg < 1, `${id}: on the pad pitch ${s0.pitch_deg} yaw ${s0.yaw_deg} (want up, heading east)`);
 
+  const summary = checkSummary(id, f);
   const segs = f.segments.map((s) => `${s.name} ${(s.t1_screen - s.t0_screen).toFixed(1)}`).join(", ");
   console.log(`${worst <= 1 && maxRatio <= 1.12 ? "ok  " : "FAIL"}  ${id}: ${f.endState.type} (${f.kind}), ${f.totalScreen_s.toFixed(1)} s screen / ${(f.totalSim_s / 3600).toFixed(1)} h sim; ${segs}`);
   console.log(`      max jump ${(worst * 1000).toFixed(0)} m at ${worstAt}; max rate change ${((maxRatio - 1) * 100).toFixed(1)} %/frame; sampleAt ${(us / (n + 1)).toFixed(0)} µs; "${f.endState.line}"`);
+  console.log(`      summary: ${summary.headline} | ${summary.sentences.join(" ")}`);
 }
 
 for (const b of BUILDS) {
@@ -304,6 +333,7 @@ for (const b of BUILDS) {
   build.stages = build.stages.map((s, i) => (i === 0 ? { ...s, engineId: "merlin-1d-vac" } : s));
   const f = flightTimeline(build, catalog);
   expect(f.blocked === true && f.endState.type === "aborted" && /^Pad abort · /.test(f.endState.line), `blocked build: ${JSON.stringify(f).slice(0, 200)}`);
+  checkSummary("blocked build", f);
   console.log(`ok    blocked build: ${f.endState.type}, "${f.endState.line}"`);
 }
 // held down on the pad (flown anyway): a 3 s ascent piece, impact
@@ -315,6 +345,7 @@ for (const b of BUILDS) {
   expect(!f.blocked && f.endState.type === "aborted" && f.segments.length === 1, `hold-down: ${f.endState?.type}, ${f.segments?.length} segments`);
   const s = f.sampleAt(f.totalScreen_s);
   expect(finite(s.pos_eci_km) && s.alt_km < 0.01, `hold-down: ends at ${s.alt_km} km`);
+  checkSummary("held down", f);
   console.log(`ok    held down (flown anyway): ${f.endState.type}, ${f.totalScreen_s} s; "${f.endState.line}"`);
 }
 // opts.totalScreen_s scales the shares

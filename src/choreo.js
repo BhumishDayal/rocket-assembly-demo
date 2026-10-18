@@ -24,7 +24,7 @@ import * as THREE from "three";
 import { animate, spring } from "animejs";
 import { createHologramMaterial } from "./fx/hologram.js";
 import { createBoltFlash } from "./fx/flash.js";
-import { COLORS, LOOK, applyDeploy, deployables, padLayout, setShellOpacity as setShell } from "./parts.js";
+import { COLORS, LOOK, applyDeploy, deployables, landerOf, padLayout, setShellOpacity as setShell } from "./parts.js";
 import { createVents, createDeluge, createTrenchJet, createSteamCloud, createCondensationHalo, createColdGasPuffs, createIgnitionFlash, createPlasmaGlow } from "./fx/launchfx.js";
 import { attachPlumes, createPadLight, createPlume, P0 } from "./plume.js";
 import { createPlanet, createSurfacePatch, createDustPuff, createSkyDome } from "./planet.js";
@@ -1080,6 +1080,12 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       lo = Math.min(lo, part.group.position.y);
       hi = Math.max(hi, part.group.position.y + part.height);
     }
+    if (L.lander) {
+      const y = L.lander.lm.group.position.y;
+      lo = Math.min(lo, y + L.lander.lm.feetY_u);
+      hi = Math.max(hi, y + (L.lander.lm.height_u ?? 1));
+    }
+    if (!Number.isFinite(lo)) return { lo: 0, hi: 1 };
     return { lo, hi };
   }
   function retarget() {
@@ -1258,7 +1264,8 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         break;
       }
       case "touchdown": {
-        const payload = parts.find((p) => p.kind === "payload");
+        L.lander?.lm.setProbesVisible?.(false); // the contact probes bend on touchdown
+        const payload = L.lander ? { group: L.lander.lm.group, radius: L.lander.lm.footprint_u ?? 1 } : parts.find((p) => p.kind === "payload");
         if (payload) {
           L.dust ??= createDustPuff();
           if (!L.dust.object3d.parent) scene.add(L.dust.object3d);
@@ -1547,7 +1554,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     // The vehicle's base at the origin: the bottom of what is still flying (after each drop the remaining stack's
     // bottom is the point flight.js tracks), with the flight group's pivot up the axis from it.
     // (Eased over ~0.7 s so a drop moves the frame smoothly instead of by a stage's height at once.)
-    const baseY = Math.min(...parts.filter((p) => !L.gone.has(p)).map((p) => p.slotY), Infinity);
+    const baseY = L.lander ? L.lander.baseY : Math.min(...parts.filter((p) => !L.gone.has(p)).map((p) => p.slotY), Infinity);
     const goal = Number.isFinite(baseY) ? baseY : 0;
     L.baseY = L.baseY == null ? goal : L.baseY + (goal - L.baseY) * (1 - Math.exp(-(L.dtFrame ?? 0.016) / 0.25));
     L.flight.position.copy(fA).multiplyScalar(L.pivotY - L.baseY);
@@ -1555,8 +1562,8 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       fP.copy(L.P0).sub(L.V).multiplyScalar(NEAR_PER_KM).applyQuaternion(L.QnInv);
       L.pad.position.copy(fP);
       L.pad.quaternion.copy(L.QnInv);
-      L.pad.visible = fP.length() < 6000 && (!L.padGone || L.padHome); // shown within ~24 km (and when it is home)
-      if (fP.length() > 6000) L.padGone = true;
+      // Never hidden: the complex carries flood lights, and hiding them changes the scene's light count (every
+      // painted material recompiles, a ~130 ms freeze at ~20 km). Past ~24 km it is beyond the camera's far plane.
     }
     if (L.kind === "moon" || L.kind === "mars") world.setBodyECI(L.kind, L.kind === "moon" ? L.F.bodyPosAt("moon", smp.t_sim) : smp.dest_eci_km ?? L.F.bodyPosAt("mars", smp.t_sim));
     if (L.ground) {
@@ -1656,9 +1663,11 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     }
     if (smp.segment !== "ascent") prepareLanding();
     placeFlight(smp);
+    if (!L.lander && !L.landerChecked && (smp.segment === "braking" || smp.segment === "entry")) separateLander();
     if (!L.legsOut && (smp.segment === "approach" || smp.segment === "vertical" || smp.segment === "landing")) {
       L.legsOut = true; // the landing legs swing out for the last part of the descent
-      for (const p of parts.filter((q) => !L.gone.has(q))) if (deployables(p).length) deploy(p, { gap: 300 });
+      if (L.lander) deployLanderLegs(L.lander.lm);
+      else for (const p of parts.filter((q) => !L.gone.has(q))) if (deployables(p).length) deploy(p, { gap: 300 });
     }
     // Plumes on the sample's stage and throttle (the spacecraft's own engine once only it flies); a burn after
     // SECO (departure, deorbit, entry, landing) relights the stage's engines.
@@ -1696,6 +1705,38 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       });
     }
     if (tS >= F.totalScreen_s && !L.done) finishFlight();
+  }
+  // Apollo-style payloads (UI4's landerOf): at the start of the descent only the lander goes down; the rest of
+  // the spacecraft (the CSM) stays in orbit, drifting off ahead. The lander's copy takes the payload's place in
+  // the flight group, its feet become the vehicle's base, its engine the descent plume. Payloads without a
+  // separate lander (Nova-C) land whole, as before.
+  function separateLander() {
+    L.landerChecked = true;
+    const payload = parts.find((p) => p.kind === "payload" && !L.gone.has(p));
+    const lm = payload ? landerOf(payload) : null;
+    if (!lm) return;
+    payload.group.add(lm.group);
+    lm.group.position.copy(lm.restPose.position);
+    lm.group.quaternion.copy(lm.restPose.quaternion);
+    lm.setPartLanderVisible(false);
+    L.flight.attach(lm.group);
+    lm.group.traverse((o) => o.isMesh && (o.castShadow = true));
+    // In the stack's slot coordinates (flight-local y + the pivot), where its feet will be once the legs are out.
+    const baseY = lm.group.position.y + L.pivotY + lm.feetY_u;
+    drop(payload, { forward: true }); // the CSM stays up in orbit
+    L.lander = { lm, baseY };
+    if (L.landerPlume) {
+      lm.group.add(L.landerPlume.object3d);
+      L.landerPlume.object3d.position.set(0, 0, 0);
+    }
+    retarget();
+    L.chase.sep0 = L.real;
+  }
+  function deployLanderLegs(lm) {
+    lm.deployables.forEach((leg, i) => {
+      const k = { v: 0 };
+      run(k, { v: 1, delay: D(i * 60), ease: spring({ stiffness: 55, damping: 9 }), onUpdate: () => applyDeploy(leg, k.v) });
+    });
   }
   function finishFlight() {
     L.done = true;
@@ -1745,8 +1786,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     L.flight.quaternion.setFromAxisAngle(L.tiltAxis, THREE.MathUtils.degToRad(90 - (s.gamma_deg ?? 90)) * L.tiltSign);
     if (L.pad) {
       if (below > 5000) L.padGone = true; // ~20 km down (the look-down shot sees it shrink): never comes back
-      L.pad.position.y = -below;
-      L.pad.visible = !L.padGone;
+      L.pad.position.y = -below; // (kept visible: see placeFlight; far away it is past the far plane)
     }
 
     // Plumes and pad light.
@@ -2523,6 +2563,14 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     controls.maxPolarAngle = L.maxPolar0;
     controls.maxDistance = L.maxDist0;
     state.keyDir = null;
+    if (L.lander) {
+      const lm = L.lander.lm;
+      lm.setPartLanderVisible(true);
+      lm.group.removeFromParent();
+      lm.group.traverse((o) => {
+        for (const m of new Set([].concat(o.material ?? [], Object.values(o.userData.looks ?? {})))) m.dispose(); // its geometry is the part's
+      });
+    }
     L.ground?.dispose?.();
     L.ground?.object3d.removeFromParent();
     if (L.cut) state.cut = 0;
