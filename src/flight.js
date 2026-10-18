@@ -31,7 +31,9 @@
 // - Earth missions end with the stage landing back on Earth (round 20): LEO releases the payload and times the
 //   de-orbit to touch down on the pad; Earth escape does the same, the spacecraft leaving on its own escape burn
 //   (an event, not flown); GTO coasts the stage out to the transfer orbit's apogee, de-orbits there and comes
-//   down on a drone ship. See returnPlan / landHome.
+//   down on a drone ship 600 km down the launch track, its departure timed for that (the parking-orbit coast
+//   is chosen so; "return timed to the recovery zone" in landing.modelled). landing carries lat_deg / lon_deg and
+//   downrange_km from the Cape. See returnPlan / landHome.
 // - Moon: the coast under Earth's gravity (RK4) out to the Moon's mean distance; orbit insertion (impulsive) into a
 //   circular 15 km orbit; a quarter orbit; arrival.js's powered descent; touchdown ("landed"), or "in-orbit-of"
 //   for orbiters. The Moon is placed where the coast reaches it and moves on a circle at its revolution period.
@@ -80,6 +82,7 @@ const ESCAPE_SHOW_KM = 1e5; // escape coast shown out to this distance (model ch
 const DEORBIT_PERIGEE_ALT = 50; // km: the de-orbit burn aims the perigee this low (model choice)
 const ENTRY_INTERFACE_ALT = 120; // km: where the Kepler coast hands over to the booster model (model choice)
 const MODELLED_DEORBIT = 0.1; // km/s: the retro assumed when no propellant is left (Head 1's brief, est.)
+const DRONE_SHIP_KM = 600; // km down the launch track from the Cape: where a GTO stage's return is timed to (model choice)
 const PAYLOAD_OFF = [0.05, 1, 0]; // drop-away of a payload leaving a stage that comes home: forward off the nose
 const FLYBY_ALT = 500; // km: a lunar-orbit build short of insertion crosses the Moon's orbit this far off (model choice)
 // GEO from the Earth fact sheet: "Sidereal rotation period (hrs) 23.9345", "Equatorial radius (km) 6378.137"
@@ -132,6 +135,8 @@ export function surfaceFrame(body, pos_km) {
   return { up, east, north: cross(up, east) };
 }
 export const altitude = (body, pos_km) => len(pos_km) - (R[body] ?? R.earth);
+// Latitude / longitude of an Earth-centred position (no rotation: the frame is Earth-fixed at launch).
+const latLon = (p) => ({ lat_deg: round((Math.asin(p[2] / len(p)) * 180) / Math.PI, 3), lon_deg: round((Math.atan2(p[1], p[0]) * 180) / Math.PI, 3) });
 
 // ---------- the flight plane ----------
 const U_SITE = [Math.cos(SITE.lat * rad) * Math.cos(SITE.lon * rad), Math.cos(SITE.lat * rad) * Math.sin(SITE.lon * rad), Math.sin(SITE.lat * rad)];
@@ -422,7 +427,7 @@ export function flightTimeline(build, catalog, opts = {}) {
   const lastA = AS.at(-1);
   // where a lost flight comes down: within 1 km of the pad "ground", else "sea" (the Cape launches east over the
   // Atlantic; there is no coastline data, so a far impact is called sea too: a default for the director, est.)
-  const impact = { downrange_km: round(lastA.downrange_m / 1000, 1), surface: lastA.downrange_m >= 1000 ? "sea" : "ground" };
+  const impact = { downrange_km: round(lastA.downrange_m / 1000, 1), ...latLon(rHat(lastA.downrange_m / 1000 / R.earth)), surface: lastA.downrange_m >= 1000 ? "sea" : "ground" };
   pieces.push({ name: "ascent", body: "earth", t0: 0, t1: tEndAscent, fn: ascentState });
   const liftoff = AE.find((e) => e.type === "liftoff");
   win(0, (liftoff?.t ?? 0) + 3);
@@ -575,17 +580,19 @@ export function flightTimeline(build, catalog, opts = {}) {
         if (type === "entry-burn" || type === "landing-burn") win(tE + e.t - 0.5, tE + e.t + 0.5);
       }
       win(tDown - 3, tDown);
-      const thPad = wrap(thE + ret.landingX_m / 1000 / R.earth);
+      const thPad = wrap(thE + ret.landingX_m / 1000 / R.earth); // the touchdown's angle from the Cape, along the track
       const legs = Boolean(catalog.visuals?.tanks?.[stg?.tankId]?.features?.includes("landing-legs"));
+      const touch = posAt(tDown).pos;
       const landing = {
         site,
-        downrange_km: round(site === "pad" ? Math.abs(thPad) * R.earth : ret.landingX_m / 1000, 1),
-        pos_eci_km: r3(posAt(tDown).pos),
+        downrange_km: round(Math.abs(thPad) * R.earth, 1), // from the Cape, along the launch track
+        ...latLon(touch),
+        pos_eci_km: r3(touch),
         touchdown_ms: round(ret.touchdownSpeed_ms, 2),
         legs,
         touchdown: legs ? "legs" : "propulsive",
         deorbit_ms: Math.round(plan.dvB * 1000),
-        modelled: [...(plan.modelled ? ["de-orbit delta-v"] : []), ...ret.modelled],
+        modelled: ["return timed to the recovery zone", ...(plan.modelled ? ["de-orbit delta-v"] : []), ...ret.modelled],
       };
       endState = end("landed", "Landed back on Earth · est.", { body: "earth", missionLine, landing });
       ev("end", tDown, { body: "earth" });
@@ -615,17 +622,35 @@ export function flightTimeline(build, catalog, opts = {}) {
     } else {
       // a third of a parking orbit, then the upper stage's departure burn (prograde, its own thrust and mass flow)
       // until it has given the mission's departure delta-v or its propellant is gone
-      const tDep = tEndAscent + period / 3;
-      const thDep = thAt(tDep);
-      const pDep = mul(rHat(thDep), r0);
-      const vDep = mul(tHat(thDep), vc);
-      pieces.push({ name: "parking-orbit", body: "earth", t0: tEndAscent, t1: tDep, fn: orbitState(Infinity), coast: true });
       const remaining = s.remainingDeltaV_ms / 1000;
       const depleted = remaining + 1e-6 < departure;
       const burnDv = Math.min(remaining, departure);
       const mCut = ve > 0 ? fullMass * Math.exp(-(burnDv * 1000) / ve) : fullMass;
       const burnT = mdot > 0 ? (fullMass - mCut) / mdot : 0;
-      const burn = burnT >= 1 ? burnArc(pDep, vDep, fullMass, F, mdot, burnT).map((x) => ({ ...x, t: x.t + tDep })) : [{ t: tDep, p: pDep, v: vDep, m: fullMass }];
+      const burnFrom = (thDep, t0) => {
+        const p0 = mul(rHat(thDep), r0);
+        const v0 = mul(tHat(thDep), vc);
+        return burnT >= 1 ? burnArc(p0, v0, fullMass, F, mdot, burnT).map((x) => ({ ...x, t: x.t + t0 })) : [{ t: t0, p: p0, v: v0, m: fullMass }];
+      };
+      const toApogee = (b) => coast(b.at(-1).p, b.at(-1).v, MU.earth, (p, v, t) => t > 60 && dot(p, v) < 0, 30 * 86400).map((x) => ({ ...x, t: x.t + b.at(-1).t }));
+      const homeMass = mCut - (payload?.mass_kg ?? 0);
+      const homeProp = propSeco - (fullMass - mCut);
+      // a third of a parking orbit; a GTO stage that comes home waits instead for the departure point that puts
+      // its touchdown on the drone ship 600 km down the launch track (the return timed to the recovery zone, est.;
+      // the angle from departure to touchdown is the same wherever the departure is, so one trial run finds it)
+      let thDep = thAt(tEndAscent + period / 3);
+      if (arrival.success && mission.id === "gto") {
+        const b = burnFrom(0, 0);
+        const a = toApogee(b);
+        const plan = returnPlan(0, a.at(-1).p, a.at(-1).v, homeMass, homeProp);
+        const lead = ((planeAngle(a.at(-1).p) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI) + plan.thLand;
+        const thMin = thAt(tEndAscent + period / 10);
+        const target = DRONE_SHIP_KM / R.earth - lead;
+        thDep = target + 2 * Math.PI * Math.ceil((thMin - target) / (2 * Math.PI));
+      }
+      const tDep = tEndAscent + (thDep - th0) / om;
+      pieces.push({ name: "parking-orbit", body: "earth", t0: tEndAscent, t1: tDep, fn: orbitState(Infinity), coast: true });
+      const burn = burnFrom(thDep, tDep);
       const tCut = burn.at(-1).t;
       const pCut = burn.at(-1).p;
       const vCut = burn.at(-1).v;
@@ -690,10 +715,10 @@ export function flightTimeline(build, catalog, opts = {}) {
           // GTO: the stage coasts out to the transfer orbit's apogee with the payload gone, de-orbits there and
           // comes down where its arc ends (a drone ship)
           shareKey = "gto";
-          const arc = arcFrom((p, v, t) => t > 60 && dot(p, v) < 0, el.bound ? el.period : 30 * 86400);
+          const arc = toApogee(burn);
           pieces.push({ name: "transfer", body: "space", t0: tCut, t1: arc.at(-1).t, fn: coastPiece("transfer", arc), coast: true });
           ev("apogee", arc.at(-1).t, { body: "space", apogee_km: orbitOut.apogee_km });
-          const plan = returnPlan(arc.at(-1).t, arc.at(-1).p, arc.at(-1).v, mCut - (payload?.mass_kg ?? 0), propSeco - (fullMass - mCut));
+          const plan = returnPlan(arc.at(-1).t, arc.at(-1).p, arc.at(-1).v, homeMass, homeProp);
           landHome(plan, "drone-ship", `${arrival.lines.at(-1)} Apogee ${num(orbitOut.apogee_km)} km (est.).`);
         } else {
           const geo = mission.id === "gto" && el.apogee < GEO_R ? ` (GEO is ${num(GEO_R - R_EQ)} km)` : "";
@@ -702,7 +727,7 @@ export function flightTimeline(build, catalog, opts = {}) {
       } else if (arrival.body === "moon") {
         if (!arrival.success && depleted) {
           // the Moon stays where a full departure burn would have met it
-          const nominal = coast(pDep, mul(tHat(thDep), vc + departure), MU.earth, (p) => len(p) >= rArr, 30 * 86400);
+          const nominal = coast(mul(rHat(thDep), r0), mul(tHat(thDep), vc + departure), MU.earth, (p) => len(p) >= rArr, 30 * 86400);
           placeMoon(planeAngle(nominal.at(-1).p), tDep + nominal.at(-1).t);
           const tail = el.apogee < MOON_DIST ? "falls back toward Earth" : "misses the Moon";
           fail(`Transfer failed · short by ${num(shortBy)} m/s · ${apo} · ${tail} (est.)`, failedCoast(2 * MOON_DIST));

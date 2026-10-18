@@ -9,7 +9,10 @@
 // Prints one line per build.
 // Run: node scripts/check-flight.mjs   (no deps; exits 1 on any failure)
 import { registerHooks } from "node:module";
-import { cpus, loadavg } from "node:os";
+import { cpus, loadavg, tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
+import { readFileSync, mkdtempSync } from "node:fs";
+import { join } from "node:path";
 
 // catalog.js imports JSON the Vite way (no import attributes); teach node to load those as JSON.
 registerHooks({
@@ -48,6 +51,36 @@ const GEO_R = Math.cbrt(398600.4418 * ((23.9345 * 3600) / (2 * Math.PI)) ** 2);
 const TOTAL = { earth: 35, moon: 55, mars: 65 };
 const FPS = 60;
 const SUB = 8;
+
+// Ocean or land under a landing: the app's own Earth topography map (src/assets/planets/earth_bump.jpg, 0 over
+// the oceans; read the way world.js isOceanAt reads it: u = 0 at 180 W, row 0 north, red < 0.02). Node has no
+// JPEG decoder, so macOS's built-in sips converts it to BMP; elsewhere the ocean test is skipped (reported).
+const oceanAt = (() => {
+  try {
+    const out = join(mkdtempSync(join(tmpdir(), "check-flight-")), "earth_bump.bmp");
+    execFileSync("sips", ["-s", "format", "bmp", new URL("../src/assets/planets/earth_bump.jpg", import.meta.url).pathname, "--out", out], { stdio: "ignore" });
+    const b = readFileSync(out);
+    const off = b.readUInt32LE(10);
+    const W = b.readInt32LE(18);
+    const Hs = b.readInt32LE(22);
+    const bytes = b.readUInt16LE(28) / 8;
+    const H = Math.abs(Hs);
+    const row = Math.ceil((W * bytes) / 4) * 4;
+    return (lat, lon) => {
+      const x = Math.min(W - 1, Math.floor(((lon + 180) / 360) * W));
+      const y = Math.min(H - 1, Math.floor(((90 - lat) / 180) * H));
+      return b[off + (Hs < 0 ? y : H - 1 - y) * row + x * bytes + 2] / 255 < 0.02; // BMP stores BGR
+    };
+  } catch {
+    return null;
+  }
+})();
+const CAPE = [28.5, -80.6];
+const greatCircle_km = (la1, lo1, la2, lo2) => {
+  const r = Math.PI / 180;
+  const c = Math.sin(la1 * r) * Math.sin(la2 * r) + Math.cos(la1 * r) * Math.cos(la2 * r) * Math.cos((lo2 - lo1) * r);
+  return 6371 * Math.acos(Math.max(-1, Math.min(1, c)));
+};
 
 const finite = (v) => (Array.isArray(v) ? v.every(Number.isFinite) : v === null || Number.isFinite(v));
 const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
@@ -116,6 +149,11 @@ function check(id, f, want) {
     expect(L?.site === (viaParking ? "pad" : "drone-ship"), `${id}: landed on ${L?.site}`);
     if (a.mission === "earth-escape") expect(has("spacecraft-departure"), `${id}: no spacecraft-departure event`);
     if (L?.site === "pad") expect(L.downrange_km < 10, `${id}: ${L.downrange_km} km from the pad`);
+    // where a real recovery would be: the pad, or the sea within 1,000 km of the Cape (the return is timed for it)
+    const fromCape = L ? greatCircle_km(CAPE[0], CAPE[1], L.lat_deg, L.lon_deg) : Infinity;
+    expect(fromCape < 1000 && Math.abs(fromCape - L.downrange_km) < 5, `${id}: lands ${fromCape.toFixed(0)} km from the Cape (downrange_km ${L?.downrange_km})`);
+    if (oceanAt && L?.site !== "pad") expect(oceanAt(L.lat_deg, L.lon_deg) === true, `${id}: drone ship on land at ${L.lat_deg}, ${L.lon_deg}`);
+    expect(L?.modelled.includes("return timed to the recovery zone"), `${id}: modelled ${JSON.stringify(L?.modelled)}`);
     expect(Array.isArray(L?.modelled) && typeof L?.legs === "boolean", `${id}: landing record ${JSON.stringify(L)}`);
     const peak = Math.max(...Array.from({ length: 300 }, (_, i) => f.sampleAt(f.segments.find((g) => g.name === "reentry").t0_screen + (i / 299) * (f.totalScreen_s - f.segments.find((g) => g.name === "reentry").t0_screen)).heat));
     expect(peak > 0.5, `${id}: re-entry heat peaks at ${peak}`);
@@ -290,4 +328,6 @@ if (failures.length) {
   for (const m of [...new Set(failures)].slice(0, 60)) console.error("  " + m);
   process.exit(1);
 }
+if (!oceanAt) console.log("note: sips not available, the drone-ship ocean test was skipped");
+else expect(oceanAt(23, -40) === true && oceanAt(23, 10) === false && oceanAt(-18.8, 48.2) === false, "topography map read wrong (mid-Atlantic / Sahara / Madagascar)");
 console.log("\nOK: every flight runs, ends as arrival.js says, keeps its clocks monotone and smooth, and never jumps.");

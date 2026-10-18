@@ -1310,9 +1310,11 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       const k = ease3((t - padT("arms") - i * PAD.armGap * (L.countdown / COUNTDOWN_S)) / (PAD.armS * Math.min(1, L.countdown / COUNTDOWN_S + 0.3)));
       arm.mesh.rotation.y = L.arms0[arms.indexOf(arm)] + THREE.MathUtils.degToRad(70) * (arms.indexOf(arm) % 2 ? -1 : 1) * k;
     });
-    if (L.anchors?.tower) L.anchors.tower.rotation.z = L.tower0 - THREE.MathUtils.degToRad(PAD.leanDeg) * ease3((t - padT("lean")) / ((PAD.leanS * L.countdown) / COUNTDOWN_S));
+    // The rotating service structure swings away from the vehicle (complex.js; the fixed tower stays put).
+    if (L.anchors?.setRssAngle) L.anchors.setRssAngle(L.rss0 * (1 - ease3((t - padT("arms")) / ((6 * L.countdown) / COUNTDOWN_S))));
+    else if (L.anchors?.tower) L.anchors.tower.rotation.z = L.tower0 - THREE.MathUtils.degToRad(PAD.leanDeg) * ease3((t - padT("lean")) / ((PAD.leanS * L.countdown) / COUNTDOWN_S));
     if (t < 0) {
-      if (!L.said.lean && t >= padT("lean")) say("lean", "STRONGBACK RETRACT");
+      if (!L.said.lean && t >= padT("lean")) say("lean", L.anchors?.setRssAngle ? "SERVICE STRUCTURE RETRACT" : "STRONGBACK RETRACT");
       if (!L.said.deluge && t >= padT("deluge")) say("deluge", "DELUGE");
       if (!L.ignited && t >= padT("ignite")) {
         ignite(0, padT("ignite"));
@@ -1590,7 +1592,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         return;
       }
       const pos = world.fromECI(land.pos_eci_km ?? L.F.sampleAt(L.F.totalScreen_s).pos_eci_km);
-      L.ground = world.createLocalGround({ body: "earth", pos_km: pos, size_km: 1.2 });
+      L.ground = world.createLocalGround({ body: "earth", pos_km: pos, size_km: 1.2, kind: land.site === "drone-ship" ? "ocean" : undefined }); // the ship always floats
       if (land.site === "drone-ship") {
         const r = Math.max(...parts.filter((p) => !L.gone.has(p)).map((p) => p.radius), 0.5);
         L.ship = createDroneShip({ size_u: r * 9 });
@@ -1662,7 +1664,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         alt_m: s.alt_m,
         vel_ms: smp.speed_ms,
         g: smp.segment === "ascent" ? (a.acc_ms2 ?? 0) / 9.80665 : 0,
-        label: L.real < L.labelUntil ? L.label : smp.burn ? (smp.burn === "departure" ? "DEPARTURE BURN" : "INSERTION BURN") : "",
+        label: L.real < L.labelUntil ? L.label : smp.burn ? `${smp.burn.toUpperCase()} BURN` : "", // departure, deorbit, entry, landing, insertion
       });
     }
     if (tS >= F.totalScreen_s && !L.done) finishFlight();
@@ -1855,6 +1857,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       anchors,
       arms0: (anchors?.arms ?? []).map((a) => a.mesh.rotation.y),
       tower0: anchors?.tower?.rotation.z ?? 0,
+      rss0: anchors?.rssAngle ?? 0,
       F: timeline && world ? timeline : null,
       kind: timeline?.kind ?? "earth",
       V: new THREE.Vector3(),
@@ -2345,7 +2348,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     L.gone.add(payload);
     L.flight.visible = false;
     payload.group.quaternion.identity();
-    for (const piece of payload.pieces) if (/:(0|1)$/.test(piece.mesh.name)) piece.mesh.visible = false; // adapter cone + clamp band
+    for (const piece of payload.pieces) if (piece.mesh.userData.adapter) piece.mesh.visible = false; // adapter cone + clamp band (UI4's tag)
     // Where the feet end up once the legs are out: deploy to 1, measure, put them back.
     const deps = deployables(payload);
     for (const piece of deps) applyDeploy(piece, 1);
@@ -2480,7 +2483,8 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     for (const pl of L.plumes) pl.plume.dispose();
     dropPadLight(L.padLight);
     (L.anchors?.arms ?? []).forEach((arm, i) => (arm.mesh.rotation.y = L.arms0[i] ?? arm.mesh.rotation.y));
-    if (L.anchors?.tower) L.anchors.tower.rotation.z = L.tower0;
+    if (L.anchors?.setRssAngle) L.anchors.setRssAngle(L.rss0);
+    else if (L.anchors?.tower) L.anchors.tower.rotation.z = L.tower0;
     if (L.clamps) L.clamps.mesh.position.y = L.clamps.y0;
     for (const c of L.clampArms ?? []) applyDeploy(c, 0);
     for (const fx of Object.values(L.fx ?? {}).flat()) {

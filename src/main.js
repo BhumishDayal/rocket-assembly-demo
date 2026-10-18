@@ -14,7 +14,7 @@ import { optionsWithCompat } from "./compat.js";
 import { simulateAscent } from "./ascent.js";
 import { arrivalTimeline } from "./arrival.js";
 import { createSilhouette } from "./silhouette.js";
-import { createAnchors } from "./anchors.js";
+import { createLaunchComplex } from "./complex.js";
 import { animate, spring } from "animejs";
 import { SCALE, buildManifest, sceneBounds } from "./layout.js";
 import { createMaterials, createPart, createPad, createStars, setShellOpacity, setPropLook, LOOK } from "./parts.js";
@@ -105,7 +105,8 @@ scene.add(new THREE.HemisphereLight(0x8fa6c8, 0x0f1118, 0.08));
 const root = new THREE.Group(); // shakes on lock
 scene.add(root);
 let pad = null;
-let anchors = null; // scale anchors (UI4): person, tower, trench, masts at true size, on the pad
+let anchors = null; // the launch complex (complex.js): tower, arms, RSS, person, masts at true size, on the pad
+const RSS_MATED = 120; // degrees; the countdown swings it away (choreo)
 // UI4's star field is a 90–130 u shell; pushed out ×30 (as in UI4's world harness) so no star sits in front of a
 // globe, with the points scaled to keep their size on screen.
 const stars = createStars();
@@ -210,8 +211,11 @@ function applyBounds(b) {
   }
   // Anchors are sized from the stack height too, so they follow every preset/option change. They hang on the
   // pad group, so they drop away with the pad in flight.
+  // The launch complex (Kennedy-style: fixed tower with crane, rotating service structure, water tower, lightning
+  // towers, hardstand, trench, crawlerway; complex.js, same API as the old anchors), sized from the stack.
   anchors?.dispose();
-  anchors = createAnchors({ baseRadius_u: b.baseRadius_u, stackHeight_u: b.height_u, manifest: current.manifest });
+  anchors = createLaunchComplex({ baseRadius_u: b.baseRadius_u, stackHeight_u: b.height_u, manifest: current.manifest, pad: pad.group });
+  anchors.setRssAngle(RSS_MATED); // the service structure stands mated around the vehicle on the pad
   pad.group.add(anchors.object3d);
 }
 applyBounds(current.bounds);
@@ -872,7 +876,7 @@ function showTwin() {
     choreo.frameCompare(right.clone().multiplyScalar(c), Math.max(current.bounds.height_u, sil.height_u), (off + sil.radius_u + stackR) / 2);
   }
   twin = { rec, sil, line, cardLine, key: buildKey(current.build) };
-  if (anchors?.tower) anchors.tower.visible = false; // the service tower would stand between camera and pair
+  anchors?.setVisible(false); // the complex would stand between camera and pair
   hudText.innerHTML = line;
   report("twin", line);
   return true;
@@ -884,7 +888,7 @@ function hideTwin({ reframe = true } = {}) {
     twin.sil.dispose();
   }
   twin = null;
-  if (anchors?.tower) anchors.tower.visible = true;
+  anchors?.setVisible(true);
   if (reframe) choreo.frameStack();
   hudText.innerHTML = hudHtml();
 }
@@ -923,7 +927,7 @@ function showRival(i) {
   const line = `${compareLead()} vs <strong>${f.esc(other.preset.name)}</strong> · ${f.m(other.bounds.height_m)} est.`;
   const cardLine = `vs ${other.preset.name} · ${f.m(other.bounds.height_m)} est.`;
   rival = { group, anim, line, cardLine, key: buildKey(current.build) };
-  if (anchors?.tower) anchors.tower.visible = false;
+  anchors?.setVisible(false);
   hudText.innerHTML = line;
   return true;
 }
@@ -933,7 +937,7 @@ function hideRival({ reframe = true } = {}) {
   root.remove(rival.group);
   disposeTree(rival.group);
   rival = null;
-  if (anchors?.tower) anchors.tower.visible = true;
+  anchors?.setVisible(true);
   if (reframe) choreo.frameStack();
   hudText.innerHTML = hudHtml();
 }
@@ -1406,8 +1410,14 @@ function frame() {
   // Its widths ease over ~0.5 s when the framing changes (no fog jump); on a black cut frame they snap.
   const black = choreo.state.cut >= 1;
   const { r: R, mode } = choreo.framing();
-  const goalNear = 0.6 * R;
-  const goalFar = (mode === "focus" || mode === "exploded" ? 3 : 6) * R;
+  let goalNear = 0.6 * R;
+  let goalFar = (mode === "focus" || mode === "exploded" ? 3 : 6) * R;
+  if (anchors?.fogRange && (mode === "stack" || mode === "part") && !choreo.state.launch) {
+    const dist0 = camera.position.distanceTo(controls.target);
+    const fr = anchors.fogRange(dist0); // a band that shows the whole complex
+    goalNear = Math.max(0, dist0 - fr.near);
+    goalFar = Math.max(goalFar, fr.far - dist0);
+  }
   const kb = band.near == null || black ? 1 : 1 - Math.exp(-dt / 0.15);
   band.near = band.near == null ? goalNear : band.near + (goalNear - band.near) * kb;
   band.far = band.far == null ? goalFar : band.far + (goalFar - band.far) * kb;
@@ -1435,8 +1445,18 @@ function frame() {
   if (pad?.ringMat) pad.ringMat.opacity = 0.55 + 0.3 * (0.5 + 0.5 * Math.sin(t * 1.6));
   twin?.sil?.update(camera);
   anchors?.update(t);
+  // Daylight scenes in flight (the sun up over where the vehicle is, low enough to be under a lit sky): a faint
+  // dark scrim behind the HUD line and the key legend keeps them legible (body.bright-sky).
+  const vv = worldOn ? choreo.viewer() : null;
+  let bright = false;
+  if (vv) {
+    const up = viewerKm.copy(vv.pos_km);
+    const alt = up.length() - world.bodies.earth.radius_km;
+    bright = alt < 120 && up.normalize().dot(world.sunDir) > -0.08;
+  }
+  if (bright !== document.body.classList.contains("bright-sky")) document.body.classList.toggle("bright-sky", bright);
   if (worldOn) {
-    const v = choreo.viewer();
+    const v = vv;
     if (v) world.setViewer({ body: "earth", pos_km: v.pos_km, camera, frame: v.frame });
     else {
       viewerKm.copy(PAD_KM).add(choreo.nearOriginKm()).addScaledVector(camera.position, 1 / (1000 * SCALE));

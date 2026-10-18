@@ -164,6 +164,38 @@ expect(w.sunDir.distanceTo(sd) < 1e-12 && w.sunLight.position.clone().normalize(
   expect(calls.some((c) => c[0] === "target" && c[1] === "640x480") && stub.autoClear === true, "pass renders into the read buffer and restores autoClear");
 }
 
+// Ocean lookup on a synthetic topography map (equirectangular, u = 0 at 180° W, row 0 north): land only in a
+// block 20–26° N, 5–15° E. Known points, the drone-ship override, and null while no map is loaded.
+{
+  const W = 360;
+  const Hm = 180;
+  const data = new Uint8ClampedArray(W * Hm * 4);
+  for (let y = 0; y < Hm; y++) {
+    for (let x = 0; x < W; x++) {
+      const lat = 90 - (y + 0.5);
+      const lon = -180 + (x + 0.5);
+      const land = lat > 20 && lat < 26 && lon > 5 && lon < 15;
+      data.set(land ? [200, 200, 200, 255] : [0, 0, 0, 255], (y * W + x) * 4);
+    }
+  }
+  const bump = earth.uniforms.uBump.value;
+  const saved = bump.image;
+  expect(w.isOceanAt(0, 0) === null, "isOceanAt should be null before the map loads");
+  bump.image = { data, width: W, height: Hm };
+  expect(w.isOceanAt(23, 10) === false && w.isOceanAt(23, -10) === true && w.isOceanAt(-23, 10) === true && w.isOceanAt(28.5, -67.8) === true && w.isOceanAt(0, -160) === true, "ocean lookup: u origin at 180° W, north at row 0");
+  const at = (lat, lon) => {
+    const v = new THREE.Vector3(Math.cos(lat * rad) * Math.cos(lon * rad), Math.cos(lat * rad) * Math.sin(lon * rad), Math.sin(lat * rad));
+    return v.applyMatrix3(earth.toBody.clone().transpose()).multiplyScalar(6371); // body-fixed → world
+  };
+  const gLand = w.createLocalGround({ body: "earth", pos_km: at(23, 10), size_km: 0.3 });
+  const gSea = w.createLocalGround({ body: "earth", pos_km: at(28.5, -67.8), size_km: 0.3 });
+  const gShip = w.createLocalGround({ body: "earth", pos_km: at(23, 10), size_km: 0.3, kind: "ocean" });
+  expect(gLand.kind === "ground" && gSea.kind === "ocean" && gShip.kind === "ocean", `local ground kinds ${gLand.kind} ${gSea.kind} ${gShip.kind}`);
+  expect(Math.abs(gLand.lat - 23) < 1e-6 && Math.abs(gLand.lon - 10) < 1e-6, "local ground lat / lon round-trip");
+  for (const g of [gLand, gSea, gShip]) g.dispose();
+  bump.image = saved;
+}
+
 const deck = w.cloudDeck("earth", 5);
 expect(deck && deck.object3d && w.cloudDeck("moon") === null, "cloud deck");
 w.dispose();

@@ -38,6 +38,18 @@ body {
   touch-action: none;
 }
 
+/* Daylight in flight (main.js toggles body.bright-sky): a faint dark scrim behind the HUD line and the legend. */
+.hud,
+.brand p.keys {
+  transition: background 600ms ease, box-shadow 600ms ease;
+  border-radius: 8px;
+}
+body.bright-sky .hud,
+body.bright-sky .brand p.keys {
+  background: rgba(6, 8, 12, 0.42);
+  box-shadow: 0 0 0 6px rgba(6, 8, 12, 0.42);
+}
+
 /* The fade through black between the ending's scenes (opacity from choreo.state.cut). */
 .cut {
   position: fixed;

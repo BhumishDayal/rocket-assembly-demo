@@ -6,7 +6,7 @@
 //     scene, camera, bodies: { earth, moon, mars }, sunDir (world, unit), sunLight (a DirectionalLight for the near
 //     layer, same direction), setViewer({ body, pos_km, quaternion | camera, frame? }), setDestination(body,
 //     pos_km_fromEarth), landingSite(body), skyAt(body, alt_km), surfaceColourAt(body, lat, lon), isOceanAt(lat,
-//     lon), atmosphereLimb(body), createLocalGround({ body, pos_km, size_km }), cloudDeck(body, alt_km),
+//     lon), atmosphereLimb(body), createLocalGround({ body, pos_km, size_km, kind? }), cloudDeck(body, alt_km),
 //     attach(body, fx) (far-layer effects riding with a body, e.g. launchfx's aurora), update(),
 //     render(renderer), createPass(), dispose(),
 //     // UI 2's flight.js frame (Earth-centred, z = Earth's axis, x toward longitude 0, Earth's rotation ignored):
@@ -370,10 +370,14 @@ function createSun() {
 // ---------- image sampling (albedo and ocean mask at a lat/lon) ----------
 
 const pixelCache = new WeakMap();
+// The map is equirectangular: u = 0 at 180° W increasing east, row 0 at the north pole. A texture image that is
+// already decoded pixels ({ data, width, height }, e.g. in a node check) is read directly.
 function samplePixel(tex, lat, lon) {
   const img = tex?.image;
-  if (typeof document === "undefined" || !img || !img.width || img.width < 8 || !img.complete) return null;
+  if (!img || !img.width || img.width < 8) return null;
   let px = pixelCache.get(img);
+  if (!px && img.data) pixelCache.set(img, (px = { data: img.data, w: img.width, h: img.height }));
+  if (!px && (typeof document === "undefined" || !img.complete)) return null; // not loaded yet
   if (!px) {
     const c = document.createElement("canvas");
     c.width = img.width;
@@ -734,10 +738,12 @@ export function createWorld({ renderer = null } = {}) {
     if (!px) return name === "mars" ? new THREE.Color(0.62, 0.36, 0.22) : name === "moon" ? new THREE.Color(0.56, 0.55, 0.53) : new THREE.Color(0.18, 0.2, 0.14);
     return new THREE.Color().setRGB(...px, THREE.SRGBColorSpace); // → linear
   }
-  // Earth's topography map is 0 over the oceans.
+  // Earth's topography map (earth_bump: elevation, 0 over the oceans; not the colour map) at a lat / lon:
+  // true / false, or null while the map has not loaded. At 2k one pixel is ~20 km, so coastal points can go
+  // either way (the Cape's pixel reads ocean).
   function isOceanAt(lat, lon) {
     const px = samplePixel(bodies.earth.uniforms.uBump.value, lat, lon);
-    return px ? px[0] < 0.02 : false;
+    return px ? px[0] < 0.02 : null;
   }
   function atmosphereLimb(name) {
     const air = atmosphereFor(name);
@@ -750,7 +756,9 @@ export function createWorld({ renderer = null } = {}) {
   // the ocean (Earth), in the near layer's y-up site frame at pos_km (body-relative km), albedo from the
   // planet's texture there. place(nearOrigin_km) positions it relative to the near layer's origin (body-relative
   // km); frame: near axes → world axes (pass it to setViewer).
-  function createLocalGround({ body: name = "earth", pos_km, size_km = 0.6, seed = 7 } = {}) {
+  // kind (Earth): "ocean" | "ground" forces the surface (e.g. "ocean" under a drone ship); otherwise the
+  // topography decides, and land is assumed while the map is still loading.
+  function createLocalGround({ body: name = "earth", pos_km, size_km = 0.6, seed = 7, kind: kindIn = null } = {}) {
     const b = bodies[name];
     const up = (pos_km ?? landingSite(name).pos_km).clone().normalize();
     const f = surfaceFrame(name, up);
@@ -760,7 +768,7 @@ export function createWorld({ renderer = null } = {}) {
     let kind;
     let inner;
     if (name === "earth") {
-      if (isOceanAt(f.lat, f.lon)) {
+      if (kindIn ? kindIn === "ocean" : isOceanAt(f.lat, f.lon) === true) {
         kind = "ocean";
         inner = createOcean({ size_u, sunDir: sunDir.clone().applyQuaternion(f.frame.clone().invert()) });
       } else {
