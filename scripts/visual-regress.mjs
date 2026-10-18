@@ -3,7 +3,8 @@
 //       node scripts/visual-regress.mjs --serve              compare the current tree with it (exit 1 if any frame
 //                                                            differs by more than --threshold)
 //       node scripts/visual-regress.mjs http://127.0.0.1:5191/   any server but 5173 (the script adds ?build=...)
-// --serve freezes a copy of the tree on a free port (own Vite cache, no HMR), like smoke.mjs.
+// --serve freezes a copy of the tree on a free port (own Vite cache, no HMR), like smoke.mjs; --rev=HEAD (or any
+// commit) serves that commit's files instead, ignoring uncommitted edits (implies --serve).
 //
 // Frames, at 1600x900 (DPR 1):
 //   landing                    the landing page (it always opens on the first preset, so it is captured once)
@@ -26,10 +27,11 @@
 // over a dimmed copy of the new frame: yellow = large change) and <out>/<frame>-actual.png.
 //
 // Flags: --baseline  --threshold=2  --presets=falcon-9,saturn-v  --only=<id or substring,...>  --out=<dir>
-//        --baseline-dir=scripts/qa/baselines  --size=1600x900  --fps=60  --seed=1  --angle=metal  --keep (write
+//        --rev=<commit>  --baseline-dir=scripts/qa/baselines  --size=1600x900  --fps=60  --seed=1  --angle=metal  --keep (write
 //        every actual frame, not only failing ones)
 // Exit: 0 all frames within the threshold (or baseline written), 1 a frame over it / missing / not captured,
 //       2 harness error.
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -52,6 +54,11 @@ const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
 const outDir = resolve(String(flags.out ?? join(tmpdir(), `visual-regress-${stamp}`)));
 const STEP = 1000 / FPS;
 
+if (flags.rev === true) {
+  console.error("--rev needs a commit, e.g. --rev=HEAD");
+  process.exit(2);
+}
+if (flags.rev) flags.serve = true;
 if (!flags.serve && !positional[0]) {
   console.error("usage: node scripts/visual-regress.mjs --serve [--baseline] [--threshold=2] [--presets=a,b] [--only=id,...] [--out=dir]\n       node scripts/visual-regress.mjs <base url> [...]");
   process.exit(2);
@@ -61,7 +68,11 @@ const harnessError = (msg) => {
   process.exit(2);
 };
 
-const presets = JSON.parse(readFileSync(join(repo, "src", "data", "presets.json"), "utf8"));
+const presets = JSON.parse(
+  flags.rev
+    ? execFileSync("git", ["show", `${flags.rev}:src/data/presets.json`], { cwd: repo, encoding: "utf8" })
+    : readFileSync(join(repo, "src", "data", "presets.json"), "utf8"),
+);
 for (const id of PRESETS) if (!presets.some((p) => p.id === id)) harnessError(`unknown preset "${id}" (presets.json has ${presets.map((p) => p.id).join(", ")})`);
 const presetName = (id) => presets.find((p) => p.id === id).name;
 
@@ -88,8 +99,9 @@ let snap = null;
 let base;
 try {
   if (flags.serve) {
-    snap = await serveSnapshot();
+    snap = await serveSnapshot({ rev: flags.rev });
     base = snap.base;
+    console.log(`serving ${snap.rev}`);
   } else base = checkUrl(positional[0]).href;
 } catch (e) {
   harnessError(e.message);
@@ -339,7 +351,7 @@ if (BASELINE) {
   const old = existsSync(mf) ? JSON.parse(readFileSync(mf, "utf8")) : null;
   const keep = ONLY && old && old.size?.[0] === W && old.size?.[1] === H ? old.frames : {};
   if (!ONLY) for (const f of readdirSync(baseDir)) if (f.endsWith(".png")) rmSync(join(baseDir, f));
-  const out = { created: new Date().toISOString(), size: [W, H], fps: FPS, seed: SEED, chrome: page.version, angle: flags.angle ?? "metal", files, frames: { ...keep } };
+  const out = { created: new Date().toISOString(), tree: snap?.rev ?? base, size: [W, H], fps: FPS, seed: SEED, chrome: page.version, angle: flags.angle ?? "metal", files, frames: { ...keep } };
   for (const [id, { png, meta }] of shots) {
     writeFileSync(join(baseDir, `${id}.png`), png);
     out.frames[id] = meta;
@@ -409,7 +421,7 @@ const changedFiles = refFiles && {
 };
 if (changedFiles) {
   const n = changedFiles.changed.length + changedFiles.added.length + changedFiles.removed.length;
-  console.log(`\nfiles since the baseline (${manifest.created.slice(0, 16).replace("T", " ")} UTC): ${n ? "" : "none changed"}`);
+  console.log(`\nfiles since the baseline (${manifest.tree ?? "?"}, ${manifest.created.slice(0, 16).replace("T", " ")} UTC): ${n ? "" : "none changed"}`);
   for (const [k, list] of Object.entries(changedFiles)) if (list.length) console.log(`  ${k.padEnd(8)} ${list.join(", ")}`);
 }
 writeFileSync(join(outDir, "report.json"), JSON.stringify({ base, size: [W, H], threshold: THRESHOLD, chrome: page.version, baseline: manifest.created, files: changedFiles, rows, console: page.consoleLog }, null, 2));

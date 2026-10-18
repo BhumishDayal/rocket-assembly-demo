@@ -19,6 +19,7 @@ Only one Chrome runs at a time.
 ```sh
 node scripts/visual-regress.mjs --serve              # compare the working tree with scripts/qa/baselines
 node scripts/visual-regress.mjs --serve --baseline   # replace the baseline with the working tree
+node scripts/visual-regress.mjs --rev=HEAD --baseline  # ... with the last commit, ignoring uncommitted edits
 node scripts/visual-regress.mjs --serve --only=saturn-v-launch          # only some frames (id or substring)
 node scripts/visual-regress.mjs --serve --baseline --only=falcon-9-card # refresh one frame, keep the rest
 ```
@@ -56,9 +57,14 @@ it. A session stops once it has all the frames that `--only` asked for.
   shots. A frame that never settles is flagged `UNSTABLE`: something draws outside the clock, and its score
   means less.
 
-Measured on 2026-10-18: two runs of the same tree scored 0.00 % on all 13 Falcon 9 frames, launch included.
-Any non-zero score therefore comes from a change, not from noise. The 2 % default threshold only lets small
-deliberate tweaks pass.
+Measured on 2026-10-18 (baseline of d3ea43d, then a compare of the same commit with `--threshold=0`):
+- 22 of the 25 frames were bit-identical.
+- Saturn V launch-16, -20 and -30 each differed in one pixel, by one colour level (score 2.7e-7 %). That pixel
+  is the antialiased corner of the "L" key cap in the legend, where Chrome blends the page's HTML over the
+  moving canvas; it is a compositor rounding quirk.
+
+Every frame printed 0.00 %, so a score of 0.01 % or more comes from a change, not from noise. The 2 %
+default threshold only lets small deliberate tweaks pass.
 
 ### Output
 
@@ -80,6 +86,7 @@ inside the same headless Chrome: both PNGs are decoded into an OffscreenCanvas a
 
 | Flag | Meaning |
 |---|---|
+| `--rev=<commit>` | serve that commit's files (`git archive`) instead of the working tree; implies `--serve`. The manifest records which tree the baseline came from |
 | `--baseline` | write `baselines/*.png` and `baselines/manifest.json` instead of comparing (with `--only`: replace just those frames) |
 | `--threshold=2` | fail a frame whose score is above this (%) |
 | `--presets=falcon-9,saturn-v` | presets to run |

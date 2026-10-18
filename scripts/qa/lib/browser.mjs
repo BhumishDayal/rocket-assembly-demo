@@ -8,7 +8,7 @@
 // anime.js stalls; the repeatable timing comes from lib/vclock.mjs instead); a CDP Escape also reaches headless
 // Chrome, which marks the page hidden and stops rAF, so every key press is followed by Page.bringToFront when
 // needed; a page reload (another chat saving into a live dev server) is counted so callers can fail on it.
-import { spawn } from "node:child_process";
+import { execFileSync, execSync, spawn } from "node:child_process";
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -56,12 +56,29 @@ const freePort = () =>
   });
 const exited = (p) => (!p || p.exitCode !== null || p.signalCode !== null ? Promise.resolve() : new Promise((r) => p.once("exit", r)));
 
-// Frozen snapshot of the tree, served by the repo's own Vite. Returns { base, dir, close }.
-export async function serveSnapshot() {
+// Frozen snapshot of the tree, served by the repo's own Vite. With `rev` (a commit, e.g. "HEAD") the snapshot
+// is that commit's files (git archive), whatever is uncommitted in the working tree. Returns
+// { base, dir, rev, close }; rev is the full commit hash, or "working tree" plus the commit it sits on.
+export async function serveSnapshot({ rev } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "qa-snap-"));
-  for (const f of ["index.html", "vite.config.js", "package.json"]) if (existsSync(join(repo, f))) cpSync(join(repo, f), join(dir, f));
-  cpSync(join(repo, "src"), join(dir, "src"), { recursive: true });
-  if (existsSync(join(repo, "public"))) cpSync(join(repo, "public"), join(dir, "public"), { recursive: true });
+  const git = (...a) => execFileSync("git", a, { cwd: repo, encoding: "utf8" }).trim();
+  let label;
+  if (rev) {
+    label = git("rev-parse", "--verify", `${rev}^{commit}`);
+    const have = git("ls-tree", "--name-only", label).split("\n");
+    const paths = ["index.html", "vite.config.js", "package.json", "src", "public"].filter((p) => have.includes(p));
+    execSync(`git archive ${label} -- ${paths.join(" ")} | tar -x -C ${JSON.stringify(dir)}`, { cwd: repo, stdio: ["ignore", "ignore", "pipe"] });
+  } else {
+    for (const f of ["index.html", "vite.config.js", "package.json"]) if (existsSync(join(repo, f))) cpSync(join(repo, f), join(dir, f));
+    cpSync(join(repo, "src"), join(dir, "src"), { recursive: true });
+    if (existsSync(join(repo, "public"))) cpSync(join(repo, "public"), join(dir, "public"), { recursive: true });
+    try {
+      const dirty = git("status", "--porcelain", "--", "src", "index.html", "vite.config.js").split("\n").filter(Boolean).length;
+      label = `working tree on ${git("rev-parse", "--short", "HEAD")}${dirty ? ` + ${dirty} uncommitted file(s)` : " (clean)"}`;
+    } catch {
+      label = "working tree";
+    }
+  }
   symlinkSync(join(repo, "node_modules"), join(dir, "node_modules"), "dir");
   // Own dependency cache (the shared node_modules/.vite belongs to the user's server) and no HMR.
   writeFileSync(
@@ -91,6 +108,7 @@ export async function serveSnapshot() {
         return {
           base,
           dir,
+          rev: label,
           async close() {
             try {
               server.kill();
