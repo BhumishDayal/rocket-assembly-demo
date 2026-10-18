@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ROCKEX</title>
+    <meta name="description" content="ROCKEX: build a rocket from real parts, check it against real physics, launch it and land it." />
+    <link rel="icon" href="./favicon.ico" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+    <script type="module" crossorigin src="./assets/index-Bi9kFqkH.js"></script>
+    <link rel="modulepreload" crossorigin href="./assets/three-DZZptLwp.js">
+    <link rel="modulepreload" crossorigin href="./assets/data-BThFuIhq.js">
+    <link rel="modulepreload" crossorigin href="./assets/anime-D7iTw-pF.js">
+    <link rel="stylesheet" crossorigin href="./assets/index-Cg0mY1Av.css">
+  </head>
+  <body>
+    <canvas id="scene" aria-label="3D rocket assembly"></canvas>
+
+    <header class="brand">
+      <h1>ROCKEX</h1>
+      <p>Click the ghost to build the next part · click a part for details · <kbd>Space</kbd> explode · <kbd>B</kbd> build all · <kbd>R</kbd> reset · <kbd>[</kbd> <kbd>]</kbd> change rocket · <kbd>L</kbd> launch · <kbd>S</kbd> save card</p>
+    </header>
+
+    <aside class="detail" id="detail" aria-live="polite"></aside>
+
+    <div class="hud" id="hud"><span id="hud-text">Pad ready</span></div>
+
+    <footer class="bar">
+      <button id="btn-rockets" type="button" class="quiet" aria-expanded="false" aria-controls="rockets">Rockets</button>
+      <div class="rockets" id="rockets" aria-label="Pre-made rockets" hidden></div>
+      <button id="btn-build-all" type="button">Build all</button>
+      <button id="btn-explode" type="button" disabled>Explode</button>
+      <button id="btn-reset" type="button" class="quiet">Reset</button>
+      <button id="btn-sound" type="button" class="quiet" aria-pressed="true">Sound on</button>
+    </footer>
+
+  </body>
+</html>
