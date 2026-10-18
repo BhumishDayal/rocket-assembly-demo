@@ -24,10 +24,10 @@ import * as THREE from "three";
 import { animate, spring } from "animejs";
 import { createHologramMaterial } from "./fx/hologram.js";
 import { createBoltFlash } from "./fx/flash.js";
-import { COLORS, LOOK, deployables, padLayout, setShellOpacity as setShell } from "./parts.js";
-import { createVents, createDeluge, createTrenchJet, createSteamCloud } from "./fx/launchfx.js";
+import { COLORS, LOOK, applyDeploy, deployables, padLayout, setShellOpacity as setShell } from "./parts.js";
+import { createVents, createDeluge, createTrenchJet, createSteamCloud, createCondensationHalo } from "./fx/launchfx.js";
 import { attachPlumes, createPadLight, createPlume, P0 } from "./plume.js";
-import { createPlanet, createSurfacePatch, createDustPuff } from "./planet.js";
+import { createPlanet, createSurfacePatch, createDustPuff, createSkyDome, skyAt } from "./planet.js";
 import { createDroneShip } from "./anchors.js";
 
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -104,7 +104,8 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   }
 
   // cut: 0..1, the fade through black between the ending's scenes (main draws it as a full-screen overlay).
-  const state = { busy: 0, exploded: false, scrubbing: false, auto: false, launch: null, deploying: false, ending: false, gen: 0, shake: 0, cut: 0 };
+  // sky: during a launch, the background/fog/stars main blends in ({ w, horizon, stars, near, far }; see updateSky).
+  const state = { busy: 0, exploded: false, scrubbing: false, auto: false, launch: null, deploying: false, ending: false, gen: 0, shake: 0, cut: 0, sky: null };
   const live = new Set();
   const selectColor = new THREE.Color(COLORS.select ?? 0xffb020);
   const highlighted = new Set();
@@ -1137,6 +1138,13 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         state.shake = 1;
         openClamps();
         break;
+      case "transonic":
+        L.fx?.halo?.fire(); // vapour collar through Mach 1
+        break;
+      case "maxq":
+        L.fx?.halo?.fire();
+        L.vibUntil = L.real + 0.6;
+        break;
       case "meco":
         for (const pl of L.plumes) if (pl.stage === e.stage) pl.dead = true;
         break;
@@ -1223,12 +1231,18 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     const ti = t - padT("ignite");
     fx.steam?.update(dt, { t: Math.max(0, ti), glow: throttle, intensity: ti >= 0 ? 1 : 0 });
   }
-  // Hold-down release: UI4's clamps are one merged mesh, so they retract into the deck together.
+  // Hold-down release: UI4's four hinged arms (createPad().clamps, same hinge formula as the legs) swing 70°
+  // outward at T0; a pad without them retracts its merged clamps into the deck.
   function openClamps() {
+    const k = { v: 0 };
+    if (L.clampArms?.length) {
+      const arms = L.clampArms;
+      run(k, { v: 1, duration: D(450), ease: "outCubic", onUpdate: () => L && arms.forEach((c) => applyDeploy(c, k.v)) });
+      return;
+    }
     const clamps = L.pad?.getObjectByName("pad-clamps");
     if (!clamps) return;
     L.clamps = { mesh: clamps, y0: clamps.position.y };
-    const k = { v: 0 };
     const drop = 0.18 * (bounds?.baseRadius_u ?? 1);
     run(k, { v: 1, duration: D(450), ease: "outCubic", onUpdate: () => (clamps.position.y = L?.clamps ? L.clamps.y0 - drop * k.v : clamps.position.y) });
   }
@@ -1249,7 +1263,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   }
   const aim = new THREE.Vector3();
   function padCam(dt) {
-    if (L.cam !== "pad" || !L.padCam) return;
+    if (L.cam !== "pad" || !L.padCam || L.cut) return; // held while fading to the tracker
     const padY = L.pad ? L.pad.position.y : 0;
     const k = L.padCam.k.v;
     camera.position.lerpVectors(L.padCam.from, L.padCam.pose.position, k).y += padY * k;
@@ -1277,12 +1291,47 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     L.tracking = true;
   }
 
+  // ---------- sky during a launch (design rounds 14 C, 15 (3)) ----------
+  // UI4's sky dome at the vehicle's altitude (skyAt: dusk blue at the pad, black by ~60 km, with a sunset band
+  // low on the horizon), faded in from the builder's dark background over the first 2 s of the countdown. main
+  // blends state.sky into the page: the stars thicken as the sky darkens, and the fog takes the horizon's colour
+  // and opens with the climb so the pad and ground map fall away into the haze.
+  const SKY_SUN = new THREE.Vector3(-0.85, -0.075, -0.2).normalize(); // just set, behind the pad: deep blue twilight
+  const SKY_HORIZON_K = 0.55; // the orange band kept low-key: the page's light UI text stays readable over it
+  const skyZ = new THREE.Color();
+  const skyH = new THREE.Color();
+  const skyF = new THREE.Color();
+  function updateSky(dt, alt_m, body = "earth") {
+    if (!L?.sky) return;
+    L.skyW = Math.min(1, L.skyW + dt / 2);
+    const sky = skyAt(Math.max(0, alt_m), SKY_SUN, body);
+    skyZ.copy(L.bg0).lerp(sky.zenith, L.skyW);
+    skyH.copy(L.bg0).lerp(sky.horizon.multiplyScalar(SKY_HORIZON_K), L.skyW);
+    L.sky.set({ zenith: skyZ, horizon: skyH }, SKY_SUN);
+    L.sky.update(camera);
+    const dist = camera.position.distanceTo(controls.target);
+    const below = L.pad ? Math.max(0, -L.pad.position.y) : 0;
+    // Fog: between zenith and horizon (the distant haze, not the horizon's glow).
+    state.sky = { w: L.skyW, horizon: skyF.copy(skyZ).lerp(skyH, 0.45), stars: sky.stars, near: dist + 5, far: dist + 300 + below * 1.5 };
+  }
+  // The sky's altitude after the ascent: the booster's on its way down, the destination's on a landing, else orbit.
+  function endingSky() {
+    if (E?.booster && !E.booster.ended && E.legs[E.i]?.type === "booster") return [E.booster.alt_m ?? 0, "earth"];
+    if (E?.lander) return [500, E.legs[E.i]?.body ?? "moon"];
+    return [150000, "earth"];
+  }
+  const craftR = () => {
+    const box = craftBox();
+    return box.isEmpty() ? stackRadius() : Math.max(0.4, box.getSize(new THREE.Vector3()).length() / 2);
+  };
+
   function launchUpdate(dt) {
     if (L.cut) stepCut(L, dt);
     if (L.done) {
       if (L.drifting) L.flight.rotateY(dt * 0.15); // slow roll in orbit; the outcome line stays in the HUD
       updateDebris(dt);
       if (E) endingUpdate(dt);
+      if (L) updateSky(dt, ...endingSky());
       return;
     }
     L.real += dt;
@@ -1291,6 +1340,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     if (t < 0) {
       L.onTelemetry({ countdown: Math.ceil(-t), label: L.real < L.labelUntil ? L.label : "" });
       padCam(dt);
+      updateSky(dt, 0);
       return;
     }
     while (L.next < L.events.length && L.events[L.next].t <= t) onEvent(L.events[L.next++]);
@@ -1315,12 +1365,22 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     if (padThrottle > 0 && s.alt_m < 300) state.shake = Math.max(state.shake, 0.35 * padThrottle * (1 - s.alt_m / 300));
     padEffects(dt, t, padThrottle, Math.max(0, s.alt_m));
     updateDebris(dt);
+    updateSky(dt, s.alt_m);
+    L.fx?.halo?.update(dt);
+    if (L.real < (L.vibUntil ?? 0)) state.shake = Math.max(state.shake, 0.55); // Max-Q buffeting
+    // The Earth's curve comes up under the vehicle once it is in near-space.
+    if (L.earth && !L.earthUp && s.alt_m > 55000) {
+      L.earthUp = true;
+      L.earth.update(0);
+      setBackdrop(L.earth, 2500, craftR() * 4.5);
+    }
 
     // Camera: the low pad camera until the vehicle clears the tower (then a cut through black to the tracker);
     // without it (story), tracking once the rocket leaves the launch frame.
     if (L.cam === "pad") {
       padCam(dt);
-      if (t >= L.towerClear && !L.cut) L.cut = { t: 0, up: 0, fired: false, hold: 0, fn: toTracker };
+      // The fade starts inside the real-time opening (the compressed climb after it would drag the pad along).
+      if (t >= L.towerClear - 0.25 && !L.cut) L.cut = { t: 0, up: 0, fired: false, hold: 0, fn: toTracker };
     } else if (below > 0 || L.tracking) {
       if (!L.tracking) {
         L.tracking = true;
@@ -1400,7 +1460,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
 
   // launch(sim, { pad, onTelemetry }) -> Promise<outcome>. The stack must be complete and assembled.
   // brief (the story): no pad camera, the old short opening (liftoff + 2.5 s in real time).
-  function launch(sim, { pad = null, anchors = null, onTelemetry = () => {}, arrival = null, countdown = COUNTDOWN_S, brief = false } = {}) {
+  function launch(sim, { pad = null, clamps = null, anchors = null, onTelemetry = () => {}, arrival = null, countdown = COUNTDOWN_S, brief = false } = {}) {
     if (state.busy || state.exploded || state.launch || !parts.length || !parts.every((p) => p.built) || !sim?.samples?.length) {
       return Promise.resolve(false);
     }
@@ -1431,6 +1491,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       keys: playbackKeys(sim.events, sim.samples[sim.samples.length - 1].t, { opening }),
       real: -countdown,
       countdown,
+      clampArms: clamps,
       cam: opening == null ? "launch" : "pad",
       towerClear: opening ?? Infinity,
       ignited: false,
@@ -1475,6 +1536,22 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       root.add(L.fx.vents.object3d);
       pad.add(L.fx.deluge.object3d, L.fx.trench.object3d, L.fx.steam.object3d);
     }
+    // Max-Q / Mach 1 vapour cone at the base of the fairing (or the top part), opening down the vehicle.
+    const capPart = parts.find((p) => p.kind === "fairing") ?? parts[parts.length - 1];
+    if (capPart) {
+      L.fx ??= {};
+      L.fx.halo = createCondensationHalo({ radius_u: capPart.radius, length_u: capPart.radius * 5 });
+      capPart.group.add(L.fx.halo.object3d);
+    }
+    // Sky and the Earth for the climb (updateSky; the Earth rises in from ~55 km and carries on into the ending).
+    L.sky = createSkyDome({ radius_u: 3000 });
+    scene.add(L.sky.object3d);
+    L.skyW = 0;
+    L.bg0 = scene.background?.isColor ? scene.background.clone() : new THREE.Color(0x0b0d12);
+    L.earth = createPlanet({ kind: "earth", radius_u: PLANET_R.earth });
+    L.earth.R = PLANET_R.earth;
+    L.earth.object3d.visible = false;
+    scene.add(L.earth.object3d);
     if (L.cam === "pad") {
       camAnim?.cancel();
       const pose = padCamPose();
@@ -1488,16 +1565,10 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   }
 
   // ---------- deployables (design A4/A5) ----------
-  // UI4's hinges: piece.deploy = { axis, pivot, angle, order } in part-local units; at fraction k the piece
-  // turns k·angle about the axis through the pivot (k = 0 is exactly rest). Orders go one after another, each
-  // hinge on a soft spring (a little overshoot past the open angle, then it settles).
-  const hingeQ = new THREE.Quaternion();
-  function applyDeploy(piece, k) {
-    const d = piece.deploy;
-    hingeQ.setFromAxisAngle(d.axis, k * d.angle);
-    piece.mesh.position.copy(piece.rest.position).sub(d.pivot).applyQuaternion(hingeQ).add(d.pivot);
-    piece.mesh.quaternion.copy(hingeQ).multiply(piece.rest.quaternion);
-  }
+  // UI4's hinges: piece.deploy = { axis, pivot, angle, order } in part-local units; applyDeploy (parts.js) turns a
+  // piece k·angle about the axis through the pivot (k = 0 is exactly rest) and poses its followers (the Falcon
+  // legs' telescoping pistons). Orders go one after another, each hinge on a soft spring (a little overshoot past
+  // the open angle, then it settles).
   function deploy(part, { gap = 1300 } = {}) {
     const list = deployables(part);
     if (!list.length) return Promise.resolve(false);
@@ -1540,8 +1611,9 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   // The Earth in orbit legs as the landing page shows it: the same place on screen, size and light relative to
   // the camera (main's landing shot: camera 0.62 R up and 2.05 R out from the centre at azimuth 0.58, aimed 1.02 R
   // up, sun from `sun`; pole at the top limb), re-placed and re-oriented from the camera every frame (postUpdate),
-  // so the craft floats in front of the globe's dark limb while the ground slides east under it. Close above a huge globe, the old placement showed its lit pole at grazing angles: rims
-  // and atmosphere over half the frame, washed out. Drawn at 4.5 craft radii (scaled), well inside the stars.
+  // so the craft floats in front of the globe's dark limb while the ground slides east under it. Close above a
+  // huge globe, the old placement showed its lit pole at grazing angles: rims and atmosphere over half the frame,
+  // washed out. Drawn at 4.5 craft radii (scaled). One holder (BK) for the ascent (from ~55 km) and the ending.
   const landingView = { up: 0.62, back: 2.05, aim: 1.02, az: 0.58, sun: new THREE.Vector3(-0.85, 0.35, -0.2).normalize() };
   const backdrop = (() => {
     const eye = new THREE.Vector3(0, landingView.up, landingView.back).applyAxisAngle(Y, landingView.az);
@@ -1550,8 +1622,9 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     return { off: eye.clone().negate().applyQuaternion(q), sun: landingView.sun.clone().applyQuaternion(q), q };
   })();
   const tmpV = new THREE.Vector3();
+  let BK = null; // { planet, k, t0 }
   function placeBackdrop() {
-    const b = E?.backdrop;
+    const b = BK;
     if (!b) return;
     const R = b.planet.R * b.planet.object3d.scale.x;
     tmpV.copy(backdrop.off).multiplyScalar(R);
@@ -1565,11 +1638,11 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   // Scale a planet as a whole (UI4's setScale keeps its shader lengths, scattering radius and scale height and
   // bump relief, in step with the mesh).
   const scalePlanet = (planet, s) => planet.setScale(s);
-  function setBackdrop(planet, ms) {
+  function setBackdrop(planet, ms, size_u) {
     planet.object3d.visible = true;
-    scalePlanet(planet, Math.max(2, E.r * 4.5) / planet.R);
-    E.backdrop = { planet, k: { v: ms ? 0 : 1 }, t0: performance.now() };
-    if (ms) run(E.backdrop.k, { v: 1, duration: D(ms), ease: "outCubic" });
+    scalePlanet(planet, Math.max(2, size_u) / planet.R);
+    BK = { planet, k: { v: ms ? 0 : 1 }, t0: performance.now() };
+    if (ms) run(BK.k, { v: 1, duration: D(ms), ease: "outCubic" });
     placeBackdrop();
   }
 
@@ -1648,6 +1721,12 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       origin: null,
     };
     scene.add(E.dust.object3d);
+    if (L.earth) {
+      E.planets.earth = L.earth; // the Earth that rose in during the ascent, already in place
+      L.earth.R = PLANET_R.earth;
+      E.origin = BK?.planet === L.earth ? L.earth : null;
+      L.earth = null;
+    }
     // Earth missions land something: the Falcon booster (when it returns), then the payload deployed above
     // Earth (planet below), or stranded above Earth when short. Moon/Mars keep arrival.js's legs.
     const booster = L.sim.summary.booster;
@@ -1701,7 +1780,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       case "orbit": {
         const planet = planetFor(leg.body);
         if (leg.body === "earth" || !leg.body) {
-          if (E.backdrop?.planet !== planet) setBackdrop(planet, Math.min(900, leg.seconds * 600));
+          if (BK?.planet !== planet) setBackdrop(planet, Math.min(900, leg.seconds * 600), E.r * 4.5);
         } else if (E.origin !== planet) bringPlanet(planet, Math.min(900, leg.seconds * 600));
         for (const p of Object.values(E.planets)) if (p !== planet) p.object3d.visible = false;
         E.origin = planet;
@@ -1716,7 +1795,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       case "transfer": {
         E.burn = leg.seconds * 0.5; // the upper stage relights for the first half
         E.from = E.origin;
-        E.backdrop = null; // the origin recedes in the world from where it is
+        BK = null; // the origin recedes in the world from where it is
         E.fromScale = E.from?.object3d.scale.x ?? 1;
         E.to = leg.body && E.planets[leg.body] !== E.origin && PLANET_R[leg.body] ? planetFor(leg.body) : null;
         if (E.to) E.to.object3d.visible = false;
@@ -1745,7 +1824,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         const planet = planetFor("earth");
         E.origin = planet;
         frameCraft(5.5, 18, 1); // on the black frame of the cut
-        setBackdrop(planet, 0);
+        setBackdrop(planet, 0, E.r * 4.5);
         const payload = parts.find((p) => p.kind === "payload" && !L.gone.has(p));
         if (leg.type === "earth-payload" && payload && deployables(payload).length) deploy(payload, { gap: 500 });
         break;
@@ -1861,6 +1940,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     B.outer.quaternion.setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI * flip);
     const lit = ph.lit ?? 0;
     const alt_m = Math.max(0, (B.outer.position.y - B.touchY) / scale);
+    B.alt_m = boosterSampleAt(B.times[phase] + (B.times[phase + 1] - B.times[phase]) * q).alt_m ?? alt_m;
     B.plumes.forEach((plume, i) => plume.update(dt, { throttle: i < lit ? 1 : 0, ambientPressure_Pa: P0 * Math.exp(-alt_m * 40 / SCALE_HEIGHT_M), cameraDistance: camera.position.distanceTo(controls.target) }));
     B.splash.update(dt, phase === 3 ? 1 : 0, alt_m);
     if (phase === 4 && !B.touched) {
@@ -1922,7 +2002,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     if (deps.length) deploy(payload, { gap: 300 });
     framedR = E.r * 2;
     framedMode = "focus";
-    E.backdrop = null;
+    BK = null;
     frameTo({ tx: ground.x, ty: ground.y + E.r * 1.4, tz: ground.z, dist: E.r * 6, pitch: THREE.MathUtils.degToRad(10), duration: 1 }); // on the black frame of the cut
   }
   function endingUpdate(dt) {
@@ -1970,6 +2050,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   }
   function disposeEnding() {
     if (!E) return;
+    BK = null;
     for (const p of Object.values(E.planets)) p.dispose();
     E.patch?.dispose?.();
     if (E.patch) scene.remove(E.patch.object3d);
@@ -2016,12 +2097,20 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     (L.anchors?.arms ?? []).forEach((arm, i) => (arm.mesh.rotation.y = L.arms0[i] ?? arm.mesh.rotation.y));
     if (L.anchors?.tower) L.anchors.tower.rotation.z = L.tower0;
     if (L.clamps) L.clamps.mesh.position.y = L.clamps.y0;
+    for (const c of L.clampArms ?? []) applyDeploy(c, 0);
     for (const fx of Object.values(L.fx ?? {})) {
       fx.object3d.removeFromParent();
       fx.dispose();
     }
     controls.maxPolarAngle = L.maxPolar0;
     if (L.cut) state.cut = 0;
+    if (L.sky) {
+      scene.remove(L.sky.object3d);
+      L.sky.dispose();
+    }
+    L.earth?.dispose();
+    BK = null;
+    state.sky = null;
     if (L.pad) {
       L.pad.position.y = 0;
       L.pad.visible = true;
@@ -2257,7 +2346,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         createDroneShip({ size_u: 0.5 }).object3d,
         ...(() => {
           const layout = padLayout({ baseRadius_u: 0.5 });
-          return [createVents([{ position: new THREE.Vector3() }], { scale_u: 0.2 }), createDeluge({ layout }), createTrenchJet({ layout }), createSteamCloud({ layout })].map((fx) => fx.object3d);
+          return [createVents([{ position: new THREE.Vector3() }], { scale_u: 0.2 }), createDeluge({ layout }), createTrenchJet({ layout }), createSteamCloud({ layout }), createCondensationHalo({}), createSkyDome({ radius_u: 1 })].map((fx) => fx.object3d);
         })(),
       );
       warmFx.position.set(0, -50, 0);

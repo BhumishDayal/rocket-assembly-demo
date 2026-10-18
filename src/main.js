@@ -715,7 +715,7 @@ async function launch({ countdown, brief = false } = {}) {
   telemetry.final = null;
   selector.clear();
   const arrival = arrivalTimeline(current.build, catalog, sim.summary);
-  choreo.launch(sim, { pad: pad.group, anchors, onTelemetry, arrival, countdown, brief });
+  choreo.launch(sim, { pad: pad.group, clamps: pad.clamps, anchors, onTelemetry, arrival, countdown, brief });
 }
 
 // ---------- twin compare (design B8/C10) ----------
@@ -1247,6 +1247,9 @@ function updateDof(dt) {
 }
 
 const band = { near: null, far: null }; // fog band widths, eased
+const FOG0 = scene.fog.color.clone();
+const STAR0 = stars.material.opacity;
+let hadSky = false;
 // The fade through black between the ending's scenes (choreo.state.cut): over the canvas, under the page UI.
 const cutEl = document.createElement("div");
 cutEl.className = "cut";
@@ -1277,6 +1280,19 @@ function frame() {
   const open = landing?.fogOpen ?? 0; // the landing's dive opens the band wide (ground map, cloud deck)
   scene.fog.near = Math.max(0.1, THREE.MathUtils.lerp(dist - band.near, dist * 0.5, open));
   scene.fog.far = THREE.MathUtils.lerp(dist + band.far, dist * 8, open);
+  // A launch's sky (choreo.state.sky): fog in the horizon's colour, opened with the climb; stars by the sky.
+  const sky = choreo.state.sky;
+  if (sky) {
+    scene.fog.near = THREE.MathUtils.lerp(scene.fog.near, sky.near, sky.w);
+    scene.fog.far = THREE.MathUtils.lerp(scene.fog.far, sky.far, sky.w);
+    scene.fog.color.copy(FOG0).lerp(sky.horizon, sky.w);
+    stars.material.opacity = STAR0 * THREE.MathUtils.lerp(1, sky.stars, sky.w);
+    hadSky = true;
+  } else if (hadSky) {
+    scene.fog.color.copy(FOG0);
+    stars.material.opacity = STAR0;
+    hadSky = false;
+  }
   placeShadow(dt, black);
   updateContact(dt);
   updateDof(dt);

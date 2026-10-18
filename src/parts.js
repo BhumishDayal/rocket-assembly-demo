@@ -514,7 +514,8 @@ function paintedMaterials(t, classic) {
     copv: composite(),
     machined: keep(classic.machined),
     // Bare-metal bell: vertex colours (heat tint, flanges) lifted to read as metal, brushed streaks, tube ridges.
-    engine: phys({ color: new THREE.Color(2.6, 2.6, 2.6), vertexColors: true, metalness: 1, roughness: 0.34, roughnessMap: t.brushed, bumpMap: t.ridges, bumpScale: 0.25, anisotropy: 0.55, anisotropyRotation: Math.PI / 2, clearcoat: 0, envMapIntensity: 0.9 }),
+    // (vertex colours × 1.25: dark brushed metal; brighter read as chrome and blew out under bloom)
+    engine: phys({ color: new THREE.Color(1.25, 1.25, 1.25), vertexColors: true, metalness: 1, roughness: 0.42, roughnessMap: t.brushed, bumpMap: t.ridges, bumpScale: 0.25, anisotropy: 0.55, anisotropyRotation: Math.PI / 2, clearcoat: 0, envMapIntensity: 0.9 }),
     chamber: keep(classic.chamber),
     powerhead: keep(classic.powerhead),
     valve: keep(classic.valve),
@@ -2087,7 +2088,7 @@ export function createPart(spec, mats) {
       const m = p.mesh.userData.looks?.painted;
       if (!m?.userData.soot || p.kind !== "shell") continue;
       const edge = prop === "kerolox" ? 0.55 * spec.height : -spec.height; // hydrolox: below the bottom = all
-      const amount = m.roughness >= 0.8 ? 0.4 : 0.85; // matte sprayed foam vs paint
+      const amount = m.roughness >= 0.8 ? 0.15 : 0.5; // matte sprayed foam (insulated) vs paint
       m.frost = { value: new THREE.Vector4(edge - p.mesh.position.y, 0.06 * spec.height, amount, 0.012 * spec.height + 0.02) };
       p.mesh.onBeforeRender = tickFrost;
     }
