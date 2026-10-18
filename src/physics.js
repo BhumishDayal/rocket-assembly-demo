@@ -61,14 +61,16 @@ const byId = (items, id) => items.find((item) => item.id === id);
 
 // --- feasibility.ts ---------------------------------------------------------------------------------------
 export const RULES = {
-  TWR_OK: 1.2,
+  TWR_OK: 1.15, // was 1.2; lowered in the TS physics so the real Saturn V (1.18) and Atlas V 401 (1.17) pass
   TWR_BLOCKING: 1.0,
-  DRY_MASS_MIN_FRACTION: 0.04,
+  DRY_MASS_MIN_FRACTION: 0.03, // was 0.04; lowered in the TS physics so real stages (Falcon 9 S2 3.23 %) pass
   MAX_ENGINE_COUNT: 9,
   // Spec: tune so a 3.66 m tank + Merlin = 9. 0.62 also fits the real Saturn V S-IC's 5 F-1s (0.6 allowed 4).
   ENGINE_FIT_FACTOR: 0.62,
 };
 const { TWR_OK, TWR_BLOCKING, DRY_MASS_MIN_FRACTION, MAX_ENGINE_COUNT, ENGINE_FIT_FACTOR } = RULES;
+// The only non-blocking warning (same text as TWR_LOW_WARNING in feasibility.ts).
+export const TWR_LOW_WARNING = `liftoff TWR below ${TWR_OK}`;
 
 export const maxEngineCount = (tankDiameter_m, engineDiameter_m) => {
   if (engineDiameter_m <= 0 || tankDiameter_m <= 0) {
@@ -137,7 +139,7 @@ const stageRuleWarnings = (stage, stageIndex, engine, tank) => {
     out.push("engine and tank propellant differ");
   }
   if (engine && tank && tank.dryMass_kg < DRY_MASS_MIN_FRACTION * tank.propellantMass_kg) {
-    out.push("tank dry mass below 4 percent of propellant");
+    out.push(`tank dry mass below ${DRY_MASS_MIN_FRACTION * 100} percent of propellant`);
   }
   if (stageIndex === 0 && engine && isVacuumOnly(engine)) {
     out.push("vacuum-only engine on stage 0");
@@ -157,7 +159,7 @@ const stageRuleWarnings = (stage, stageIndex, engine, tank) => {
 const usableEngineCount = (n) => (isValidEngineCount(n) ? n : 0);
 
 const twrWarning = (twr) =>
-  twr < TWR_BLOCKING ? { message: "liftoff TWR below 1.0", blocking: true } : twr < TWR_OK ? { message: "liftoff TWR below 1.2", blocking: false } : null;
+  twr < TWR_BLOCKING ? { message: "liftoff TWR below 1.0", blocking: true } : twr < TWR_OK ? { message: TWR_LOW_WARNING, blocking: false } : null;
 
 export const evaluateBuild = (build, catalog) => {
   const warnings = [];

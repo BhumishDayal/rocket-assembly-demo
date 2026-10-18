@@ -61,15 +61,15 @@
 // - R: the 6,371 km mean Earth radius.
 // - p0 101,325 Pa and rho0 1.225 kg/m^3: ISA sea level.
 // - The 8.5 km scale height and Cd 0.3: model choices, from the design brief.
-import { G0, evaluateBuild } from "./physics.js";
+import { G0, TWR_LOW_WARNING, evaluateBuild } from "./physics.js";
 
 // Pad abort: a build whose verdict has a blocking warning is not flown (outcome "blocked", reason = the first
-// blocking warning, no samples or events). In physics.js every warning blocks except "liftoff TWR below 1.2".
+// blocking warning, no samples or events). In physics.js every warning blocks except TWR_LOW_WARNING.
 // FLIGHT_EXEMPT lists blocking warnings that are app rules rather than physics, which a real vehicle breaks and
 // the simulation can still fly honestly: the 4 % dry-mass rule, which the real Falcon 9 second stage (3.2 %)
 // fails. Remove it to ground those builds too. opts.ignoreVerdict flies any build regardless.
-const NON_BLOCKING = new Set(["liftoff TWR below 1.2"]);
-const FLIGHT_EXEMPT = [/^tank dry mass below 4 percent of propellant$/];
+const NON_BLOCKING = new Set([TWR_LOW_WARNING]);
+const FLIGHT_EXEMPT = [/^tank dry mass below \d+(\.\d+)? percent of propellant$/];
 
 const MU = 3.986004418e14; // m^3/s^2
 const RE = 6371e3; // m

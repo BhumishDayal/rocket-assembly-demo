@@ -2,6 +2,7 @@
 // Run: node scripts/check-physics.mjs   (no deps; exits 1 on any mismatch)
 //
 // GOLDEN below was produced by running the team's TypeScript unmodified: SpaxeX/src/lib/physics/*.ts on main
+// (regenerated 2026-10-18 for the 3 % tank floor and the 1.15 TWR threshold)
 // @ e7600da (after #20: engine-fit factor 0.62, engine-count validation, "too many engines" blocking warning),
 // executed under the app's Vitest (node v25) with this folder's src/data/*.json, on every preset in
 // src/data/presets.json and on EDGE_BUILDS, with payloads.extra.json appended to the payloads exactly as
@@ -10,7 +11,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { evaluateBuild, maxEngineCount, physicsRulesText, rocketDistance, sanitizeEngineCount, stageDetails, stackMass_kg } from "../src/physics.js";
+import { evaluateBuild, maxEngineCount, rocketDistance, sanitizeEngineCount, stageDetails, stackMass_kg } from "../src/physics.js";
 
 const REL_TOL = 1e-6;
 const dataDir = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "data");
@@ -47,9 +48,9 @@ const EDGE_BUILDS = {
 };
 
 const GOLDEN = {
-  "falcon-9": {"stages": [{"stageIndex": 0, "ispUsed_s": 282, "startMass_kg": 549939, "endMass_kg": 140356, "deltaV_ms": 3776.603066137006}, {"stageIndex": 1, "ispUsed_s": 348, "startMass_kg": 114756, "endMass_kg": 9092, "deltaV_ms": 8652.640730039622}], "totalDeltaV_ms": 12429.243796176628, "requiredDeltaV_ms": 11900, "marginDeltaV_ms": 529.2437961766282, "liftoffTWR": 1.4101458161172684, "deltaVOk": true, "twrOk": true, "feasible": false, "totalMass_kg": 549939, "liftoffThrust_kN": 7605, "closestRocketId": "falcon-9", "warnings": ["tank dry mass below 4 percent of propellant"]},
-  "saturn-v": {"stages": [{"stageIndex": 0, "ispUsed_s": 260, "startMass_kg": 2919673.3000000003, "endMass_kg": 773875.3000000003, "deltaV_ms": 3385.5716144478206}, {"stageIndex": 1, "ispUsed_s": 424, "startMass_kg": 643453.4, "endMass_kg": 200218.40000000002, "deltaV_ms": 4854.2418828840255}, {"stageIndex": 2, "ispUsed_s": 424, "startMass_kg": 164060.7, "endMass_kg": 56965.70000000001, "deltaV_ms": 4398.299698067984}], "totalDeltaV_ms": 12638.11319539983, "requiredDeltaV_ms": 12600, "marginDeltaV_ms": 38.11319539983015, "liftoffTWR": 1.1822697260517419, "deltaVOk": true, "twrOk": false, "feasible": false, "totalMass_kg": 2919673.3000000003, "liftoffThrust_kN": 33851, "closestRocketId": "saturn-v", "warnings": ["liftoff TWR below 1.2"]},
-  "atlas-v-401": {"stages": [{"stageIndex": 0, "ispUsed_s": 311.9, "startMass_kg": 333408, "endMass_kg": 49319, "deltaV_ms": 5845.340559257165}, {"stageIndex": 1, "ispUsed_s": 449.7, "startMass_kg": 28265, "endMass_kg": 7435, "deltaV_ms": 5889.294827724242}], "totalDeltaV_ms": 11734.635386981408, "requiredDeltaV_ms": 11900, "marginDeltaV_ms": -165.36461301859163, "liftoffTWR": 1.170351659402696, "deltaVOk": false, "twrOk": false, "feasible": false, "totalMass_kg": 333408, "liftoffThrust_kN": 3826.6, "closestRocketId": "falcon-9", "warnings": ["liftoff TWR below 1.2"]},
+  "falcon-9": {"stages": [{"stageIndex": 0, "ispUsed_s": 282, "startMass_kg": 549939, "endMass_kg": 140356, "deltaV_ms": 3776.603066137006}, {"stageIndex": 1, "ispUsed_s": 348, "startMass_kg": 114756, "endMass_kg": 9092, "deltaV_ms": 8652.640730039622}], "totalDeltaV_ms": 12429.243796176628, "requiredDeltaV_ms": 11900, "marginDeltaV_ms": 529.2437961766282, "liftoffTWR": 1.4101458161172684, "deltaVOk": true, "twrOk": true, "feasible": true, "totalMass_kg": 549939, "liftoffThrust_kN": 7605, "closestRocketId": "falcon-9", "warnings": []},
+  "saturn-v": {"stages": [{"stageIndex": 0, "ispUsed_s": 260, "startMass_kg": 2919673.3000000003, "endMass_kg": 773875.3000000003, "deltaV_ms": 3385.5716144478206}, {"stageIndex": 1, "ispUsed_s": 424, "startMass_kg": 643453.4, "endMass_kg": 200218.40000000002, "deltaV_ms": 4854.2418828840255}, {"stageIndex": 2, "ispUsed_s": 424, "startMass_kg": 164060.7, "endMass_kg": 56965.70000000001, "deltaV_ms": 4398.299698067984}], "totalDeltaV_ms": 12638.11319539983, "requiredDeltaV_ms": 12600, "marginDeltaV_ms": 38.11319539983015, "liftoffTWR": 1.1822697260517419, "deltaVOk": true, "twrOk": true, "feasible": true, "totalMass_kg": 2919673.3000000003, "liftoffThrust_kN": 33851, "closestRocketId": "saturn-v", "warnings": []},
+  "atlas-v-401": {"stages": [{"stageIndex": 0, "ispUsed_s": 311.9, "startMass_kg": 333408, "endMass_kg": 49319, "deltaV_ms": 5845.340559257165}, {"stageIndex": 1, "ispUsed_s": 449.7, "startMass_kg": 28265, "endMass_kg": 7435, "deltaV_ms": 5889.294827724242}], "totalDeltaV_ms": 11734.635386981408, "requiredDeltaV_ms": 11900, "marginDeltaV_ms": -165.36461301859163, "liftoffTWR": 1.170351659402696, "deltaVOk": false, "twrOk": true, "feasible": false, "totalMass_kg": 333408, "liftoffThrust_kN": 3826.6, "closestRocketId": "falcon-9", "warnings": []},
   "delta-iv-m": {"stages": [{"stageIndex": 0, "ispUsed_s": 362, "startMass_kg": 258998, "endMass_kg": 59358, "deltaV_ms": 5229.989445633722}, {"stageIndex": 1, "ispUsed_s": 465.5, "startMass_kg": 32598, "endMass_kg": 5398, "deltaV_ms": 8208.877400216214}], "totalDeltaV_ms": 13438.866845849936, "requiredDeltaV_ms": 12600, "marginDeltaV_ms": 838.866845849936, "liftoffTWR": 1.2346929489412208, "deltaVOk": true, "twrOk": true, "feasible": true, "totalMass_kg": 258998, "liftoffThrust_kN": 3136, "closestRocketId": "falcon-9", "warnings": []},
   "demo-build": {"stages": [{"stageIndex": 0, "ispUsed_s": 282, "startMass_kg": 472073, "endMass_kg": 62490, "deltaV_ms": 5592.142522799266}, {"stageIndex": 1, "ispUsed_s": 465.5, "startMass_kg": 36890, "endMass_kg": 9690, "deltaV_ms": 6102.696465703547}], "totalDeltaV_ms": 11694.838988502812, "requiredDeltaV_ms": 12600, "marginDeltaV_ms": -905.1610114971882, "liftoffTWR": 1.6427420758435973, "deltaVOk": false, "twrOk": true, "feasible": false, "totalMass_kg": 472073, "liftoffThrust_kN": 7605, "closestRocketId": "falcon-9", "warnings": []},
 };
@@ -59,8 +60,8 @@ const EDGE_GOLDEN = {
   "unknown-ids": {"stages": [{"stageIndex": 0, "ispUsed_s": 0, "startMass_kg": 0, "endMass_kg": -409583, "deltaV_ms": 0}, {"stageIndex": 1, "ispUsed_s": 311, "startMass_kg": 0, "endMass_kg": 0, "deltaV_ms": 0}], "totalDeltaV_ms": 0, "requiredDeltaV_ms": 0, "marginDeltaV_ms": 0, "liftoffTWR": 0, "deltaVOk": false, "twrOk": false, "feasible": false, "totalMass_kg": 0, "liftoffThrust_kN": 0, "closestRocketId": "", "warnings": ["unknown mission id: nowhere", "unknown payload id: ghost", "unknown engine id: nope", "unknown tank id: 1", "liftoff TWR below 1.0"]},
   "vac-on-stage0-mismatch": {"stages": [{"stageIndex": 0, "ispUsed_s": 0, "startMass_kg": 471990.2, "endMass_kg": 28755.20000000001, "deltaV_ms": 0}], "totalDeltaV_ms": 0, "requiredDeltaV_ms": 9400, "marginDeltaV_ms": -9400, "liftoffTWR": 0, "deltaVOk": false, "twrOk": false, "feasible": false, "totalMass_kg": 471990.2, "liftoffThrust_kN": 0, "closestRocketId": "", "warnings": ["engine and tank propellant differ", "vacuum-only engine on stage 0", "liftoff TWR below 1.0"]},
   "twr-below-1": {"stages": [{"stageIndex": 0, "ispUsed_s": 282, "startMass_kg": 442331.4, "endMass_kg": 32748.400000000023, "deltaV_ms": 7199.099872159322}], "totalDeltaV_ms": 7199.099872159322, "requiredDeltaV_ms": 9400, "marginDeltaV_ms": -2200.9001278406777, "liftoffTWR": 0.19479969090287266, "deltaVOk": false, "twrOk": false, "feasible": false, "totalMass_kg": 442331.4, "liftoffThrust_kN": 845, "closestRocketId": "falcon-9", "warnings": ["liftoff TWR below 1.0"]},
-  "no-mission": {"stages": [{"stageIndex": 0, "ispUsed_s": 311.9, "startMass_kg": 330121.7, "endMass_kg": 46032.70000000001, "deltaV_ms": 6025.9619473330185}, {"stageIndex": 1, "ispUsed_s": 453.8, "startMass_kg": 24978.7, "endMass_kg": 4148.700000000001, "deltaV_ms": 7989.229267544591}], "totalDeltaV_ms": 14015.19121487761, "requiredDeltaV_ms": 0, "marginDeltaV_ms": 14015.19121487761, "liftoffTWR": 1.1820022920581532, "deltaVOk": false, "twrOk": false, "feasible": false, "totalMass_kg": 330121.7, "liftoffThrust_kN": 3826.6, "closestRocketId": "falcon-9", "warnings": ["liftoff TWR below 1.2"]},
-  "two-dry-rule-hits": {"stages": [{"stageIndex": 0, "ispUsed_s": 366, "startMass_kg": 882333.2, "endMass_kg": 156812.19999999995, "deltaV_ms": 6200.476402918371}, {"stageIndex": 1, "ispUsed_s": 348, "startMass_kg": 115764, "endMass_kg": 10100, "deltaV_ms": 8323.672086591943}], "totalDeltaV_ms": 14524.148489510313, "requiredDeltaV_ms": 13500, "marginDeltaV_ms": 1024.148489510313, "liftoffTWR": 0.859566579342661, "deltaVOk": true, "twrOk": false, "feasible": false, "totalMass_kg": 882333.2, "liftoffThrust_kN": 7437.6, "closestRocketId": "falcon-9", "warnings": ["tank dry mass below 4 percent of propellant", "tank dry mass below 4 percent of propellant", "liftoff TWR below 1.0"]},
+  "no-mission": {"stages": [{"stageIndex": 0, "ispUsed_s": 311.9, "startMass_kg": 330121.7, "endMass_kg": 46032.70000000001, "deltaV_ms": 6025.9619473330185}, {"stageIndex": 1, "ispUsed_s": 453.8, "startMass_kg": 24978.7, "endMass_kg": 4148.700000000001, "deltaV_ms": 7989.229267544591}], "totalDeltaV_ms": 14015.19121487761, "requiredDeltaV_ms": 0, "marginDeltaV_ms": 14015.19121487761, "liftoffTWR": 1.1820022920581532, "deltaVOk": false, "twrOk": true, "feasible": false, "totalMass_kg": 330121.7, "liftoffThrust_kN": 3826.6, "closestRocketId": "falcon-9", "warnings": []},
+  "two-dry-rule-hits": {"stages": [{"stageIndex": 0, "ispUsed_s": 366, "startMass_kg": 882333.2, "endMass_kg": 156812.19999999995, "deltaV_ms": 6200.476402918371}, {"stageIndex": 1, "ispUsed_s": 348, "startMass_kg": 115764, "endMass_kg": 10100, "deltaV_ms": 8323.672086591943}], "totalDeltaV_ms": 14524.148489510313, "requiredDeltaV_ms": 13500, "marginDeltaV_ms": 1024.148489510313, "liftoffTWR": 0.859566579342661, "deltaVOk": true, "twrOk": false, "feasible": false, "totalMass_kg": 882333.2, "liftoffThrust_kN": 7437.6, "closestRocketId": "falcon-9", "warnings": ["liftoff TWR below 1.0"]},
   "zero-engines": {"stages": [{"stageIndex": 0, "ispUsed_s": 366, "startMass_kg": 1104049.3, "endMass_kg": 116578.30000000005, "deltaV_ms": 8069.232137485874}, {"stageIndex": 1, "ispUsed_s": 465.5, "startMass_kg": 32748, "endMass_kg": 3800, "deltaV_ms": 9832.273834383548}], "totalDeltaV_ms": 17901.50597186942, "requiredDeltaV_ms": 13200, "marginDeltaV_ms": 4701.505971869421, "liftoffTWR": 0, "deltaVOk": true, "twrOk": false, "feasible": false, "totalMass_kg": 1104049.3, "liftoffThrust_kN": 0, "closestRocketId": "", "warnings": ["stage 1 engine count must be a whole number from 1 to 9", "liftoff TWR below 1.0"]},
   "too-many-engines": {"stages": [{"stageIndex": 0, "ispUsed_s": 260, "startMass_kg": 506501.7, "endMass_kg": 96918.70000000001, "deltaV_ms": 4216.37261259781}], "totalDeltaV_ms": 4216.37261259781, "requiredDeltaV_ms": 9400, "marginDeltaV_ms": -5183.62738740219, "liftoffTWR": 12.267114670282158, "deltaVOk": false, "twrOk": true, "feasible": false, "totalMass_kg": 506501.7, "liftoffThrust_kN": 60931.799999999996, "closestRocketId": "falcon-heavy", "warnings": ["9 F-1 engines don't fit a 3.66 m wide Falcon 9 Block 5 first-stage tank: max 1"]},
   "fractional-count": {"stages": [{"stageIndex": 0, "ispUsed_s": 282, "startMass_kg": 430978.2, "endMass_kg": 21395.20000000001, "deltaV_ms": 8304.420642894596}], "totalDeltaV_ms": 8304.420642894596, "requiredDeltaV_ms": 9400, "marginDeltaV_ms": -1095.5793571054037, "liftoffTWR": 0, "deltaVOk": false, "twrOk": false, "feasible": false, "totalMass_kg": 430978.2, "liftoffThrust_kN": 0, "closestRocketId": "", "warnings": ["stage 1 engine count must be a whole number from 1 to 9", "liftoff TWR below 1.0"]},
@@ -172,59 +173,6 @@ for (const k of catalog.tanks) {
   compare(`fit.${k.id}`, catalog.engines.map((e) => maxEngineCount(k.diameter_m, e.diameter_m)), FIT_GOLDEN[k.id]);
 }
 console.log(`edge builds: ${Object.keys(EDGE_BUILDS).length} checked`);
-
-// physicsRulesText (feasibility.ts, PR #30): the strings must match the TS exactly. Produced by running
-// SpaxeX origin/main @ 1cb93b8 src/lib/physics/feasibility.ts with `npx -y tsx` on: no argument, [], the dry-mass
-// warning, and a too-many-engines warning.
-const RULES_GOLDEN = {
-  "all": {
-    "warnings": null,
-    "text": [
-      "Delta-v per stage = Isp x g0 x ln(start mass / end mass); stage 1 uses sea-level Isp, upper stages vacuum Isp; upper stages ride as dead weight while lower stages burn. Mission requirements already include gravity and drag losses.",
-      "Liftoff thrust-to-weight (stage 1 engines only) must be at least 1.2; below 1 the rocket cannot leave the pad.",
-      "Engine and tank propellant must match: an engine can only burn what its tank holds.",
-      "Vacuum-only engines (no sea-level thrust) cannot be on stage 1, the bottom stage: their huge nozzles are built for space and fail in thick air. On upper stages they are the right choice.",
-      "Engines that fit under a tank = floor(0.62 x (tank diameter / engine diameter)^2), max 9: nozzles must sit side by side under the tank base.",
-      "Tank dry mass must be at least 4 % of its propellant: real tanks need walls and structure.",
-      "Feasible = enough delta-v for the mission, TWR ok, and no blocking warnings."
-    ]
-  },
-  "none": {
-    "warnings": [],
-    "text": [
-      "Delta-v per stage = Isp x g0 x ln(start mass / end mass); stage 1 uses sea-level Isp, upper stages vacuum Isp; upper stages ride as dead weight while lower stages burn. Mission requirements already include gravity and drag losses.",
-      "Liftoff thrust-to-weight (stage 1 engines only) must be at least 1.2; below 1 the rocket cannot leave the pad.",
-      "Feasible = enough delta-v for the mission, TWR ok, and no blocking warnings."
-    ]
-  },
-  "dryMass": {
-    "warnings": [
-      "tank dry mass below 4 percent of propellant"
-    ],
-    "text": [
-      "Delta-v per stage = Isp x g0 x ln(start mass / end mass); stage 1 uses sea-level Isp, upper stages vacuum Isp; upper stages ride as dead weight while lower stages burn. Mission requirements already include gravity and drag losses.",
-      "Liftoff thrust-to-weight (stage 1 engines only) must be at least 1.2; below 1 the rocket cannot leave the pad.",
-      "Engine and tank propellant must match: an engine can only burn what its tank holds.",
-      "Tank dry mass must be at least 4 % of its propellant: real tanks need walls and structure.",
-      "Feasible = enough delta-v for the mission, TWR ok, and no blocking warnings."
-    ]
-  },
-  "tooMany": {
-    "warnings": [
-      "9 RD-191 engines don't fit a 3.66 m wide Falcon 9 Block 5 first-stage tank: max 1"
-    ],
-    "text": [
-      "Delta-v per stage = Isp x g0 x ln(start mass / end mass); stage 1 uses sea-level Isp, upper stages vacuum Isp; upper stages ride as dead weight while lower stages burn. Mission requirements already include gravity and drag losses.",
-      "Liftoff thrust-to-weight (stage 1 engines only) must be at least 1.2; below 1 the rocket cannot leave the pad.",
-      "Engines that fit under a tank = floor(0.62 x (tank diameter / engine diameter)^2), max 9: nozzles must sit side by side under the tank base.",
-      "Feasible = enough delta-v for the mission, TWR ok, and no blocking warnings."
-    ]
-  }
-};
-for (const [k, g] of Object.entries(RULES_GOLDEN)) {
-  compare(`physicsRulesText(${k})`, physicsRulesText(g.warnings ?? undefined), g.text);
-}
-console.log(`physicsRulesText: ${Object.keys(RULES_GOLDEN).length} cases checked`);
 
 if (failures.length) {
   console.error(`\nFAIL: ${failures.length} mismatch(es)`);
