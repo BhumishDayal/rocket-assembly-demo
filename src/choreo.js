@@ -201,22 +201,25 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   const HOME_PITCH = elevation(); // the camera's starting elevation; the build hero angle sits 8° below it
   const HERO_PITCH = HOME_PITCH - THREE.MathUtils.degToRad(8);
   let camAnim = null; // one camera move at a time: a new framing replaces the one in flight
-  // pitch: target elevation (radians) or null to keep the current one.
-  function frameTo({ ty, dist, orbit = 0, pitch = null, duration = D(1100), ease = "inOutCubic" }) {
-    const cur = { ty: controls.target.y, d: camera.position.distanceTo(controls.target), az: 0, el: elevation() };
+  // pitch: target elevation (radians) or null to keep the current one. tx/tz move the orbit target off the axis
+  // (twin compare frames the pair); every other framing brings it back to the axis.
+  function frameTo({ ty, dist, tx = 0, tz = 0, orbit = 0, pitch = null, duration = D(1100), ease = "inOutCubic" }) {
+    const cur = { tx: controls.target.x, ty: controls.target.y, tz: controls.target.z, d: camera.position.distanceTo(controls.target), az: 0, el: elevation() };
     let az = 0;
     camAnim?.cancel();
     live.delete(camAnim);
     const p = run(cur, {
+      tx,
       ty,
+      tz,
       d: dist,
       az: orbit,
       el: pitch ?? cur.el,
       duration,
       ease,
       onUpdate: () => {
-        controls.target.set(0, cur.ty, 0);
         camDir.copy(camera.position).sub(controls.target).normalize();
+        controls.target.set(cur.tx, cur.ty, cur.tz);
         if (orbit) camDir.applyAxisAngle(Y, cur.az - az);
         az = cur.az;
         if (pitch != null) {
@@ -282,6 +285,13 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   let explodedSpan = null; // { top, r } of the current exploded view
   function frameExploded() {
     return explodedSpan ? frameSpan(0, explodedSpan.top, explodedSpan.r, 0.85, { mode: "exploded" }) : frameStack();
+  }
+  // Twin compare: frame the stack and the twin outline beside it. center = the pair's midpoint on the ground
+  // plane, top = the taller of the two, halfWidth = half the pair's horizontal extent.
+  function frameCompare(center, top, halfWidth) {
+    framedR = halfWidth;
+    framedMode = "stack";
+    return frameTo({ ...spanFraming(0, top, halfWidth, 0.8), tx: center.x, tz: center.z, pitch: HOME_PITCH });
   }
   // Home: the whole stack-to-be at 85 %, the first ghost waiting on the pad.
   function home() {
@@ -1209,6 +1219,23 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     return new Promise((resolve) => (L.resolve = resolve));
   }
 
+  // After a launch: the assembled rocket back on the pad, still built (story mode's twin compare).
+  function returnToPad() {
+    if (!L || !L.done) return false;
+    endLaunch();
+    for (const part of parts) {
+      for (const piece of part.pieces) {
+        piece.mesh.position.copy(piece.rest.position);
+        piece.mesh.quaternion.copy(piece.rest.quaternion);
+      }
+      fadeShell(part, SHELL.built, 0);
+    }
+    controls.autoRotate = false;
+    frameStack();
+    changed();
+    return true;
+  }
+
   // Undo a launch (reset / preset switch): plumes and pad light gone, parts back on the pad.
   function endLaunch() {
     if (!L) return;
@@ -1394,6 +1421,9 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     scrubBy,
     scrubEnd,
     launch,
+    returnToPad,
+    frameCompare,
+    frameStack: () => frameStack(),
     swap,
     applyManifest,
     restack,

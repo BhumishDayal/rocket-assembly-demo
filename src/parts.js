@@ -362,14 +362,19 @@ function lineDepthAlpha(shader) {
   );
 }
 const lineDepthKey = () => "xray-line-depth-v1";
-function lineChild(mesh, geo, base, name) {
+// Peach technical line material (fog on, depth fade): the edge lines here and the line-art in anchors.js.
+export function peachLineMaterial(opacity = LINE_STRUCT) {
   lineBase ??= new THREE.LineBasicMaterial({ color: PEACH, transparent: true, opacity: LINE_STRUCT, depthTest: true, fog: true });
-  let eg = edgeCache.get(geo);
-  if (!eg) edgeCache.set(geo, (eg = new THREE.EdgesGeometry(geo, 25)));
   const m = lineBase.clone();
   m.onBeforeCompile = lineDepthAlpha; // set per clone: Material.copy drops shader hooks
   m.customProgramCacheKey = lineDepthKey;
-  m.opacity = base;
+  m.opacity = opacity;
+  return m;
+}
+function lineChild(mesh, geo, base, name) {
+  let eg = edgeCache.get(geo);
+  if (!eg) edgeCache.set(geo, (eg = new THREE.EdgesGeometry(geo, 25)));
+  const m = peachLineMaterial(base);
   const lines = new THREE.LineSegments(eg, m);
   lines.raycast = () => {}; // picking stays on the meshes
   lines.name = name;
@@ -1443,12 +1448,15 @@ export function setShellOpacity(part, value) {
 
 // ---------- environment ----------
 
+// Radius of the launch-pad deck for a stack base radius (scene units); anchors.js lines up with it.
+export const padRadius = (baseRadius_u) => Math.max(2.4, baseRadius_u * 3.4);
+
 // Launch pad sized from the stack's base radius (scene units): deck, exhaust opening, holo rings, hold-down
 // clamps between the engines, ground disc and polar grid.
 export function createPad({ baseRadius_u = 1 } = {}) {
   const b = baseRadius_u;
   const g = new THREE.Group();
-  const padR = Math.max(2.4, b * 3.4);
+  const padR = padRadius(b);
   const disc = new THREE.Mesh(new THREE.CylinderGeometry(padR, padR * 1.06, 0.18, 96), new THREE.MeshStandardMaterial({ color: 0x171a21, metalness: 0.6, roughness: 0.7 }));
   disc.position.y = -0.09;
   disc.receiveShadow = true;

@@ -6,10 +6,13 @@ import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { GTAOPass } from "three/addons/postprocessing/GTAOPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+import * as catalogModule from "./data/catalog.js";
 import { catalog, presetIds, getPreset, presetToBuild, applyOption } from "./data/catalog.js";
 import { evaluateBuild, stageDetails, stackMass_kg } from "./physics.js";
 import { optionsWithCompat } from "./compat.js";
 import { simulateAscent } from "./ascent.js";
+import { createSilhouette } from "./silhouette.js";
+import { createAnchors } from "./anchors.js";
 import { SCALE, buildManifest, sceneBounds } from "./layout.js";
 import { createMaterials, createPart, createPad, createStars } from "./parts.js";
 import { createChoreographer } from "./choreo.js";
@@ -91,6 +94,7 @@ scene.add(new THREE.HemisphereLight(0x8fa6c8, 0x0f1118, 0.08));
 const root = new THREE.Group(); // shakes on lock
 scene.add(root);
 let pad = null;
+let anchors = null; // scale anchors (UI4): person, tower, trench, masts at true size, on the pad
 scene.add(createStars());
 
 function disposeTree(obj) {
@@ -114,13 +118,19 @@ function applyBounds(b) {
   sc.far = H * 3.2 + 45;
   sc.updateProjectionMatrix();
   controls.maxDistance = Math.max(70, H * 3.4);
-  if (pad?.baseRadius_u === b.baseRadius_u) return;
-  if (pad) {
-    root.remove(pad.group);
-    disposeTree(pad.group);
+  if (pad?.baseRadius_u !== b.baseRadius_u) {
+    if (pad) {
+      root.remove(pad.group);
+      disposeTree(pad.group);
+    }
+    pad = { ...createPad({ baseRadius_u: b.baseRadius_u }), baseRadius_u: b.baseRadius_u };
+    root.add(pad.group);
   }
-  pad = { ...createPad({ baseRadius_u: b.baseRadius_u }), baseRadius_u: b.baseRadius_u };
-  root.add(pad.group);
+  // Anchors are sized from the stack height too, so they follow every preset/option change. They hang on the
+  // pad group, so they drop away with the pad in flight.
+  anchors?.dispose();
+  anchors = createAnchors({ baseRadius_u: b.baseRadius_u, stackHeight_u: b.height_u });
+  pad.group.add(anchors.object3d);
 }
 applyBounds(current.bounds);
 
@@ -341,9 +351,11 @@ function syncUi() {
   btnBuildAll.textContent = built === parts.length ? "Launch" : "Build all";
   btnBuildAll.disabled = busy > 0 || exploded || launched;
   btnExplode.disabled ||= launched;
+  if (twin && (twin.key !== buildKey(current.build) || launched || busy > 0)) hideTwin({ reframe: false });
   if (launched) {
     if (telemetry.final) hudText.innerHTML = telemetry.final;
-  } else if (!swapping) hudText.innerHTML = hudHtml();
+  } else if (twin) hudText.innerHTML = twin.line;
+  else if (!swapping) hudText.innerHTML = hudHtml();
   // A selected part that is being removed (or gone after reset) loses its card.
   const sel = selector.selected;
   if (sel && (!sel.built || (sel.busy && !swapping) || !parts.includes(sel))) selector.clear();
@@ -455,6 +467,136 @@ async function launch() {
   choreo.launch(sim, { pad: pad.group, onTelemetry });
 }
 
+// ---------- twin compare (design B8/C10) ----------
+// The closest real rocket from the GCAT pool (catalog.closestRockets, UI 2) as a peach outline at true scale
+// beside the stack (UI4's createSilhouette), with one HUD line: catalog.twinLine + "est." (the match uses our
+// build's estimated mass and thrust) + the GCAT attribution (CC BY 4.0). Key C toggles; a build change hides it.
+let twin = null;
+function twinRecord() {
+  const list = catalogModule.closestRockets?.(current.build, 1);
+  return Array.isArray(list) ? list[0]?.rocket ?? null : null;
+}
+const gcatCredit = () => String(catalogModule.gcatSource ?? "").split("; ").pop();
+function showTwin() {
+  if (twin || choreo.state.launch || choreo.state.busy || !isComplete()) return false;
+  const rec = twinRecord();
+  if (!rec) {
+    hudText.innerHTML = "Closest real rocket: data not loaded yet";
+    return false;
+  }
+  const text = catalogModule.twinLine ? catalogModule.twinLine(rec) : rec.name;
+  const credit = gcatCredit();
+  const line = `Closest real rocket: <strong>${f.esc(text)}</strong> · est.${credit ? ` · ${f.esc(credit)}` : ""}`;
+  let sil = null;
+  const stackR = current.bounds.radius_u;
+  if (rec.length_m > 0 && rec.diameter_m > 0) {
+    sil = createSilhouette({ name: rec.name, length_m: rec.length_m, diameter_m: rec.diameter_m, stages: rec.stages ?? 2 });
+    // To the camera's right, a gap of 0.6 stack radius from the stack's wall.
+    const right = new THREE.Vector3().crossVectors(camera.getWorldDirection(new THREE.Vector3()), camera.up).setY(0).normalize();
+    const off = stackR * 1.6 + sil.radius_u;
+    sil.object3d.position.copy(right).multiplyScalar(off);
+    root.add(sil.object3d);
+    const c = (off + sil.radius_u - stackR) / 2;
+    choreo.frameCompare(right.clone().multiplyScalar(c), Math.max(current.bounds.height_u, sil.height_u), (off + sil.radius_u + stackR) / 2);
+  }
+  twin = { rec, sil, line, key: buildKey(current.build) };
+  hudText.innerHTML = line;
+  return true;
+}
+function hideTwin({ reframe = true } = {}) {
+  if (!twin) return;
+  if (twin.sil) {
+    root.remove(twin.sil.object3d);
+    twin.sil.dispose();
+  }
+  twin = null;
+  if (reframe) choreo.frameStack();
+  hudText.innerHTML = hudHtml();
+}
+const toggleTwin = () => (twin ? hideTwin() : showTwin());
+
+// ---------- story mode (design H31) ----------
+// P or ?story=1: the whole pitch hands-free. Falcon 9 → Build all → verdict → the stage-2 tank's card and
+// Options → the first "unusual" option (the verdict changes) → back to the original → Launch → orbit →
+// back on the pad beside its real twin → a slow orbit around both. Any key or click hands control back.
+const story = { active: false, cancel: null };
+const CANCELLED = Symbol("story cancelled");
+async function runStory() {
+  if (story.active) return;
+  story.active = true;
+  const cancelled = new Promise((_, reject) => (story.cancel = () => reject(CANCELLED)));
+  cancelled.catch(() => {});
+  const timers = new Set();
+  const step = (p) => Promise.race([p, cancelled]);
+  const hold = (ms) => step(new Promise((r) => timers.add(setTimeout(r, ms))));
+  const until = (test, every = 120) =>
+    step(
+      new Promise((r) => {
+        const t = setInterval(() => {
+          if (!test()) return;
+          clearInterval(t);
+          r();
+        }, every);
+        timers.add(t);
+      }),
+    );
+  try {
+    hideTwin({ reframe: false });
+    setRocketsOpen(false);
+    if (current.preset.id !== "falcon-9" || current.modified) switchPreset(presetIds.indexOf("falcon-9") - presetIndex);
+    else if (parts.some((p) => p.built) || choreo.state.launch) choreo.reset();
+    await hold(900);
+    await step(choreo.buildAll());
+    await until(() => isComplete() && !choreo.state.busy && !choreo.state.auto);
+    await hold(2000);
+
+    // The stage-2 tank: card, Options, the first unusual alternative, then back.
+    const slot = () => parts.find((p) => p.kind === "tank" && p.stageIndex === 1) ?? parts.find((p) => p.kind === "tank");
+    const original = slot().record.id;
+    selector.select(slot());
+    await hold(1400);
+    card.el.querySelector(".opt-toggle")?.click();
+    await hold(1500);
+    const alts = optionsWithCompat(current.build, catalog, "tank", slot().stageIndex);
+    const pick = alts.find((o) => o.level === "unusual" && o.record.id !== original) ?? alts.find((o) => o.level === "ok" && o.record.id !== original);
+    if (pick) {
+      await step(chooseOption(slot(), pick.record.id));
+      await hold(2000);
+      card.el.querySelector(".opt-toggle")?.click();
+      await hold(1200);
+      await step(chooseOption(slot(), original));
+      await hold(1200);
+    }
+    selector.clear();
+    await hold(600);
+
+    // Launch, watch it to the outcome, hold.
+    launch();
+    await until(() => choreo.state.launch === "done");
+    await hold(3000);
+
+    // Back on the pad beside its closest real twin, then a slow orbit around both.
+    choreo.returnToPad();
+    await hold(1300);
+    showTwin();
+    await hold(1600);
+    controls.autoRotate = true;
+    controls.autoRotateSpeed = 0.5;
+  } catch (e) {
+    if (e !== CANCELLED) throw e;
+  } finally {
+    for (const t of timers) clearTimeout(t), clearInterval(t);
+    story.active = false;
+    story.cancel = null;
+  }
+}
+// A real key press or click (not the story's own actions) hands control back.
+const cancelStory = (e) => {
+  if (story.active && e.isTrusted) story.cancel?.();
+};
+addEventListener("keydown", cancelStory, true);
+addEventListener("pointerdown", cancelStory, true);
+
 function onPartKey(part) {
   if (part.built) {
     if (choreo.isTopBuilt(part)) choreo.remove(part);
@@ -478,6 +620,8 @@ addEventListener("keydown", (e) => {
   else if (k === "r") reset();
   else if (k === "m") btnSound.click();
   else if (k === "l") launch();
+  else if (k === "c") toggleTwin();
+  else if (k === "p") runStory();
   else if (k === "[") switchPreset(-1);
   else if (k === "]") switchPreset(1);
 });
@@ -530,6 +674,8 @@ function frame() {
   scene.fog.near = Math.max(0.1, dist - 0.6 * R);
   scene.fog.far = dist + (mode === "focus" || mode === "exploded" ? 3 : 6) * R;
   if (pad?.ringMat) pad.ringMat.opacity = 0.55 + 0.3 * (0.5 + 0.5 * Math.sin(t * 1.6));
+  twin?.sil?.update(camera);
+  anchors?.update(t);
   if (composer) composer.render();
   else renderer.render(scene, camera);
   requestAnimationFrame(frame);
@@ -537,3 +683,4 @@ function frame() {
 frame();
 
 if (query.get("demo") === "1") setTimeout(() => choreo.buildAll(), 700);
+if (query.get("story") === "1") setTimeout(() => runStory(), 900);

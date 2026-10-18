@@ -1,13 +1,14 @@
 <!doctype html>
 <!--
-  Visual harness for src/plume.js (and src/silhouette.js): a built stack firing one stage, with the round-10
-  light rig and bloom. Not part of the demo.
+  Visual harness for src/plume.js, src/silhouette.js and src/anchors.js: a built stack firing one stage, with
+  the round-10 light rig and bloom. Not part of the demo.
   Serve the repo root with Vite on a free port (never 5173), then open
     /scripts/plume-harness.html?build=falcon-9&p=101325&throttle=1      sea level
     /scripts/plume-harness.html?build=falcon-9&p=0                      vacuum
   Params: build (preset id), stage (engines part to fire, default 0), p (ambient Pa), throttle (0..1),
   alt (metres the stack is lifted off the pad, as in flight; on the pad the plume goes into the deck),
-  ty / dist (camera target above the lifted base and distance, as fractions of the stack), twin=1 (adds a silhouette).
+  ty / dist (camera target above the lifted base and distance, as fractions of the stack), twin=1 (adds a silhouette),
+  anchors=1 (scale anchors: person, tower, trench, floodlight masts).
   window.__ready is set after ~40 animated frames.
 -->
 <html>
@@ -32,6 +33,7 @@
       import { createMaterials, createPart, createPad, createStars } from "../src/parts.js";
       import { attachPlumes, createPadLight, P0 } from "../src/plume.js";
       import { createSilhouette } from "../src/silhouette.js";
+      import { createAnchors } from "../src/anchors.js";
       import { catalog, getPreset, presetToBuild } from "../src/data/catalog.js";
 
       const q = new URLSearchParams(location.search);
@@ -75,6 +77,8 @@
       }
       const padLight = createPadLight({ baseRadius_u: bounds.baseRadius_u, bellExitRadius_u: Math.max(0.01, ...plumes.map((p) => p.exitRadius_u)) });
       scene.add(padLight.object3d);
+      const anchors = q.get("anchors") === "1" ? createAnchors({ baseRadius_u: bounds.baseRadius_u, stackHeight_u: H }) : null;
+      if (anchors) scene.add(anchors.object3d);
       let twin = null;
       if (q.get("twin") === "1") {
         twin = createSilhouette({ name: "twin", length_m: bounds.height_m, diameter_m: (bounds.baseRadius_u / 0.25) * 2, stages: 2 });
@@ -102,6 +106,7 @@
         for (const p of plumes) p.update(dt, { throttle, ambientPressure_Pa: pressure, cameraDistance: camDist });
         padLight.update(dt, stage === 0 ? throttle : 0, alt / 0.25); // altitude in metres
         twin?.update(camera);
+        anchors?.update(clock.elapsedTime);
         composer.render();
         if (++frames === 40) {
           document.title = `ready ${plumes.length} plumes · p ${pressure} Pa · ${renderer.info.render.calls} calls`;

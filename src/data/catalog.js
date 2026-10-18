@@ -2,6 +2,7 @@
 // SpaxeX/src/data/*.json (branch phase1_bhumish); refresh them by copying, never by hand-editing.
 // payloads.extra.json holds demo-only payload records in the same shape; visuals.json holds sourced visual
 // facts (engine lengths, finishes, features, payload archetypes); presets.json holds the buildable vehicles.
+// gcat-rockets.json is the GCAT pool for the twin compare (closestRockets; see the note there for P2).
 import engines from "./engines.json";
 import tanks from "./tanks.json";
 import basePayloads from "./payloads.json";
@@ -10,7 +11,8 @@ import missions from "./missions.json";
 import referenceRockets from "./reference-rockets.json";
 import visuals from "./visuals.json";
 import presets from "./presets.json";
-import { clampEngineCount, isVacuumOnly } from "../physics.js";
+import gcat from "./gcat-rockets.json";
+import { clampEngineCount, evaluateBuild, isVacuumOnly, rocketDistance } from "../physics.js";
 
 export const catalog = {
   engines,
@@ -96,4 +98,59 @@ export function applyOption(build, kind, stageIndex, recordId) {
     byId(catalog.engines, stage.engineId),
   );
   return next;
+}
+
+// --- twin: the closest real rocket from the GCAT pool --------------------------------------------------------
+// gcat-rockets.json: GCAT launch vehicles (J. McDowell, CC BY 4.0; attribution in gcatSource) that flew at least
+// once and have a length and diameter, so a true-scale silhouette can be drawn.
+export const gcatRockets = gcat.rockets;
+export const gcatSource = gcat._source;
+
+// The n GCAT rockets nearest to the build: physics.rocketDistance (log liftoff mass, log liftoff thrust; the
+// build's mass and thrust are evaluateBuild's, i.e. est.) plus, by default, two corrections:
+//   diameter: a log-diameter term (widest stage tank vs the rocket's diameter);
+//   preferReference: GCAT rows that are the same vehicle as a reference-rockets.json record (referenceId:
+//     Falcon 9 FT5, Falcon Heavy) match on that record's manufacturer liftoff mass and thrust instead of GCAT's.
+// Pass { diameter: false, preferReference: false } for the app's plain formula.
+// P2 evidence: the app's closest-rocket formula (mass + thrust only, closest.ts) picks Zhuque-3 for a Falcon 9
+// built from SpaceX's own numbers (550 t, 7,605 kN), because GCAT's Falcon 9 FT5 row is 480 t / 5,886 kN
+// (SpaceX: 549 t / 7,607 kN); it also picks Chang Zheng 4B over Delta 4M for the Delta IV preset. The twin
+// lookup needs a diameter term or manufacturer-consistent numbers (scripts/check-twin.mjs --app-formula).
+// Rows with the same name and the same numbers (e.g. Falcon 9 FT3 / FT4, identical in GCAT) collapse to the
+// most-launched one; ties go to more launches.
+export function closestRockets(build, n = 3, { diameter = true, preferReference = true } = {}) {
+  const v = evaluateBuild(build, catalog);
+  const mass = v.totalMass_kg;
+  const thrust = v.liftoffThrust_kN;
+  if (!(mass > 0) || !(thrust > 0)) return [];
+  const widest = Math.max(0, ...build.stages.map((s) => byId(tanks, s.tankId)?.diameter_m ?? 0));
+  const rows = [];
+  for (const rocket of gcatRockets) {
+    const ref = preferReference && rocket.referenceId ? byId(referenceRockets, rocket.referenceId) : null;
+    const m = ref?.liftoffMass_kg ?? rocket.liftoffMass_kg;
+    const t = ref?.liftoffThrust_kN ?? rocket.liftoffThrust_kN;
+    if (!(m > 0) || !(t > 0)) continue;
+    let d = rocketDistance(mass, thrust, { liftoffMass_kg: m, liftoffThrust_kN: t });
+    if (diameter && widest > 0 && rocket.diameter_m > 0) d = Math.hypot(d, Math.log(widest / rocket.diameter_m));
+    rows.push({ rocket, distance: d, key: `${rocket.name}|${m}|${t}|${rocket.diameter_m}` });
+  }
+  rows.sort((a, b) => a.distance - b.distance || b.rocket.launches - a.rocket.launches || a.rocket.name.localeCompare(b.rocket.name));
+  const seen = new Set();
+  const out = [];
+  for (const r of rows) {
+    if (seen.has(r.key)) continue;
+    seen.add(r.key);
+    out.push({ rocket: r.rocket, distance: r.distance, verdictMass_kg: mass, verdictThrust_kN: thrust });
+    if (out.length >= n) break;
+  }
+  return out;
+}
+
+// "Falcon 9 (FT5) · 68.4 m · 630 launches, 1 failure (2018–2026)": per GCAT row (variants are counted
+// separately). Only GCAT facts, so no "est."; a line that also shows the build's own numbers must label those.
+export function twinLine(rocket) {
+  const plural = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+  const years = rocket.firstLaunchYear === rocket.lastLaunchYear ? `${rocket.firstLaunchYear}` : `${rocket.firstLaunchYear}–${rocket.lastLaunchYear}`;
+  const name = rocket.variant ? `${rocket.name} (${rocket.variant})` : rocket.name;
+  return `${name} · ${rocket.length_m} m · ${plural(rocket.launches, "launch", "launches")}, ${plural(rocket.failures, "failure", "failures")} (${years})`;
 }
