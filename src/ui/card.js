@@ -140,13 +140,22 @@ function optionMeta(kind, r) {
   return "";
 }
 
+// options: records, or compat entries { record, level: ok | unusual | incompatible, reasons } (compat.js),
+// already sorted ok → unusual → incompatible. Unusual rows carry a tag and their reasons; incompatible rows
+// are greyed out and cannot be picked; a hairline separates the groups.
 function optionsHtml(part, options, { expanded, disabled }) {
   if (!part.record || !options || options.length < 2) return "";
+  let prevLevel = null;
   const items = options
-    .map((r) => {
+    .map((o) => {
+      const { record: r, level = "ok", reasons = [] } = o.record ? o : { record: o };
       const cur = r.id === part.record.id;
-      const meta = f.esc(optionMeta(part.kind, r));
-      return `<li><button type="button" class="opt" data-id="${f.esc(r.id)}"${cur ? ' aria-current="true"' : ""}${disabled ? " disabled" : ""}><span class="opt-name">${f.esc(r.name)}</span><span class="opt-meta">${meta}</span></button></li>`;
+      const blocked = level === "incompatible";
+      const why = reasons.length ? `<span class="opt-why">${f.esc(reasons.join(" · "))}</span>` : "";
+      const tag = level === "unusual" ? ' <span class="tag">unusual</span>' : "";
+      const first = prevLevel !== null && level !== prevLevel ? ' class="opt-group"' : "";
+      prevLevel = level;
+      return `<li${first}><button type="button" class="opt opt-${level}" data-id="${f.esc(r.id)}"${cur ? ' aria-current="true"' : ""}${disabled || (blocked && !cur) ? " disabled" : ""}${blocked ? ' aria-disabled="true"' : ""}><span class="opt-name">${f.esc(r.name)}${tag}</span><span class="opt-meta">${f.esc(optionMeta(part.kind, r))}</span>${why}</button></li>`;
     })
     .join("");
   return `<div class="opts${expanded ? " open" : ""}"><button type="button" class="opt-toggle" aria-expanded="${expanded}"${disabled ? " disabled" : ""}>Options</button><ul class="opt-list"${expanded ? "" : " hidden"}>${items}</ul></div>`;
@@ -165,7 +174,7 @@ export function createCard(rootEl, { onOption } = {}) {
 
   el.addEventListener("click", (e) => {
     const opt = e.target.closest(".opt");
-    if (opt && !opt.disabled && current) {
+    if (opt && !opt.disabled && opt.getAttribute("aria-disabled") !== "true" && current) {
       if (opt.getAttribute("aria-current") === "true") return;
       expanded = false;
       onOption?.(current, opt.dataset.id);

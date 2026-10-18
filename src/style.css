@@ -252,7 +252,7 @@ kbd {
 }
 
 .detail .opt-toggle:disabled,
-.detail .opt:disabled {
+:is(.detail, .rockets) .opt:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
@@ -267,7 +267,7 @@ kbd {
   border-top: 1px solid var(--hairline);
 }
 
-.detail .opt {
+:is(.detail, .rockets) .opt {
   display: grid;
   gap: 1px;
   width: 100%;
@@ -282,30 +282,76 @@ kbd {
   transition: background 140ms;
 }
 
-.detail .opt:hover:not(:disabled),
-.detail .opt:focus-visible {
+:is(.detail, .rockets) .opt:hover:not(:disabled),
+:is(.detail, .rockets) .opt:focus-visible {
   background: rgba(255, 255, 255, 0.06);
   outline: none;
 }
 
-.detail .opt[aria-current="true"] {
+:is(.detail, .rockets) .opt[aria-current="true"] {
   cursor: default;
   background: rgba(255, 176, 32, 0.08);
 }
 
-.detail .opt-name {
+:is(.detail, .rockets) .opt-name {
   font-size: 12.5px;
   font-weight: 550;
 }
 
-.detail .opt[aria-current="true"] .opt-name {
+:is(.detail, .rockets) .opt[aria-current="true"] .opt-name {
   color: var(--select);
 }
 
-.detail .opt-meta {
+.detail .opt-group {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--hairline);
+}
+
+.detail .opt-why {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-2);
+}
+
+.detail .opt-incompatible .opt-why {
+  color: var(--nogo);
+}
+
+:is(.detail, .rockets) .opt-meta {
   font-size: 11.5px;
   color: var(--text-2);
   font-variant-numeric: tabular-nums;
+}
+
+/* Rockets: the bar's preset list, opened in place above the bar (same rows as the card's Options). */
+.rockets {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  width: 340px;
+  max-height: min(52vh, 380px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 0;
+  padding: 6px;
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  background: var(--surface);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.rockets ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.rockets .opt-meta {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Bottom bar */
@@ -358,6 +404,12 @@ kbd {
 
 .bar button.quiet:hover {
   background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+
+.bar > button[aria-expanded="true"] {
+  background: rgba(255, 176, 32, 0.16);
+  border-color: rgba(255, 176, 32, 0.45);
   color: var(--text);
 }
 
@@ -421,10 +473,19 @@ kbd {
   }
   .bar {
     bottom: 16px;
+    left: 12px;
+    right: 12px;
+    transform: none;
   }
-  .bar button {
-    padding: 8px 12px;
-    font-size: 12.5px;
+  .bar > button {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 8px 4px;
+    font-size: 12px;
+  }
+  .rockets {
+    width: auto;
+    right: 0;
   }
 }
 

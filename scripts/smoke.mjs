@@ -1,11 +1,19 @@
 // Headless smoke test for the demo: drives a real Chrome over the DevTools protocol and checks the main flow.
-// Run: node scripts/smoke.mjs <url> [outPrefix] [--size=1600x900] [--build-timeout=90]
-//      node scripts/smoke.mjs --serve [?query] [outPrefix] ...
+// Run: node scripts/smoke.mjs <url> [outPrefix] [flags]
+//      node scripts/smoke.mjs --serve [?query] [outPrefix] [flags]      (recommended; see scripts/README.md)
 //   e.g. node scripts/smoke.mjs "http://127.0.0.1:5191/?build=falcon-9" /tmp/smoke/f9
 //        node scripts/smoke.mjs --serve "?build=saturn-v" /tmp/smoke/sv
 // --serve copies index.html, src/ and vite.config.js to a temp folder and serves that frozen snapshot with the
 // repo's Vite on a free port, so edits by other chats (Vite full-reloads the page on every save) cannot reset
 // the page mid-run. Without --serve, a reload during the run is reported and fails it.
+// Time budgets: each step's user-visible action must finish within its budget (seconds), and the page must
+// render smoothly again afterwards (a 600 ms run of frames, none slower than --jank-ms=100), or the step fails.
+// Defaults: load 20, build 90, card 10, swap 5, esc 1.5, explode 6, card2 20, assemble 6, next 8, reset 15.
+// Override: --budget=swap:8,explode:10 (--build-timeout=N is the same as --budget=build:N).
+// --angle=metal|swiftshader|gl|default picks Chrome's GL backend (default: metal on macOS); swiftshader is a
+// CPU renderer, useful to tell a GPU-driver problem from app cost.
+// --perf adds frame rate, draw calls per frame and newly created shader programs to the build, options,
+// explode and assemble lines (WebGL calls are counted by a wrapper injected before the page loads).
 // No deps (Node >= 22 for the global WebSocket). Exits 1 if any assertion fails, 2 on a harness error.
 // Never pass --virtual-time-budget to Chrome: requestAnimationFrame barely ticks and anime.js stalls.
 //
@@ -37,13 +45,24 @@ const serve = "serve" in flags;
 if (serve && positional[0] && !positional[0].startsWith("?")) positional.unshift(""); // --serve <outPrefix>
 const [target = "", prefixArg = "smoke"] = positional;
 if (!serve && !target) {
-  console.error("usage: node scripts/smoke.mjs <url>|--serve [?query] [outPrefix] [--size=1600x900] [--build-timeout=90]");
+  console.error("usage: node scripts/smoke.mjs <url> | --serve [?query]  [outPrefix] [--size=1600x900] [--budget=swap:5,...] [--jank-ms=100] [--perf] [--angle=metal]");
   process.exit(2);
 }
 const prefix = resolve(prefixArg);
 mkdirSync(dirname(prefix), { recursive: true });
 const [W, H] = (flags.size ?? "1600x900").split("x").map(Number);
-const BUILD_TIMEOUT_MS = Number(flags["build-timeout"] ?? 90) * 1000;
+const BUDGET = { load: 20, build: 90, card: 10, swap: 5, esc: 1.5, explode: 6, card2: 20, assemble: 6, next: 8, reset: 15 };
+if (flags["build-timeout"]) BUDGET.build = Number(flags["build-timeout"]);
+for (const kv of (flags.budget ?? "").split(",").filter(Boolean)) {
+  const [k, v] = kv.split(":");
+  if (!(k in BUDGET) || !(Number(v) > 0)) {
+    console.error(`bad --budget entry "${kv}" (known: ${Object.keys(BUDGET).join(", ")})`);
+    process.exit(2);
+  }
+  BUDGET[k] = Number(v);
+}
+const JANK_MS = Number(flags["jank-ms"] ?? 100);
+const ms = (k) => BUDGET[k] * 1000;
 
 // ---------- expectations from the repo's own data (works against dev and built pages alike) ----------
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -124,7 +143,7 @@ const chrome = spawn(
   CHROME,
   [
     "--headless=new",
-    "--use-angle=metal",
+    `--use-angle=${flags.angle ?? (process.platform === "darwin" ? "metal" : "default")}`,
     "--enable-unsafe-swiftshader",
     "--remote-debugging-port=0",
     `--user-data-dir=${profile}`,
@@ -150,6 +169,19 @@ function cleanup() {
   }
 }
 process.on("exit", cleanup);
+// Normal end: let Chrome and the snapshot server exit before deleting their folders (an rm racing a still
+// running Chrome leaves the profile behind).
+async function shutdown(code) {
+  const gone = (p) => (!p || p.exitCode !== null || p.signalCode !== null ? Promise.resolve() : new Promise((r) => p.once("exit", r)));
+  for (const p of [chrome, server]) {
+    try {
+      p?.kill();
+    } catch {}
+  }
+  await Promise.race([Promise.all([gone(chrome), gone(server)]), sleep(3000)]);
+  cleanup();
+  process.exit(code);
+}
 process.on("SIGINT", () => process.exit(130));
 
 async function connect() {
@@ -183,6 +215,7 @@ let nextId = 0;
 const pending = new Map();
 const consoleLog = []; // { level, text, t }
 let navigations = 0;
+let unresponsive = null; // first CDP call that timed out: the page stopped answering
 const t0 = Date.now();
 const note = (level, text) => consoleLog.push({ level, text: text.slice(0, 400), t: ((Date.now() - t0) / 1000).toFixed(1) });
 ws.onmessage = (e) => {
@@ -208,7 +241,10 @@ ws.onmessage = (e) => {
 const send = (method, params = {}) =>
   new Promise((res, rej) => {
     const i = ++nextId;
-    const timer = setTimeout(() => rej(new Error(`CDP ${method} timed out`)), 30000);
+    const timer = setTimeout(() => {
+      unresponsive ??= method;
+      rej(new Error(`CDP ${method} timed out after 30s (page unresponsive)`));
+    }, 30000);
     pending.set(i, (m) => {
       clearTimeout(timer);
       m.error ? rej(new Error(`${method}: ${m.error.message}`)) : res(m.result);
@@ -224,6 +260,21 @@ const js = async (expr) => {
 await send("Runtime.enable");
 await send("Log.enable");
 await send("Page.enable");
+if ("perf" in flags) {
+  await send("Page.addScriptToEvaluateOnNewDocument", {
+    source: `(() => {
+      const c = (window.__smokeGl = { programs: 0, draws: 0, frames: 0 });
+      for (const P of [window.WebGL2RenderingContext?.prototype, window.WebGLRenderingContext?.prototype]) {
+        if (!P) continue;
+        const wrap = (name, key) => { const f = P[name]; if (f) P[name] = function (...a) { c[key]++; return f.apply(this, a); }; };
+        wrap("createProgram", "programs");
+        for (const d of ["drawElements", "drawArrays", "drawElementsInstanced", "drawArraysInstanced"]) wrap(d, "draws");
+      }
+      const raf = window.requestAnimationFrame.bind(window);
+      (function tick() { c.frames++; raf(tick); })();
+    })()`,
+  });
+}
 await send("Emulation.setDeviceMetricsOverride", { width: W, height: H, deviceScaleFactor: 1, mobile: false });
 
 // ---------- page helpers ----------
@@ -251,6 +302,40 @@ const rectOf = (selector) =>
     return { x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height, disabled: !!el.disabled, text: el.textContent.trim() }; })()`);
 const VERDICT = /\bNO-GO\b|\bGO\b/;
 
+// Resolves once the page has rendered 600 ms of frames with none slower than JANK_MS; false after `budget` ms.
+// Catches the "everything still works but each frame takes seconds" class of bug.
+async function smooth(budget) {
+  const r = await js(`new Promise((r) => { const t0 = performance.now(); let last = t0, run = t0;
+    (function f() { const now = performance.now(); if (now - last > ${JANK_MS}) run = now; last = now;
+      if (now - run >= 600) return r(true); if (now - t0 > ${budget}) return r(false); requestAnimationFrame(f); })(); })`);
+  return r;
+}
+async function mustBeSmooth(after, budget = 4000) {
+  if (!(await smooth(budget))) fail(`page not rendering smoothly within ${budget / 1000}s after ${after} (frames slower than ${JANK_MS} ms)`);
+}
+function withinBudget(key, startedAt, what) {
+  const s = (Date.now() - startedAt) / 1000;
+  if (s > BUDGET[key]) fail(`${what} took ${s.toFixed(1)}s (budget ${BUDGET[key]}s)`);
+  return `${s.toFixed(1)}s/${BUDGET[key]}s`;
+}
+
+// --perf: " · 60 fps (worst 21 ms), 155 draws/frame, +0 programs" since the previous sample.
+let glPrev = null;
+async function perf() {
+  if (!("perf" in flags)) return "";
+  const f = await js(`new Promise((r) => { let n = 0, worst = 0, last = performance.now(); const t0 = last;
+    (function f() { const now = performance.now(); worst = Math.max(worst, now - last); last = now; n++;
+      if (now - t0 < 1500) requestAnimationFrame(f); else r({ fps: n / ((now - t0) / 1000), worst }); })(); })`);
+  const g = await js("window.__smokeGl ? { ...window.__smokeGl } : null");
+  let gl = "";
+  if (g) {
+    const d = glPrev ? { programs: g.programs - glPrev.programs, draws: g.draws - glPrev.draws, frames: g.frames - glPrev.frames } : g;
+    gl = `, ${Math.round(d.draws / Math.max(1, d.frames))} draws/frame, +${d.programs} programs`;
+    glPrev = g;
+  }
+  return ` · ${f.fps.toFixed(0)} fps (worst ${Math.round(f.worst)} ms)${gl}`;
+}
+
 async function click(x, y) {
   await send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
   await send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", buttons: 1, clickCount: 1 });
@@ -275,6 +360,18 @@ async function press(key) {
   const base = { key, code: k.code, windowsVirtualKeyCode: k.keyCode, nativeVirtualKeyCode: k.keyCode };
   await send("Input.dispatchKeyEvent", { type: "keyDown", ...base, text: key.length === 1 ? key : undefined });
   await send("Input.dispatchKeyEvent", { type: "keyUp", ...base });
+  await keepVisible();
+}
+// Headless Chrome quirk: a CDP Escape key also reaches the browser, which marks the page hidden
+// (visibilityState "hidden"), and requestAnimationFrame stops for the whole page. The app still got the key;
+// bring the page back so the test keeps rendering. Not a demo bug.
+let hiddenRestores = 0;
+async function keepVisible() {
+  await sleep(50);
+  if ((await js("document.visibilityState")) === "visible") return;
+  await send("Page.bringToFront");
+  hiddenRestores++;
+  if (!(await until(async () => (await js("document.visibilityState")) === "visible", 2000, 100))) fail("page stayed hidden after Page.bringToFront");
 }
 async function until(pred, ms, every = 250) {
   const end = Date.now() + ms;
@@ -295,9 +392,11 @@ async function shot(name) {
 // Find a part under the pointer the way a user would: hover candidate points (nearest the screen centre
 // first) and click only where the canvas shows the pointer cursor (select.js sets it over pickable parts), so
 // probing never clicks empty space or the UI. Returns the opened card, or null.
-async function clickPart(points) {
+async function clickPart(points, budgetMs = 60000) {
   let probes = 0;
+  const end = Date.now() + budgetMs;
   for (const [px, py] of points) {
+    if (Date.now() > end) fail(`no clickable part found within ${budgetMs / 1000}s (${probes} probes; page slow?)`);
     const x = Math.round(px);
     const y = Math.round(py);
     probes++;
@@ -328,6 +427,10 @@ const results = [];
 const state = {};
 async function step(name, fn, { needs = [] } = {}) {
   const t = Date.now();
+  if (unresponsive) {
+    results.push({ name, status: "SKIP", ms: 0, detail: `page unresponsive (${unresponsive} timed out)` });
+    return print(results.at(-1));
+  }
   const missing = needs.filter((n) => !results.find((r) => r.name === n && r.status === "PASS"));
   if (missing.length) {
     results.push({ name, status: "SKIP", ms: 0, detail: `needs ${missing.join(", ")}` });
@@ -337,13 +440,16 @@ async function step(name, fn, { needs = [] } = {}) {
   let detail = "";
   try {
     detail = (await fn()) ?? "";
+    if ((await js("document.visibilityState")) !== "visible") fail("page is hidden (rAF stopped) at the end of the step");
   } catch (e) {
     status = "FAIL";
     detail = e.message;
-    try {
-      detail += ` | hud="${await hud()}"`;
-      await shot(`fail-${name}`);
-    } catch {}
+    if (!unresponsive) {
+      try {
+        detail += ` | hud="${await hud()}"`;
+        await shot(`fail-${name}`);
+      } catch {}
+    }
   }
   const reloads = consoleLog.filter((l) => l.level === "reload" && Number(l.t) * 1000 >= t - t0).length;
   if (reloads && status === "PASS") detail += " (page reloaded during this step)";
@@ -364,8 +470,8 @@ await step("load", async () => {
   const h = await until(async () => {
     const t = await hud();
     return t.includes(want) ? t : null;
-  }, 20000);
-  if (!h) fail(`HUD never showed "${want}"`);
+  }, ms("load"));
+  if (!h) fail(`HUD never showed "${want}" within ${BUDGET.load}s`);
   await sleep(800); // first frames + prewarm
   await shot("load");
   return `HUD "${h}"`;
@@ -379,12 +485,14 @@ await step(
     const h = await until(async () => {
       const t = await hud();
       return VERDICT.test(t) ? t : null;
-    }, BUILD_TIMEOUT_MS, 500);
-    if (!h) fail(`no GO/NO-GO verdict within ${BUILD_TIMEOUT_MS / 1000}s`);
+    }, ms("build"), 500);
+    if (!h) fail(`no GO/NO-GO verdict within ${BUDGET.build}s`);
+    const took = withinBudget("build", start, "Build all");
+    await mustBeSmooth("Build all");
     await sleep(1200); // let the last lock flash and camera settle
     state.verdict = await hud();
     await shot("built");
-    return `${((Date.now() - start) / 1000).toFixed(1)}s to verdict: "${state.verdict}"`;
+    return `${took} to verdict: "${state.verdict}"${await perf()}`;
   },
   { needs: ["load"] },
 );
@@ -392,7 +500,7 @@ await step(
 await step(
   "card",
   async () => {
-    const c = await clickPart(gridPoints(W * 0.35, W * 0.65, H * 0.08, H * 0.88, 24));
+    const c = await clickPart(gridPoints(W * 0.35, W * 0.65, H * 0.08, H * 0.88, 24), ms("card"));
     if (!c) fail("found no clickable part on the stack (hover never showed the pointer cursor)");
     if (!partNames.has(c.title)) fail(`card title "${c.title}" is not a part name in the dataset/layout`);
     state.cardTitle = c.title;
@@ -420,18 +528,21 @@ await step(
     const pick = [opts[1], ...opts.slice(2), opts[0]].find((o) => o && !o.current && !o.disabled);
     if (!pick) fail("no selectable alternative in the Options list");
     await clickEl(`#detail .opt[data-id="${pick.id}"]`);
+    const swapStart = Date.now();
     const after = await until(async () => {
       const t = await hud();
       return t !== before && VERDICT.test(t) ? t : null;
-    }, 60000, 300);
-    if (!after) fail(`verdict line did not change within 60s after choosing "${pick.name}"`);
+    }, Math.max(ms("swap") * 3, 15000), 200);
+    if (!after) fail(`verdict line did not change within ${Math.max(BUDGET.swap * 3, 15)}s after choosing "${pick.name}"`);
+    const took = withinBudget("swap", swapStart, "swap (option click to new verdict)");
+    await mustBeSmooth("the swap");
     c = await until(async () => {
       const s = await card();
       return s.open && s.title === pick.name ? s : null;
     }, 5000);
     await shot("options");
     if (!c) fail(`HUD changed but the card does not show "${pick.name}" (shows "${(await card()).title}")`);
-    return `${state.cardTitle} -> "${pick.name}"; HUD "${after}"`;
+    return `${state.cardTitle} -> "${pick.name}" in ${took}; HUD "${after}"${await perf()}`;
   },
   { needs: ["card"] },
 );
@@ -441,8 +552,8 @@ await step(
   async () => {
     if (!(await card()).open) fail("card was not open before Esc");
     await press("Escape");
-    const closed = await until(async () => !(await card()).open, 1500, 100);
-    if (!closed) fail("card still open after Esc");
+    const closed = await until(async () => !(await card()).open, ms("esc"), 100);
+    if (!closed) fail(`card still open ${BUDGET.esc}s after Esc`);
     return "card closed";
   },
   { needs: ["card"] },
@@ -452,11 +563,15 @@ await step(
   "explode",
   async () => {
     await clickEl("#btn-explode");
-    const ok = await until(async () => (await rectOf("#btn-explode"))?.text === "Assemble", 3000);
+    const start = Date.now();
+    const ok = await until(async () => (await rectOf("#btn-explode"))?.text === "Assemble", ms("explode"));
     if (!ok) fail(`button did not flip to "Assemble" (says "${(await rectOf("#btn-explode"))?.text}")`);
-    await sleep(3500); // springs settle
+    // The explode springs have no DOM end signal: require smooth frames within the budget, then let them settle.
+    if (!(await smooth(Math.max(0, ms("explode") - (Date.now() - start))))) fail(`page not rendering smoothly within ${BUDGET.explode}s of Explode (frames slower than ${JANK_MS} ms)`);
+    const took = withinBudget("explode", start, "explode");
+    await sleep(3500);
     await shot("exploded");
-    return "button says Assemble";
+    return `button says Assemble, smooth after ${took}${await perf()}`;
   },
   { needs: ["build"] },
 );
@@ -465,7 +580,7 @@ await step(
   "card2",
   async () => {
     // Exploded pieces spread sideways and up, so search a wider area than the built stack.
-    const c = await clickPart(gridPoints(W * 0.25, W * 0.75, H * 0.05, H * 0.9, 28));
+    const c = await clickPart(gridPoints(W * 0.25, W * 0.75, H * 0.05, H * 0.9, 28), ms("card2"));
     if (!c) fail("found no clickable piece in the exploded view (hover never showed the pointer cursor)");
     if (!partNames.has(c.title)) fail(`card title "${c.title}" is not a part name in the dataset/layout`);
     await shot("card2");
@@ -479,11 +594,18 @@ await step(
   "assemble",
   async () => {
     await clickEl("#btn-explode");
-    const ok = await until(async () => (await rectOf("#btn-explode"))?.text === "Explode", 3000);
-    if (!ok) fail(`button did not flip back to "Explode" (says "${(await rectOf("#btn-explode"))?.text}")`);
-    await sleep(3500);
+    const start = Date.now();
+    // While assembling, main.js keeps the button disabled; enabled "Explode" means the springs are done.
+    const ok = await until(async () => {
+      const b = await rectOf("#btn-explode");
+      return b?.text === "Explode" && !b.disabled;
+    }, ms("assemble") * 3, 150);
+    if (!ok) fail(`button did not come back as an enabled "Explode" (now "${(await rectOf("#btn-explode"))?.text}")`);
+    const took = withinBudget("assemble", start, "assemble");
+    await mustBeSmooth("assemble");
+    await sleep(800);
     await shot("assembled");
-    return "button says Explode";
+    return `assembled in ${took}${await perf()}`;
   },
   { needs: ["explode"] },
 );
@@ -497,12 +619,13 @@ await step(
     const h = await until(async () => {
       const t = await hud();
       return t.includes(want) ? t : null;
-    }, 8000);
-    if (!h) fail(`HUD did not switch to "${want}"`);
+    }, ms("next"));
+    if (!h) fail(`HUD did not switch to "${want}" within ${BUDGET.next}s`);
     const q = await js("location.search");
     const id = presetOrder[i % presetOrder.length];
     if (!new URLSearchParams(q).get("build")?.startsWith(id)) fail(`URL is "${q}", expected ?build=${id}`);
-    await sleep(1500);
+    await mustBeSmooth("the preset switch");
+    await sleep(1000);
     await shot("next");
     return `HUD "${h}"`;
   },
@@ -513,14 +636,14 @@ await step(
   "reset",
   async () => {
     await press("1");
-    const building = await until(async () => /\b1\/\d+\b/.test(await hud()), 15000, 300);
-    if (!building) fail(`key "1" did not build part 1 (HUD "${await hud()}")`);
+    const building = await until(async () => /\b1\/\d+\b/.test(await hud()), ms("reset"), 300);
+    if (!building) fail(`key "1" did not build part 1 within ${BUDGET.reset}s (HUD "${await hud()}")`);
     await press("r");
     const h = await until(async () => {
       const t = await hud();
       return /pad ready/i.test(t) ? t : null;
-    }, 15000, 300);
-    if (!h) fail("HUD never returned to \"pad ready\" after R");
+    }, ms("reset"), 300);
+    if (!h) fail(`HUD never returned to "pad ready" within ${BUDGET.reset}s after R`);
     await sleep(800);
     await shot("reset");
     return `HUD "${h}"`;
@@ -544,8 +667,8 @@ console.log(
     `${failed.length ? `, failed: ${failed.map((r) => r.name).join(", ")}` : ""}` +
     `${skipped.length ? `, skipped: ${skipped.map((r) => r.name).join(", ")}` : ""}` +
     ` · ${errors.length - reloadCount} error(s)/exception(s), ${warnings.length} warning(s)` +
-    `${reloadCount ? `, ${reloadCount} page reload(s): rerun with --serve` : ""} · report ${prefix}-report.json`,
+    `${reloadCount ? `, ${reloadCount} page reload(s): rerun with --serve` : ""}` +
+    `${hiddenRestores ? `, page un-hidden ${hiddenRestores}x after Esc (headless quirk)` : ""} · report ${prefix}-report.json`,
 );
 ws.close();
-cleanup();
-process.exit(ok ? 0 : 1);
+await shutdown(ok ? 0 : 1);

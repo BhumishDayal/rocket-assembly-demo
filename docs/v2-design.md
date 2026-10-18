@@ -386,3 +386,113 @@ look. Real finishes survive only as tints and bands on the dark shells so vehicl
   sets mesh + line opacity consistently.
 - UI 3 (main.js/choreo.js/select.js): the light rig and exposure, framing rules of item 5, opacity states
   of item 2 via `setShellOpacity`, bloom/GTAO values of item 6.
+
+---
+
+## 6. User feedback round (2026-10-17 ~21:25)
+
+### Round 11 — compatibility, lock timing, performance, pre-made rockets
+1. **Compatibility (new `src/compat.js`, UI 2).** Options get a level: `ok`, `unusual` (allowed, labelled with the
+   reason), `incompatible` (greyed, not selectable, reason shown). Incompatible: propellant mismatch, vacuum-only
+   engine on stage 0, engine does not fit under the tank (fit rule < 1; stricter than the app's clamp on purpose),
+   stage wider than 1.6× the one below, payload wider than 1.6× the top stage. Unusual: sea-level engine in
+   vacuum, stage wider than 1.15× the one below, upper stage heavier than the one below, engine count reduced by
+   the fit rule. All five presets must be all-ok. The physics verdict still runs on whatever is built.
+2. **Lock timing (UI 3).** Lock (flash + clunk + shake) fires when the part's body has seated (60 % of shell
+   pieces landed, or 70 % of all pieces), not after the last detail piece. Flash colour warm white.
+3. **Performance (UI 3 + UI4).** DPR cap 1.5, shadow map 2048, GTAO half-res and skipped during animations and
+   on > 230-piece manifests, adaptive drop when frames exceed 22 ms; lines only on structural pieces (≤ 120 on
+   Saturn V), no shadows from interiors/details/lines, shared low-segment detail geometry; fix the draw-call leak
+   after a swap (555 → 898 observed).
+4. **Pre-made rockets (UI 3).** One "Rockets" button at the left of the bottom bar opens an in-place list of the
+   presets (name, stages, height, payload → mission); choosing one loads it and runs Build all. `[` `]` stay.
+
+---
+
+## 7. "100× better" ideation (head chat, 2026-10-17 ~21:40), unbounded, then ranked
+
+What we have: a true-scale x-ray rocket built from real records, the app's physics verdict, click-to-card,
+options with compatibility, mechanical build/swap/explode, presets, sound. What is missing is CONSEQUENCE
+(the verdict is a line of text), PLACE and SCALE (a stick on a disc), VOICE (no mission control), and TRUTH
+you can touch (numbers without their quotes). The ideas, grouped:
+
+### A. It flies — the verdict becomes something you watch
+A1 Launch sequence driven by the same numbers: countdown, per-engine ignition stagger, hold-down release,
+   liftoff acceleration from the real TWR (a Saturn V crawls at 1.18, a Falcon leaps at 1.41), Max-Q throttle,
+   MECO at the computed burn time, stage separation, fairing jettison, upper-stage burn, SECO. A NO-GO is not a
+   label: the upper stage runs out 900 m/s short and you watch it fall back. 2-D gravity-turn integrator
+   (thrust SL→vac blend with altitude, exponential atmosphere, Cd·A drag, staging events), ~200 lines, pure.
+A2 Telemetry in the existing HUD line during flight only: T+, altitude, speed, g, events (Max-Q, MECO, SEP, SECO).
+A3 Plume shader: under-expanded bell plume at sea level with Mach diamonds, flaring into a huge vacuum plume
+   with altitude (exit pressure vs ambient); additive, cheap; plume light flickers on the pad and the rocket base;
+   rumble with low-pass by distance, stage-sep bang.
+A4 Falcon 9 booster return: boostback, entry burn, grid fins, landing burn, legs deploy, touchdown on the pad
+   (we already built the legs and fins). Only for stages that have legs.
+A5 Orbit: earth curvature, fairing halves open, payload deploys (GOES-R panel unfolds), target orbit vs achieved
+   orbit drawn as two rings; "you reached 180 × 32 000 km, GTO needs 185 × 35 786".
+
+### B. Mission control — Grok in the loop (the team's AI, via the app's routes or a scripted fallback)
+B6 Advisor lines at every lock ("9 Merlins: 7.6 MN, 1.4 g off the pad"), on an incompatible pick (the reason,
+   spoken), on NO-GO (a suggestion that applies itself with the swap animation).
+B7 Voice: "give me a bigger upper stage" → applyOption; "launch" → A1. Web Speech API in, Grok maps to tool calls.
+B8 Twin + roast from the 534-rocket GCAT pool: the closest real rocket appears as a ghost silhouette at true scale
+   next to yours ("between a Zenit-2 and an Atlas V; 95 launches, 0 failures").
+
+### C. Scale and place
+C9 Scale anchors in the same peach line style: a 1.8 m human at the pad, the strongback/tower outline, flame
+   trench, distant hangar, pad floodlights, haze. Keeps the empty dark look, adds the sense of size.
+C10 Compare mode (key C): Saturn V / Falcon 9 / Starship outlines beside your build at true scale.
+C11 Numbers that talk at lock time: "7.6 MN ≈ eighteen 747s" from the sourced roast facts.
+
+### D. Deeper physics
+D12 Gravity and drag losses computed from the trajectory ("losses: 1 480 m/s gravity, 150 m/s drag") shown next
+    to the app's fixed 9 400 m/s rule, so the simple rule and the simulation agree or disagree visibly.
+D13 Structural sanity: axial load at Max-Q vs stage mass, interstage carrying an over-heavy upper stage → unusual.
+D14 Centre of mass / centre of pressure markers that slide as propellant drains during flight.
+D15 Achieved orbit (perigee/apogee) from the integrator; missions as real orbit targets.
+D16 Reliability from GCAT launch stats of the twin: "rockets like yours: 97.3 % success over 640 flights".
+
+### E. Interaction and feel
+E17 Scrub mode like the anime.js lens: drag/scroll to disassemble and reassemble continuously (the axial exploded
+    layout interpolated 0→1), instead of only a toggle. Cheap, exactly the reference.
+E18 Drag-and-drop building: pick an engine in the exploded view, drop it on another stage; the ghost turns green or
+    red with the compat reason (Subnautica).
+E19 Sub-piece callouts on hover (injector dome, turbopump, slosh baffle) with one sourced sentence each.
+E20 Director camera for Build all and Launch: dolly, orbit, rack focus (depth of field) on the arriving part.
+E21 Sound: ignition rumble, Doppler, spatialised ticks.
+
+### F. Visual fidelity
+F22 X-ray ↔ painted crossfade toggle (judges see both; the painted look gets weathering/decals).
+F23 Depth of field on focus, vignette, subtle grain; plume bloom.
+F24 Night-pad environment map instead of the generic room; plume light on the pad.
+F25 Payload deploy animations (panels, dish, JWST sunshield in stages).
+
+### G. Data and truth
+G27 Every number on a card is clickable → the source quote and link (field-sources.json already has quotes).
+G28 Historic stage library (49 GCAT stages) as options: a real S-IVB on a Falcon 9, with compat explaining why.
+G29 Closest-match over all 534 GCAT rockets with silhouette compare (lengths and diameters are in the pool).
+G30 Starship preset once Raptor numbers are sourced.
+
+### H. Story and sharing
+H31 Story mode (one key): build → verdict → Grok suggests → swap → launch → orbit → twin and roast, 90 s, hands-free;
+    then free play.
+H32 Result card: PNG of the x-ray render with the verdict and the twin (key S), ready to share.
+H33 Mobile: bottom sheet card, pinch/drag scrub.
+
+### I. Robustness
+I34 Instancing for repeated pieces, LOD beyond a distance, physics in a worker, precomputed trajectories per preset.
+I35 CI: the harness on GitHub Actions for every push; deterministic seeds.
+
+### J. Play
+J36 Race: your rocket vs its real twin launched side by side.
+J37 Local leaderboard: best margin per mission.
+
+### Ranked (impact per hour for the demo)
+Tier 1 (tonight): A1–A3 launch + telemetry + plume; E17 scrub mode; G27 sourced-number drawer; B8/C10 twin
+silhouette; H31 story mode once launch exists.
+Tier 2: B6 advisor lines, B7 voice, A4 booster landing, A5 orbit deploy, C9 scale anchors, H32 result card.
+Tier 3: E18 drag-and-drop, D14 CoM, D16 reliability, J36 race, I34 instancing/LOD, I35 CI.
+
+Ownership for Tier 1: UI 2 = src/ascent.js (integrator, events, losses, achieved orbit) + check script;
+UI4 = src/plume.js (plume shader, pad light, ground scorch) + twin silhouette geometry from the GCAT pool;
+UI 3 = launch choreography/camera/telemetry, scrub mode, sourced-number drawer, story mode.

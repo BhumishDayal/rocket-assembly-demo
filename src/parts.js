@@ -286,7 +286,8 @@ function xrayMaterials(t, classic) {
   // `scale` multiplies the shell opacity (darker composite reads denser; the roll pattern's black bands are
   // opaque through its alphaMap, so its base opacity is scaled to 1).
   const shell = (color, { scale = 1, map = null, alphaMap = null } = {}) => {
-    const m = new THREE.MeshPhysicalMaterial({ color, roughness: 0.45, metalness: 0.7, transparent: true, opacity: clamp(SHELL_OPACITY * scale, 0, 1), depthWrite: false, side: THREE.FrontSide, map, alphaMap });
+    // Low metalness so the key light shades the cylinder light → shadow (depth); clearcoat adds a soft sheen.
+    const m = new THREE.MeshPhysicalMaterial({ color, roughness: 0.55, metalness: 0.25, clearcoat: 0.25, clearcoatRoughness: 0.4, fog: true, transparent: true, opacity: clamp(SHELL_OPACITY * scale, 0, 1), depthWrite: false, side: THREE.FrontSide, map, alphaMap });
     m.onBeforeCompile = fresnelRim;
     m.customProgramCacheKey = fresnelKey;
     m.userData.opacityScale = scale;
@@ -294,8 +295,8 @@ function xrayMaterials(t, classic) {
   };
   // Opaque internals: polygon offset pushes faces back so the edge lines sit cleanly on them.
   const po = { polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 };
-  const steel = (color, roughness, metalness, extra = {}) => new THREE.MeshStandardMaterial({ color, roughness, metalness, ...po, ...extra });
-  const light = steel(0xb9bec7, 0.35, 0.85);
+  const steel = (color, roughness, metalness, extra = {}) => new THREE.MeshStandardMaterial({ color, roughness, metalness, fog: true, ...po, ...extra });
+  const light = steel(0xb9bec7, 0.35, 0.6); // brushed steel; 0.6 so internals read as lit forms, not mirrors
   const dark = steel(0x4a4f58, 0.4, 0.85);
   const sh = {
     white: shell(0x202328),
@@ -349,11 +350,25 @@ function xrayMaterials(t, classic) {
 // lands, clamps) from an optional extra geometry, at a lower opacity. userData.base = opacity when built.
 let lineBase = null;
 const edgeCache = new WeakMap();
+// Depth cue: far lines fade more than fog alone gives, alpha *= 1 − 0.6 · smoothstep(fogNear, fogFar, depth),
+// using the scene's linear fog uniforms (no-op without fog or with exponential fog).
+function lineDepthAlpha(shader) {
+  shader.fragmentShader = shader.fragmentShader.replace(
+    "#include <fog_fragment>",
+    `#include <fog_fragment>
+    #if defined( USE_FOG ) && !defined( FOG_EXP2 )
+      gl_FragColor.a *= 1.0 - 0.6 * smoothstep( fogNear, fogFar, vFogDepth );
+    #endif`,
+  );
+}
+const lineDepthKey = () => "xray-line-depth-v1";
 function lineChild(mesh, geo, base, name) {
-  lineBase ??= new THREE.LineBasicMaterial({ color: PEACH, transparent: true, opacity: LINE_STRUCT, depthTest: true });
+  lineBase ??= new THREE.LineBasicMaterial({ color: PEACH, transparent: true, opacity: LINE_STRUCT, depthTest: true, fog: true });
   let eg = edgeCache.get(geo);
   if (!eg) edgeCache.set(geo, (eg = new THREE.EdgesGeometry(geo, 25)));
   const m = lineBase.clone();
+  m.onBeforeCompile = lineDepthAlpha; // set per clone: Material.copy drops shader hooks
+  m.customProgramCacheKey = lineDepthKey;
   m.opacity = base;
   const lines = new THREE.LineSegments(eg, m);
   lines.raycast = () => {}; // picking stays on the meshes
@@ -440,7 +455,7 @@ function merge(geos) {
 const box = (w, h, d, x = 0, y = 0, z = 0) => new THREE.BoxGeometry(w, h, d).translate(x, y, z);
 const cyl = (rTop, rBot, h, seg, x = 0, y = 0, z = 0, open = false) =>
   new THREE.CylinderGeometry(rTop, rBot, h, seg, 1, open).translate(x, y + h / 2, z); // y = bottom
-const tube = (a, c, b, r, seg = 16) => new THREE.TubeGeometry(new THREE.QuadraticBezierCurve3(a, c, b), seg, r, 8, false);
+const tube = (a, c, b, r, seg = 8) => new THREE.TubeGeometry(new THREE.QuadraticBezierCurve3(a, c, b), seg, r, 6, false);
 const rod = (a, b, r, seg = 2) => tube(a, a.clone().lerp(b, 0.5), b, r, seg);
 
 // Box spanning a → b (long axis), thin side facing `out` (baked orientation, no mesh rotation needed).
@@ -457,7 +472,7 @@ function strut(a, b, w, d, out) {
 
 // Machined ring between radii rIn..rOut, height h, bottom at y0: chamfered edges and a shallow centre groove
 // so it catches crisp highlights (the anime.js-lens look). Closed lathe profile.
-function machinedRing(rIn, rOut, h, y0 = 0, seg = 96) {
+function machinedRing(rIn, rOut, h, y0 = 0, seg = 64) {
   const w = rOut - rIn;
   const c = Math.min(0.25 * w, 0.18 * h);
   const g = Math.min(0.3 * w, 0.1 * h);
@@ -541,7 +556,7 @@ function toUnits(geo) {
 //   sym  = axisymmetric piece on the axis (own alternating spin); off-axis pieces share the part's spin so a
 //          ring of shells / a cluster rotates rigidly in the exploded view (see assignSpins)
 //   kind = "shell" | "interior" | "detail"; engine = engine index or null
-function piece(geo, material, { x = 0, y = 0, z = 0, ry = 0, order = 0, dir = UP, dist = 0.4, side, ax = null, sym = false, kind = "detail", engine = null, edges = true, lineGeo = null, fineGeo = null } = {}) {
+function piece(geo, material, { x = 0, y = 0, z = 0, ry = 0, order = 0, dir = UP, dist = 0.4, side, ax = null, sym = false, kind = "detail", engine = null, edges = kind === "shell", lineGeo = null, fineGeo = null } = {}) {
   const g = toUnits(geo);
   g.computeBoundingBox();
   const xrayShell = XRAY && kind === "shell";
@@ -555,12 +570,14 @@ function piece(geo, material, { x = 0, y = 0, z = 0, ry = 0, order = 0, dir = UP
   const mesh = new THREE.Mesh(g, mat);
   mesh.position.set(x * S, y * S, z * S);
   mesh.rotation.y = ry;
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
+  // Performance: only shells cast and receive shadows (internals sit inside them anyway).
+  mesh.castShadow = kind === "shell";
+  mesh.receiveShadow = kind === "shell";
   mesh.userData.kind = kind;
   mesh.userData.engine = engine;
-  // edges: false for long repetitive internals (stringers); lineGeo / fineGeo (metres, same frame as geo) give
-  // cleaner structural lines and a fine line layer.
+  // Edge lines only on shells (default) and pieces marked edges: true (domes, rings, fins, legs, payload
+  // bodies); never on bolts, clamps, pipes, pumps, stringers. lineGeo / fineGeo (metres, same frame as geo)
+  // give a cleaner structural layer (e.g. a ring without its bolts) and a fine layer.
   if (XRAY && edges) addEdges(mesh, { kind, lineGeo: lineGeo && toUnits(lineGeo), fineGeo: fineGeo && toUnits(fineGeo) });
   return { mesh, order, explode: { dir: dir.clone().normalize(), dist }, ax, sym, kind, engine };
 }
@@ -665,9 +682,9 @@ function engineKit({ exitD_m, L, vacuum, chambers = 1, overall = false }) {
   }
   // Chamber with a knurled ring at the throat; injector dome with a bolt circle on its flange.
   const knurl = boltRing(rt * 1.16, bellL + 0.012 * L, 24, (TAU * rt * 1.16) / 48, 0.03 * L, 0.08 * rt);
-  for (const z of zs) kit.push({ geo: merge([lathe(prof.chamber, 32), knurl.clone()]).translate(0, 0, z), mat: "chamber", ax: [0, 0], sym: !twin, ds: true });
+  for (const z of zs) kit.push({ geo: merge([lathe(prof.chamber, 20), knurl.clone()]).translate(0, 0, z), mat: "chamber", ax: [0, 0], sym: !twin, ds: true });
   const bd = Math.min(0.01 * L, 0.06 * rc);
-  for (const z of zs) kit.push({ geo: merge([lathe(prof.dome, 32), boltRing(rc * 1.09, y1 + 0.015 * L + bd / 2, 16, bd)]).translate(0, 0, z), mat: "powerhead", ax: [1, 0], sym: !twin });
+  for (const z of zs) kit.push({ geo: merge([lathe(prof.dome, 20), boltRing(rc * 1.09, y1 + 0.015 * L + bd / 2, 16, bd)]).translate(0, 0, z), mat: "powerhead", ax: [1, 0], sym: !twin });
 
   // Turbopump: a vertical cylinder beside the chamber (between the chambers on a twin) with turbine cap and
   // pump volute ring.
@@ -679,13 +696,13 @@ function engineKit({ exitD_m, L, vacuum, chambers = 1, overall = false }) {
   if (!vacuum) {
     // Main valve block on the injector (−Z side) with its actuator can.
     const vz = twin ? -(rp + 0.3 * rc) : -rc * 1.15;
-    kit.push({ geo: merge([box(0.55 * rc, 0.07 * L, 0.5 * rc, 0, yTop - 0.03 * L, vz), cyl(0.14 * rc, 0.14 * rc, 0.05 * L, 12, 0, yTop + 0.005 * L, vz)]), mat: "valve", ax: [1, 1] });
+    kit.push({ geo: merge([box(0.55 * rc, 0.07 * L, 0.5 * rc, 0, yTop - 0.03 * L, vz), cyl(0.14 * rc, 0.14 * rc, 0.05 * L, 8, 0, yTop + 0.005 * L, vz)]), mat: "valve", ax: [1, 1] });
   }
   kit.push({
     geo: merge([
-      cyl(rp, rp, hp, 20, px, py0, pz),
-      cyl(rp * 0.72, rp * 0.72, hp * 0.14, 16, px, py0 + hp, pz),
-      new THREE.TorusGeometry(rp * 1.02, rp * 0.22, 8, 24).rotateX(Math.PI / 2).translate(px, py0 + hp * 0.3, pz),
+      cyl(rp, rp, hp, 12, px, py0, pz),
+      cyl(rp * 0.72, rp * 0.72, hp * 0.14, 10, px, py0 + hp, pz),
+      new THREE.TorusGeometry(rp * 1.02, rp * 0.22, 6, 16).rotateX(Math.PI / 2).translate(px, py0 + hp * 0.3, pz),
     ]),
     mat: "pump",
     ax: [1, 2],
@@ -699,8 +716,8 @@ function engineKit({ exitD_m, L, vacuum, chambers = 1, overall = false }) {
     const yEnd = bellL * 0.42;
     const rD = rp * 0.42;
     const xEnd = -(radiusAt(yEnd) + (twin ? off : 0) * 0 + rD * 1.3);
-    const parts = [cyl(rg, rg * 0.8, hg, 16, gx, gy), lathe(domePoints(rg, rg * 0.7, true, 6), 16).translate(gx, gy + hg, 0)];
-    if (!twin) parts.push(tube(v3(gx, gy, 0), v3(Math.min(gx, xEnd) - rD, gy - (gy - yEnd) * 0.35, 0), v3(xEnd, yEnd, 0), rD, 20));
+    const parts = [cyl(rg, rg * 0.8, hg, 10, gx, gy), lathe(domePoints(rg, rg * 0.7, true, 4), 10).translate(gx, gy + hg, 0)];
+    if (!twin) parts.push(tube(v3(gx, gy, 0), v3(Math.min(gx, xEnd) - rD, gy - (gy - yEnd) * 0.35, 0), v3(xEnd, yEnd, 0), rD, 10));
     kit.push({ geo: merge(parts), mat: "powerhead", ax: [0, 0] });
   }
   // Feed pipes: LOX (pump → injector dome) and fuel (pump → chamber side), one branch per chamber.
@@ -722,7 +739,7 @@ function engineKit({ exitD_m, L, vacuum, chambers = 1, overall = false }) {
       const top = v3(-0.2 * rc, L - 0.03 * L, s * rc * 1.5 + zc);
       const bot = v3(-0.2 * rc, bellL + convL + 0.6 * chamberL, s * rc * 1.05 + zc);
       const mid = top.clone().lerp(bot, 0.5);
-      rams.push(rod(top, mid, 0.17 * rc), rod(mid, bot, 0.1 * rc), cyl(0.2 * rc, 0.2 * rc, 0.03 * L, 10, top.x, top.y - 0.005 * L, top.z));
+      rams.push(rod(top, mid, 0.17 * rc), rod(mid, bot, 0.1 * rc), cyl(0.2 * rc, 0.2 * rc, 0.03 * L, 8, top.x, top.y - 0.005 * L, top.z));
     }
     kit.push({ geo: merge(rams), mat: "actuator", ax: [1, 4] });
   }
@@ -732,7 +749,7 @@ function engineKit({ exitD_m, L, vacuum, chambers = 1, overall = false }) {
   kit.push({
     geo: merge([
       box(twin ? rc * 1.1 : gw, gh, gw, 0, yTop - 0.02 * L + gh / 2, 0),
-      cyl(rc * 0.95, rc * 0.95, 0.025 * L, 20, 0, L - 0.025 * L),
+      cyl(rc * 0.95, rc * 0.95, 0.025 * L, 12, 0, L - 0.025 * L),
       boltRing(rc * 0.97, L - 0.0125 * L, 24, (TAU * rc) / 50, 0.02 * L, 0.06 * rc), // knurled gimbal ring
     ]),
     mat: "gimbal",
@@ -752,9 +769,14 @@ function heatShieldSectors(g, holeR, innerR, Rout, y, t) {
   const n = m >= 3 ? m : 4;
   const a0 = m >= 3 ? ring[0].a + Math.PI / m : Math.PI / 4;
   const out = [];
+  let shared = null; // with one ring engine per sector, sector k is sector 0 turned by k·2π/n
   for (let k = 0; k < n; k++) {
     const t0 = a0 + (k * TAU) / n;
     const t1 = t0 + TAU / n;
+    if (shared) {
+      out.push({ geo: shared, mid: (t0 + t1) / 2, ry: (-k * TAU) / n });
+      continue;
+    }
     // Shape space (x, y) maps to world (x, −z) after rotateX(−π/2), so world azimuth α is shape angle −α.
     const shape = new THREE.Shape();
     shape.absarc(0, 0, Rout, -t0, -t1, true);
@@ -763,8 +785,9 @@ function heatShieldSectors(g, holeR, innerR, Rout, y, t) {
       let d = (((p.a - t0) % TAU) + TAU) % TAU;
       if (d > 0 && d < TAU / n) shape.holes.push(new THREE.Path().absarc(p.x, -p.z, holeR, 0, TAU, true));
     }
-    const geo = new THREE.ExtrudeGeometry(shape, { depth: t, bevelEnabled: false, curveSegments: 24 }).rotateX(-Math.PI / 2).translate(0, y, 0);
-    out.push({ geo, mid: (t0 + t1) / 2 });
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: t, bevelEnabled: false, curveSegments: 16 }).rotateX(-Math.PI / 2).translate(0, y, 0);
+    if (m >= 3) shared = geo;
+    out.push({ geo, mid: (t0 + t1) / 2, ry: 0 });
   }
   return out;
 }
@@ -802,15 +825,16 @@ function buildEngines(spec, mats) {
   const holeR = thrustSection ? radiusAt(yHs) * 1.12 + 0.02 * L : rc * 1.7;
   const hasCentre = g.positions.some((p) => p.r === 0);
   const innerR = hasCentre ? (g.chambers > 1 ? off + rc * 1.7 : holeR) : Math.min(holeR, 0.08 * Rm);
-  heatShieldSectors(g, holeR, innerR, Rm * 0.98, yHs, 0.06).forEach(({ geo, mid }, k) =>
-    out.push(piece(geo, mats.heatShield, { order: n + 0.1 + k * 0.01, dir: radial(mid, -0.15), dist: 0.12 + 0.35 * Rm * S, ax: ["top", 1, 0], kind: "shell" })),
+  heatShieldSectors(g, holeR, innerR, Rm * 0.98, yHs, 0.06).forEach(({ geo, mid, ry }, k) =>
+    out.push(piece(geo, mats.heatShield, { ry, order: n + 0.1 + k * 0.01, dir: radial(mid, -0.15), dist: 0.12 + 0.35 * Rm * S, ax: ["top", 1, 0], kind: "shell" })),
   );
   if (thrustSection) {
     const skirt = latheUV(lathe([[Rm, yHs], [Rm, L + mountH]], 64), { H: spec.height / S, R: Rm });
     out.push(piece(skirt, plainFinish(mats, g.finish), { order: n + 0.3, dir: UP, dist: 0.3, side: DS, ax: ["top", 1, 1], sym: true, kind: "shell" }));
   }
   const mb = 0.06 * mountH + 0.004 * Rm;
-  out.push(piece(merge([machinedRing(0.02, Rm * 0.985, mountH, L), boltRing(Rm * 0.9, L + mountH + mb / 2, 24, mb)]), mats.machined, { order: n + 0.4, dir: UP, dist: 0.2, ax: ["top", 1, 2], sym: true }));
+  const mount = machinedRing(0.02, Rm * 0.985, mountH, L);
+  out.push(piece(merge([mount.clone(), boltRing(Rm * 0.9, L + mountH + mb / 2, 24, mb)]), mats.machined, { order: n + 0.4, dir: UP, dist: 0.2, ax: ["top", 1, 2], sym: true, edges: true, lineGeo: mount }));
 
   // S-IC style engine fairings (outer engines) and fins.
   const outer = g.positions.filter((p) => p.r > 0);
@@ -830,7 +854,7 @@ function buildEngines(spec, mats) {
     shape.closePath();
     const t = Math.max(0.12, 0.012 * g.mountD_m);
     const finGeo = projectUV(new THREE.ExtrudeGeometry(shape, { depth: t, bevelEnabled: false }).translate(0, 0, -t / 2));
-    outer.forEach((p, i) => out.push(piece(finGeo, mats.trim, { ry: -p.a, order: n + 0.6 + i * 0.02, dir: radial(p.a), dist: d * 1.4 })));
+    outer.forEach((p, i) => out.push(piece(finGeo, mats.trim, { ry: -p.a, order: n + 0.6 + i * 0.02, dir: radial(p.a), dist: d * 1.4, edges: true })));
   }
   return out;
 }
@@ -855,8 +879,9 @@ function buildTank(spec, mats) {
   const inner = 0.15 + 0.2 * R * S;
   const tb = Math.max(0.02, 0.006 * D); // bolt head size (visual)
   const ringBolts = (y) => boltRing(R * 1.011, y, 24, tb, tb, tb * 0.8);
-  out.push(piece(merge([machinedRing(R * 0.985, R * 1.008, skirtH), ringBolts(skirtH * 0.5)]), mats.skirt, { order: 0, dir: DOWN, dist: 0.15, ax: T(-1, 0), sym: true }));
-  out.push(piece(projectUV(lathe(domePoints(R * 0.985, domeH, false), 48).translate(0, inset + domeH, 0)), mats.interior, { order: 0.1, dir: DOWN, dist: inner, side: DS, sym: true, kind: "interior" }));
+  const skirtRing = machinedRing(R * 0.985, R * 1.008, skirtH);
+  out.push(piece(merge([skirtRing.clone(), ringBolts(skirtH * 0.5)]), mats.skirt, { order: 0, dir: DOWN, dist: 0.15, ax: T(-1, 0), sym: true, edges: true, lineGeo: skirtRing }));
+  out.push(piece(projectUV(lathe(domePoints(R * 0.985, domeH, false), 36).translate(0, inset + domeH, 0)), mats.interior, { order: 0.1, dir: DOWN, dist: inner, side: DS, sym: true, kind: "interior", edges: true }));
   out.push(piece(cyl(0.045 * D, 0.045 * D, yMid - inset, 16, 0, inset), mats.interior, { order: 0.2, dir: DOWN, dist: 0.05, sym: true, kind: "interior" }));
   // Slosh baffle: flat annulus with a ring of lightening cut-outs (edges draw the holes).
   const baffleShape = new THREE.Shape().absarc(0, 0, R * 0.985, 0, TAU, false);
@@ -865,19 +890,20 @@ function buildTank(spec, mats) {
     const a = (i / 12) * TAU;
     baffleShape.holes.push(new THREE.Path().absarc(Math.cos(a) * R * 0.88, Math.sin(a) * R * 0.88, R * 0.045, 0, TAU, true));
   }
-  const baffle0 = new THREE.ExtrudeGeometry(baffleShape, { depth: 0.012 * D, bevelEnabled: false, curveSegments: 24 }).rotateX(-Math.PI / 2);
-  const baffleGeo = () => baffle0.clone(); // triangulated once per tank
+  const baffle0 = new THREE.ExtrudeGeometry(baffleShape, { depth: 0.012 * D, bevelEnabled: false, curveSegments: 16 }).rotateX(-Math.PI / 2);
+  const baffleGeo = () => baffle0; // one geometry shared by the tank's four baffles
   const baffles = [0.13, 0.28, 0.6, 0.76];
   baffles.forEach((f, i) => {
-    if (i === 2) out.push(piece(projectUV(lathe(domePoints(R * 0.985, domeH * 0.8, true), 48).translate(0, yMid, 0)), mats.interior, { order: 0.35, dir: UP, dist: 0.06, side: DS, sym: true, kind: "interior" }));
+    if (i === 2) out.push(piece(projectUV(lathe(domePoints(R * 0.985, domeH * 0.8, true), 36).translate(0, yMid, 0)), mats.interior, { order: 0.35, dir: UP, dist: 0.06, side: DS, sym: true, kind: "interior", edges: true }));
     out.push(piece(baffleGeo(), mats.interior, { y: f * H, order: 0.3 + i * 0.02 + (i >= 2 ? 0.1 : 0), dir: f < 0.5 ? DOWN : UP, dist: 0.04, side: DS, sym: true, kind: "interior" }));
   });
   const yCopv = H - inset - domeH - 0.16 * D;
+  const copvGeo = new THREE.CapsuleGeometry(0.07 * D, 0.12 * D, 4, 12); // shared by the four bottles
   for (let k = 0; k < 4; k++) {
     const a = Math.PI / 4 + (k * TAU) / 4;
-    out.push(piece(new THREE.CapsuleGeometry(0.07 * D, 0.12 * D, 6, 16), mats.copv, { x: 0.32 * R * Math.cos(a), y: yCopv, z: 0.32 * R * Math.sin(a), order: 0.6 + k * 0.01, dir: radial(a, 0.6), dist: 0.08, kind: "interior" }));
+    out.push(piece(copvGeo, mats.copv, { x: 0.32 * R * Math.cos(a), y: yCopv, z: 0.32 * R * Math.sin(a), order: 0.6 + k * 0.01, dir: radial(a, 0.6), dist: 0.08, kind: "interior" }));
   }
-  out.push(piece(projectUV(lathe(domePoints(R * 0.985, domeH, true), 48).translate(0, H - inset - domeH, 0)), mats.interior, { order: 0.7, dir: UP, dist: inner, side: DS, sym: true, kind: "interior" }));
+  out.push(piece(projectUV(lathe(domePoints(R * 0.985, domeH, true), 36).translate(0, H - inset - domeH, 0)), mats.interior, { order: 0.7, dir: UP, dist: inner, side: DS, sym: true, kind: "interior", edges: true }));
 
   // Skin: four shell quarters, each with its ring of internal stringers. An enclosed tank (it sits inside the
   // interstage/fairing on the real vehicle) shows the plain white enclosure instead of a painted finish.
@@ -897,23 +923,25 @@ function buildTank(spec, mats) {
     shellProfile.push([R, y - ww], [R * 1.004, y - ww], [R * 1.004, y + ww], [R, y + ww]);
   }
   shellProfile.push([R, y1s]);
+  // Quarter 0 is built once; quarters 1–3 are the same geometry turned by q·π/2 about Y (allowed by the
+  // piece rules), so each tank uploads one skin, one stringer set and one line set.
+  const str = [];
+  for (let j = 0; j < 6; j++) {
+    const phi = ((j + 0.5) * (Math.PI / 2)) / 6;
+    const r = R - 0.008 * D;
+    str.push(box(0.012 * D, 0.94 * H, 0.01 * D).rotateY(phi - Math.PI / 2).translate(Math.sin(phi) * r, H / 2, Math.cos(phi) * r));
+  }
+  const strGeo = merge(str);
+  const quarterGeo = latheUV(lathe(shellProfile, 24, 0, Math.PI / 2), { phiStart: 0, phiLength: Math.PI / 2, H, R });
+  const plain = lathe([[R, y0s], [R, y1s]], 24, 0, Math.PI / 2); // its boundary = the panel seams
+  const seamWeldGeo = merge([plain, ...welds.map((y) => lathe([[R, y - ww], [R * 1.004, y - ww], [R * 1.004, y + ww], [R, y + ww]], 24, 0, Math.PI / 2))]);
   for (let q = 0; q < 4; q++) {
-    const phi0 = (q * Math.PI) / 2;
-    const dir = radialPhi(phi0 + Math.PI / 4);
-    const str = [];
-    for (let j = 0; j < 6; j++) {
-      const phi = phi0 + ((j + 0.5) * (Math.PI / 2)) / 6;
-      const r = R - 0.008 * D;
-      str.push(box(0.012 * D, 0.94 * H, 0.01 * D).rotateY(phi - Math.PI / 2).translate(Math.sin(phi) * r, H / 2, Math.cos(phi) * r));
-    }
-    out.push(piece(merge(str), mats.interior, { order: 1 + q * 0.02, dir, dist: shellDist * 0.7, kind: "interior", edges: false }));
+    const ry = (q * Math.PI) / 2;
+    out.push(piece(strGeo, mats.interior, { ry, order: 1 + q * 0.02, dir: radialPhi(ry + Math.PI / 4), dist: shellDist * 0.7, kind: "interior" }));
   }
   for (let q = 0; q < 4; q++) {
-    const phi0 = (q * Math.PI) / 2;
-    const geo = latheUV(lathe(shellProfile, 24, phi0, Math.PI / 2), { phiStart: phi0, phiLength: Math.PI / 2, H, R });
-    const plain = lathe([[R, y0s], [R, y1s]], 24, phi0, Math.PI / 2); // its boundary = the panel seams
-    const fineGeo = merge([plain, ...welds.map((y) => lathe([[R, y - ww], [R * 1.004, y - ww], [R * 1.004, y + ww], [R, y + ww]], 24, phi0, Math.PI / 2))]);
-    out.push(piece(geo, shellMat, { order: 1.5 + q * 0.02, dir: radialPhi(phi0 + Math.PI / 4), dist: shellDist, side: DS, kind: "shell", lineGeo: false, fineGeo }));
+    const ry = (q * Math.PI) / 2;
+    out.push(piece(quarterGeo, shellMat, { ry, order: 1.5 + q * 0.02, dir: radialPhi(ry + Math.PI / 4), dist: shellDist, side: DS, kind: "shell", lineGeo: false, fineGeo: seamWeldGeo }));
   }
   // Raceway (cable/plumbing tunnel) along the full length.
   if (!g.enclosed) {
@@ -924,17 +952,18 @@ function buildTank(spec, mats) {
     const clamps = [];
     for (let y = skirtH + 1.5; y < skirtH + rwH - 0.5; y += 3) clamps.push(box(rwD * 1.7, 0.12, 0.07 * D * 1.5, R + rwD * 0.85, y, 0)); // every ~3 m
     const clampGeo = clamps.length ? merge(clamps) : null;
-    out.push(piece(projectUV(merge([duct.clone(), ...(clampGeo ? [clampGeo.clone()] : [])])), mats.raceway, { ry: -rwA, order: 2, dir: radial(rwA), dist: shellDist * 1.1, lineGeo: duct, fineGeo: clampGeo }));
+    out.push(piece(projectUV(merge([duct.clone(), ...(clampGeo ? [clampGeo] : [])])), mats.raceway, { ry: -rwA, order: 2, dir: radial(rwA), dist: shellDist * 1.1, edges: true, lineGeo: duct }));
     if (g.stageIndex === 0) {
       // Umbilical plate with two quick-disconnect ports near the base (visual sizes).
       const ua = rwA + 0.55;
       const uy = skirtH + 0.02 * H + 0.2 * D;
-      const port = (z) => new THREE.CylinderGeometry(0.035 * D, 0.035 * D, 0.05 * D, 16).rotateZ(Math.PI / 2).translate(R + 0.045 * D, uy, z);
+      const port = (z) => new THREE.CylinderGeometry(0.035 * D, 0.035 * D, 0.05 * D, 10).rotateZ(Math.PI / 2).translate(R + 0.045 * D, uy, z);
       const umb = merge([box(0.03 * D, 0.32 * D, 0.24 * D, R + 0.015 * D, uy, 0), port(-0.06 * D), port(0.06 * D)]);
       out.push(piece(projectUV(umb), mats.steelDark, { ry: -ua, order: 2.2, dir: radial(ua), dist: shellDist * 1.1 }));
     }
   }
-  out.push(piece(merge([machinedRing(R * 0.985, R * 1.008, fwdH, H - fwdH), ringBolts(H - fwdH * 0.5)]), mats.machined, { order: 2.5, dir: UP, dist: 0.12, ax: T(1, 0), sym: true }));
+  const fwdRing = machinedRing(R * 0.985, R * 1.008, fwdH, H - fwdH);
+  out.push(piece(merge([fwdRing.clone(), ringBolts(H - fwdH * 0.5)]), mats.machined, { order: 2.5, dir: UP, dist: 0.12, ax: T(1, 0), sym: true, edges: true, lineGeo: fwdRing }));
 
   if (g.features.includes("landing-legs")) legs(out, mats, R, H, D, shellDist, skirtH);
   if (g.features.includes("grid-fins")) gridFins(out, mats, R, R, H * 0.985 - fwdH, D, shellDist);
@@ -962,7 +991,7 @@ function legs(out, mats, R, H, D, shellDist, y0) {
   const bracketGeo = merge([box(0.05 * D, 0.03 * len, 0.16 * D, R + 0.025 * D, y0 + len + 0.03 * len, 0), cyl(0.02 * D, 0.02 * D, 0.03 * len, 10, R + 0.06 * D, y0 + len + 0.015 * len)]);
   for (let i = 0; i < 4; i++) {
     const a = Math.PI / 4 + (i * Math.PI) / 2;
-    out.push(piece(legGeo, mats.leg, { ry: -a, order: 3 + i * 0.02, dir: radial(a), dist: shellDist * 1.4 }));
+    out.push(piece(legGeo, mats.leg, { ry: -a, order: 3 + i * 0.02, dir: radial(a), dist: shellDist * 1.4, edges: true }));
     out.push(piece(bracketGeo, mats.darkMetal, { ry: -a, order: 3.1 + i * 0.02, dir: radial(a, 0.3), dist: shellDist * 1.2 }));
   }
 }
@@ -1002,7 +1031,7 @@ function gridFins(out, mats, rBot, rTop, yTop, D, dist) {
   const geo = merge(geos);
   for (let i = 0; i < 4; i++) {
     const a = Math.PI / 4 + (i * Math.PI) / 2;
-    out.push(piece(geo, mats.gridFin, { ry: -a, order: 4 + i * 0.02, dir: radial(a, 0.2), dist: dist * 1.3 }));
+    out.push(piece(geo, mats.gridFin, { ry: -a, order: 4 + i * 0.02, dir: radial(a, 0.2), dist: dist * 1.3, edges: true }));
   }
 }
 
@@ -1023,23 +1052,25 @@ function buildInterstage(spec, mats) {
   // Joint rings: machined ring + bolt circle + three stacked thin tori (the lens-barrel look).
   const ib = Math.max(0.02, 0.006 * D);
   const tor = 0.006 * D;
-  const jointRing = (r, y0, up) =>
-    merge([
+  // Returns [mesh geometry, line geometry (ring + tori, no bolts)].
+  const jointRing = (r, y0, up) => {
+    const lines = merge([
       machinedRing(r * 0.97, r * 1.006, ringH, y0),
-      boltRing(r * 1.009, y0 + ringH * 0.5, 24, ib, ib, ib * 0.8),
-      ...[0, 1, 2].map((k) => projectUV(new THREE.TorusGeometry(r * 1.002, tor, 6, 96).rotateX(Math.PI / 2).translate(0, up ? y0 + ringH + tor * (1 + 2.4 * k) : y0 - tor * (1 + 2.4 * k), 0))),
+      ...[0, 1, 2].map((k) => projectUV(new THREE.TorusGeometry(r * 1.002, tor, 4, 48).rotateX(Math.PI / 2).translate(0, up ? y0 + ringH + tor * (1 + 2.4 * k) : y0 - tor * (1 + 2.4 * k), 0))),
     ]);
-  out.push(piece(jointRing(Rb, 0, true), mats.machined, { order: 0, dir: DOWN, dist: 0.1, ax: ["i", -1, 0], sym: true }));
-  for (let h = 0; h < 2; h++) {
-    const str = [];
-    for (let j = 0; j < 6; j++) {
-      const phi = h * Math.PI + ((j + 0.5) * Math.PI) / 6;
-      const out_ = radialPhi(phi);
-      const at = (y) => out_.clone().multiplyScalar(rAt(y) - 0.012 * D).setY(y);
-      str.push(strut(at(ringH), at(H - ringH), 0.012 * D, 0.016 * D, out_));
-    }
-    out.push(piece(merge(str), mats.interior, { order: 0.2 + h * 0.02, dir: radialPhi(h * Math.PI + Math.PI / 2), dist: shellDist * 0.6, kind: "interior", edges: false }));
+    return [merge([lines.clone(), boltRing(r * 1.009, y0 + ringH * 0.5, 24, ib, ib, ib * 0.8)]), lines];
+  };
+  const [lowGeo, lowLines] = jointRing(Rb, 0, true);
+  out.push(piece(lowGeo, mats.machined, { order: 0, dir: DOWN, dist: 0.1, ax: ["i", -1, 0], sym: true, edges: true, lineGeo: lowLines }));
+  const str = [];
+  for (let j = 0; j < 6; j++) {
+    const phi = ((j + 0.5) * Math.PI) / 6;
+    const out_ = radialPhi(phi);
+    const at = (y) => out_.clone().multiplyScalar(rAt(y) - 0.012 * D).setY(y);
+    str.push(strut(at(ringH), at(H - ringH), 0.012 * D, 0.016 * D, out_));
   }
+  const strHalf = merge(str); // half 1 = half 0 turned by π
+  for (let h = 0; h < 2; h++) out.push(piece(strHalf, mats.interior, { ry: h * Math.PI, order: 0.2 + h * 0.02, dir: radialPhi(h * Math.PI + Math.PI / 2), dist: shellDist * 0.6, kind: "interior" }));
   const pushers = [];
   for (let k = 0; k < 4; k++) {
     const a = Math.PI / 4 + (k * TAU) / 4;
@@ -1048,12 +1079,13 @@ function buildInterstage(spec, mats) {
   }
   out.push(piece(merge(pushers), mats.actuator, { order: 0.4, dir: UP, dist: 0.08, ax: ["i", 1, 1] }));
   const mat = finishMat(mats, g.finish);
+  const iq = latheUV(lathe([[rAt(ringH * 0.5), ringH * 0.5], [rAt(H - ringH * 0.5), H - ringH * 0.5]], 24, 0, Math.PI / 2), { phiStart: 0, phiLength: Math.PI / 2, H, R: (Rb + Rt) / 2 });
   for (let q = 0; q < 4; q++) {
-    const phi0 = (q * Math.PI) / 2;
-    const geo = latheUV(lathe([[rAt(ringH * 0.5), ringH * 0.5], [rAt(H - ringH * 0.5), H - ringH * 0.5]], 24, phi0, Math.PI / 2), { phiStart: phi0, phiLength: Math.PI / 2, H, R: (Rb + Rt) / 2 });
-    out.push(piece(geo, mat, { order: 1 + q * 0.02, dir: radialPhi(phi0 + Math.PI / 4), dist: shellDist, side: DS, kind: "shell", lineGeo: false, fineGeo: geo.clone() }));
+    const ry = (q * Math.PI) / 2;
+    out.push(piece(iq, mat, { ry, order: 1 + q * 0.02, dir: radialPhi(ry + Math.PI / 4), dist: shellDist, side: DS, kind: "shell", lineGeo: false, fineGeo: iq }));
   }
-  out.push(piece(jointRing(Rt, H - ringH, false), mats.machined, { order: 2, dir: UP, dist: 0.1, ax: ["i", 1, 0], sym: true }));
+  const [topGeo, topLines] = jointRing(Rt, H - ringH, false);
+  out.push(piece(topGeo, mats.machined, { order: 2, dir: UP, dist: 0.1, ax: ["i", 1, 0], sym: true, edges: true, lineGeo: topLines }));
   if (g.features?.includes("grid-fins")) {
     const yTop = H - ringH - 0.04 * H;
     gridFins(out, mats, rAt(yTop - 0.4 * D), rAt(yTop), yTop, D, shellDist);
@@ -1070,15 +1102,16 @@ function adapterPieces(out, mats, g) {
   const h = g.adapterH_m;
   if (g.archetype === "capsule") {
     // Instrument-unit style ring at the stage diameter (visual).
-    out.push(piece(machinedRing(Rt * 0.94, Rt, h, 0), mats.trim, { order: 0, dir: DOWN, dist: 0.12, ax: ["p", -1, 9], sym: true }));
+    out.push(piece(machinedRing(Rt * 0.94, Rt, h, 0), mats.trim, { order: 0, dir: DOWN, dist: 0.12, ax: ["p", -1, 9], sym: true, edges: true }));
     return;
   }
   // Payload attach fitting (cone) + machined clamp band at the payload interface.
   const rb = 0.42 * g.stageD_m;
   const rtop = Math.min(0.62 * Rp, rb);
-  out.push(piece(projectUV(lathe([[0.001, 0], [rb, 0], [rtop, h * 0.9], [0.001, h * 0.9]], 48)), mats.metal, { order: 0, dir: DOWN, dist: 0.14, ax: ["p", -1, 9], sym: true }));
+  out.push(piece(projectUV(lathe([[0.001, 0], [rb, 0], [rtop, h * 0.9], [0.001, h * 0.9]], 48)), mats.metal, { order: 0, dir: DOWN, dist: 0.14, ax: ["p", -1, 9], sym: true, edges: true }));
   const cb = Math.max(0.015, 0.012 * rtop);
-  out.push(piece(merge([machinedRing(rtop * 0.85, rtop * 1.05, h * 0.1, h * 0.9), boltRing(rtop * 1.06, h * 0.95, 24, cb, cb, cb * 0.8)]), mats.machined, { order: 0.05, dir: DOWN, dist: 0.07, ax: ["p", -1, 8], sym: true }));
+  const clampRing = machinedRing(rtop * 0.85, rtop * 1.05, h * 0.1, h * 0.9);
+  out.push(piece(merge([clampRing.clone(), boltRing(rtop * 1.06, h * 0.95, 24, cb, cb, cb * 0.8)]), mats.machined, { order: 0.05, dir: DOWN, dist: 0.07, ax: ["p", -1, 8], sym: true, edges: true, lineGeo: clampRing }));
 }
 
 function buildPayload(spec, mats) {
@@ -1112,7 +1145,7 @@ function buildPayload(spec, mats) {
 // Telescope: bus (aft section), tube, aperture door, two solar arrays (with their masts).
 function telescope(P, mats, R, H, y0) {
   P(projectUV(cyl(R * 0.97, R * 0.97, 0.36 * H, 12, 0, y0)), mats.mliSilver, { order: 1, dist: 0.2, ax: [-1, 0], sym: true, kind: "shell" });
-  const tubeRings = [0.3, 0.55, 0.8, 0.94].map((f) => projectUV(new THREE.TorusGeometry(R * 0.745, 0.006 * R, 6, 64).rotateX(Math.PI / 2).translate(0, y0 + 0.36 * H + f * 0.6 * H, 0)));
+  const tubeRings = [0.3, 0.55, 0.8, 0.94].map((f) => projectUV(new THREE.TorusGeometry(R * 0.745, 0.006 * R, 4, 32).rotateX(Math.PI / 2).translate(0, y0 + 0.36 * H + f * 0.6 * H, 0)));
   P(projectUV(merge([cyl(R * 0.74, R * 0.74, 0.6 * H, 40, 0, y0 + 0.36 * H), ...tubeRings])), mats.mliSilver, { order: 1.1, dist: 0.35, sym: true, kind: "shell" });
   for (const s of [1, -1]) {
     P(projectUV(merge([box(0.08 * R, 0.5 * H, 0.32 * R, 0, y0 + 0.62 * H, s * 0.86 * R), cyl(0.035 * R, 0.035 * R, 0.4 * H, 8, 0.2 * R, y0 + 0.4 * H, s * 0.86 * R)])), mats.panel, {
@@ -1121,14 +1154,14 @@ function telescope(P, mats, R, H, y0) {
       dist: 0.4,
     });
   }
-  P(projectUV(merge([cyl(R * 0.77, R * 0.77, 0.025 * H, 40, 0, y0 + 0.96 * H), box(0.12 * R, 0.04 * H, 0.2 * R, R * 0.74, y0 + 0.965 * H, 0)])), mats.machined, { order: 1.4, dist: 0.6, ax: [1, 0] });
+  P(projectUV(merge([cyl(R * 0.77, R * 0.77, 0.025 * H, 40, 0, y0 + 0.96 * H), box(0.12 * R, 0.04 * H, 0.2 * R, R * 0.74, y0 + 0.965 * H, 0)])), mats.machined, { order: 1.4, dist: 0.6, ax: [1, 0], edges: true });
 }
 
 // Stowed JWST read: spacecraft bus at the base, two folded sunshield pallets, gold mirror wall between,
 // secondary-mirror struts folded on top.
 function webb(P, mats, R, H, y0) {
   P(projectUV(box(1.1 * R, 0.16 * H, 1.1 * R, 0, y0 + 0.08 * H)), mats.gold, { order: 1, dist: 0.2, ax: [-1, 0] });
-  P(projectUV(merge([box(0.95 * R, 0.66 * H, 0.12 * R, 0, y0 + 0.16 * H + 0.33 * H, 0.18 * R), box(0.5 * R, 0.5 * H, 0.4 * R, 0, y0 + 0.16 * H + 0.25 * H, -0.2 * R)])), mats.gold, { order: 1.1, dist: 0.5 });
+  P(projectUV(merge([box(0.95 * R, 0.66 * H, 0.12 * R, 0, y0 + 0.16 * H + 0.33 * H, 0.18 * R), box(0.5 * R, 0.5 * H, 0.4 * R, 0, y0 + 0.16 * H + 0.25 * H, -0.2 * R)])), mats.gold, { order: 1.1, dist: 0.5, edges: true });
   for (const s of [1, -1]) {
     P(projectUV(box(0.14 * R, 0.62 * H, 1.1 * R, s * 0.72 * R, y0 + 0.16 * H + 0.31 * H)), mats.mliSilver, { order: 1.2 + (s > 0 ? 0 : 0.02), dir: v3(s, 0.3, 0), dist: 0.45 });
   }
@@ -1148,7 +1181,7 @@ function weatherSat(P, mats, R, H, y0) {
   P(projectUV(box(0.07 * R, 0.8 * H, 1.1 * R, 0.66 * R, y0 + 0.1 * H + 0.4 * H)), mats.panel, { order: 1.2, dir: v3(1, 0.3, 0), dist: 0.45 });
   P(projectUV(cyl(0.03 * R, 0.03 * R, 0.7 * H, 8, -0.66 * R, y0 + 0.1 * H)), mats.darkMetal, { order: 1.25, dir: v3(-1, 0.3, 0), dist: 0.4 });
   const aperture = (z, r) => new THREE.CylinderGeometry(r, r, 0.08 * R, 24).rotateX(Math.PI / 2).translate(-0.15 * R, y0 + 0.75 * H, z);
-  P(projectUV(merge([box(0.9 * R, 0.25 * H, 0.7 * R, -0.05 * R, y0 + 0.63 * H + 0.125 * H, 0), aperture(0.37 * R, 0.12 * R), aperture(-0.37 * R, 0.08 * R)])), mats.mliSilver, { order: 1.3, dist: 0.5, ax: [1, 0] });
+  P(projectUV(merge([box(0.9 * R, 0.25 * H, 0.7 * R, -0.05 * R, y0 + 0.63 * H + 0.125 * H, 0), aperture(0.37 * R, 0.12 * R), aperture(-0.37 * R, 0.08 * R)])), mats.mliSilver, { order: 1.3, dist: 0.5, ax: [1, 0], edges: true });
   const dish = [];
   for (let i = 0; i <= 10; i++) dish.push([0.28 * R * (i / 10), 0.06 * H * (i / 10) ** 2]);
   P(projectUV(lathe(dish, 32).translate(0.3 * R, y0 + 0.9 * H, 0.2 * R)), mats.trim, { order: 1.4, dist: 0.7, side: DS, ax: [1, 1] });
@@ -1171,7 +1204,7 @@ function lander(P, mats, R, H, y0) {
   const dish = [];
   for (let i = 0; i <= 8; i++) dish.push([0.22 * R * (i / 8), 0.05 * H * (i / 8) ** 2]);
   const rcs = [0, 1, 2, 3].map((k) => box(0.08 * R, 0.05 * H, 0.08 * R, 0.36 * R * Math.cos((k * TAU) / 4), y0 + 0.8 * H, 0.36 * R * Math.sin((k * TAU) / 4)));
-  P(projectUV(merge([cyl(0.4 * R, 0.45 * R, 0.12 * H, 6, 0, y0 + 0.78 * H), lathe(dish, 24).translate(0.1 * R, y0 + 0.92 * H, 0), ...rcs])), mats.gold, { order: 1.3, dist: 0.6, ax: [1, 0] });
+  P(projectUV(merge([cyl(0.4 * R, 0.45 * R, 0.12 * H, 6, 0, y0 + 0.78 * H), lathe(dish, 24).translate(0.1 * R, y0 + 0.92 * H, 0), ...rcs])), mats.gold, { order: 1.3, dist: 0.6, ax: [1, 0], edges: true });
   for (let half = 0; half < 2; half++) {
     const geos = [];
     for (let i = half * 3; i < half * 3 + 3; i++) {
@@ -1184,7 +1217,7 @@ function lander(P, mats, R, H, y0) {
       geos.push(tube(at(0.55, 0.5), at(0.75, 0.35), knee, 0.025 * R, 10), rod(knee, foot, 0.025 * R), rod(at(0.5, 0.3), knee, 0.02 * R), cyl(0.07 * R, 0.08 * R, 0.02 * H, 16, foot.x, y0, foot.z));
     }
     const mid = ((half * 3 + 1.5) * TAU) / 6;
-    P(projectUV(merge(geos)), mats.metal, { order: 1.5 + half * 0.02, dir: radial(mid, 0.2), dist: 0.35 });
+    P(projectUV(merge(geos)), mats.metal, { order: 1.5 + half * 0.02, dir: radial(mid, 0.2), dist: 0.35, edges: true });
   }
 }
 
@@ -1212,13 +1245,13 @@ function capsule(P, mats, g, y0) {
   const dR = 0.85 * rIn(yAsc);
   P(projectUV(cyl(dR, dR, yAsc - 0.06 * slaH, 8, 0, y0 + 0.06 * slaH)), mats.gold, { order: 0.9, dist: 0.2, ax: [-1, 2], kind: "interior" });
   P(projectUV(cyl(0.6 * dR, 0.72 * dR, lmTop - yAsc, 6, 0, y0 + yAsc)), mats.mliSilver, { order: 0.95, dist: 0.3, ax: [-1, 1], kind: "interior" });
+  const sla = latheUV(lathe([[Rb, y0], [Rs, y0 + slaH]], 16, 0, Math.PI / 2), { phiStart: 0, phiLength: Math.PI / 2, H: slaH, R: (Rb + Rs) / 2, y0 });
   for (let q = 0; q < 4; q++) {
-    const phi0 = (q * Math.PI) / 2;
-    const geo = latheUV(lathe([[Rb, y0], [Rs, y0 + slaH]], 16, phi0, Math.PI / 2), { phiStart: phi0, phiLength: Math.PI / 2, H: slaH, R: (Rb + Rs) / 2, y0 });
-    P(geo, mats.silver, { order: 1 + q * 0.02, dir: radialPhi(phi0 + Math.PI / 4, 0.4), dist: 0.25 + 0.5 * Rb * S, side: DS, ax: [-1, 3], kind: "shell" });
+    const ry = (q * Math.PI) / 2;
+    P(sla, mats.silver, { ry, order: 1 + q * 0.02, dir: radialPhi(ry + Math.PI / 4, 0.4), dist: 0.25 + 0.5 * Rb * S, side: DS, ax: [-1, 3], kind: "shell" });
   }
   const ySm = y0 + slaH;
-  P(projectUV(lathe([[0.6 * Rc, 0], [0.3 * Rc, 0.75 * spsH], [0.2 * Rc, spsH]], 32).translate(0, ySm - spsH, 0)), mats.darkMetal, { order: 1.2, dist: 0.45, side: DS, ax: [-1, 0], sym: true });
+  P(projectUV(lathe([[0.6 * Rc, 0], [0.3 * Rc, 0.75 * spsH], [0.2 * Rc, spsH]], 32).translate(0, ySm - spsH, 0)), mats.darkMetal, { order: 1.2, dist: 0.45, side: DS, ax: [-1, 0], sym: true, edges: true });
   const quads = [];
   for (let i = 0; i < 4; i++) {
     const a = (i * TAU) / 4 + Math.PI / 4;
@@ -1229,7 +1262,7 @@ function capsule(P, mats, g, y0) {
   P(merge([boltRing(Rc * 1.01, ySm + jb / 2, 32, jb), boltRing(Rc * 1.01, ySm + smH - jb / 2, 32, jb)]), mats.machined, { order: 1.35, dist: 0.6, sym: true });
   const yCm = ySm + smH;
   const cm = [[Rc, 0], [Rc * 0.98, 0.04 * cmH], [0.24 * Rc, 0.86 * cmH], [0.16 * Rc, 0.95 * cmH], [0.001, cmH]];
-  P(projectUV(lathe(cm, 48).translate(0, yCm, 0)), mats.trim, { order: 1.4, dist: 0.8, ax: [1, 0], sym: true });
+  P(projectUV(lathe(cm, 48).translate(0, yCm, 0)), mats.trim, { order: 1.4, dist: 0.8, ax: [1, 0], sym: true, edges: true });
   const lesH = g.lesH_m ?? 0;
   if (lesH > 0) {
     const yL = yCm + cmH * 0.95;
@@ -1242,7 +1275,7 @@ function capsule(P, mats, g, y0) {
     }
     P(projectUV(merge(truss)), mats.darkMetal, { order: 1.5, dist: 1.0, ax: [1, 1] });
     const motor = [[0.13 * Rc, 0], [0.13 * Rc, 0.42 * lesH], [0.07 * Rc, 0.5 * lesH], [0.05 * Rc, 0.56 * lesH], [0.001, 0.6 * lesH]];
-    P(projectUV(lathe(motor, 24).translate(0, yL + 0.4 * lesH, 0)), mats.trim, { order: 1.6, dist: 1.1, ax: [1, 2], sym: true });
+    P(projectUV(lathe(motor, 24).translate(0, yL + 0.4 * lesH, 0)), mats.trim, { order: 1.6, dist: 1.1, ax: [1, 2], sym: true, edges: true });
   }
 }
 
@@ -1261,17 +1294,18 @@ function buildFairing(spec, mats) {
   const base = g.boattailH_m > 0 ? [[Rb, 0], [Rf, g.boattailH_m], [Rf, baseH]] : [[Rf, 0], [Rf, baseH]];
   out.push(piece(latheUV(lathe(base, 64), { H: g.H_m, R: Rf }), mats.body, { order: 0, dir: DOWN, dist: 0.1, side: DS, ax: ["f", -1, 1], sym: true, kind: "shell" }));
   const fb = Math.max(0.02, 0.006 * g.D_m);
-  out.push(piece(merge([machinedRing(Rf * 0.97, Rf * 1.008, ringH, baseH), boltRing(Rf * 1.011, baseH + ringH / 2, 32, fb, fb, fb * 0.8)]), mats.machined, { order: 0.5, dir: DOWN, dist: 0.06, ax: ["f", -1, 0], sym: true }));
+  const sepRing = machinedRing(Rf * 0.97, Rf * 1.008, ringH, baseH);
+  out.push(piece(merge([sepRing.clone(), boltRing(Rf * 1.011, baseH + ringH / 2, 32, fb, fb, fb * 0.8)]), mats.machined, { order: 0.5, dir: DOWN, dist: 0.06, ax: ["f", -1, 0], sym: true, edges: true, lineGeo: sepRing }));
   const pts = [[Rf, baseH + ringH], [Rf, g.cylTop_m], ...ogivePoints(Rf, g.noseH_m, g.cylTop_m)];
+  // Half 0 (phi ∈ [0, π], the +X half) and its door; half 1 is the same geometry turned by π.
+  const half = latheUV(lathe(pts, 40, 0, Math.PI), { phiStart: 0, phiLength: Math.PI, H: g.H_m, R: Rf });
+  const doorH = 0.09 * g.D_m;
+  const yDoor = baseH + 0.3 * (g.cylTop_m - baseH);
+  const door = projectUV(box(0.012 * g.D_m, doorH, 0.12 * g.D_m, Rf + 0.006 * g.D_m, yDoor + doorH / 2, 0.25 * Rf));
   for (let h = 0; h < 2; h++) {
-    const phi0 = h * Math.PI;
-    const geo = latheUV(lathe(pts, 40, phi0, Math.PI), { phiStart: phi0, phiLength: Math.PI, H: g.H_m, R: Rf });
-    const sx = h === 0 ? 1 : -1; // phi ∈ [0, π] is the +X half
-    const dir = v3(sx, 0.12, 0);
-    out.push(piece(geo, mats.body, { order: 1 + h * 0.05, dir, dist: halfDist, side: DS, kind: "shell" }));
-    const doorH = 0.09 * g.D_m;
-    const yDoor = baseH + 0.3 * (g.cylTop_m - baseH);
-    out.push(piece(projectUV(box(0.012 * g.D_m, doorH, 0.12 * g.D_m, sx * (Rf + 0.006 * g.D_m), yDoor + doorH / 2, 0.25 * Rf)), mats.raceway, { order: 1.02 + h * 0.05, dir, dist: halfDist }));
+    const dir = v3(h === 0 ? 1 : -1, 0.12, 0);
+    out.push(piece(half, mats.body, { ry: h * Math.PI, order: 1 + h * 0.05, dir, dist: halfDist, side: DS, kind: "shell" }));
+    out.push(piece(door, mats.raceway, { ry: h * Math.PI, order: 1.02 + h * 0.05, dir, dist: halfDist }));
   }
   return out;
 }

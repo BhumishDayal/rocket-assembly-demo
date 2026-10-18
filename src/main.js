@@ -6,8 +6,9 @@ import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { GTAOPass } from "three/addons/postprocessing/GTAOPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
-import { catalog, presetIds, getPreset, presetToBuild, optionsFor, applyOption } from "./data/catalog.js";
+import { catalog, presetIds, getPreset, presetToBuild, applyOption } from "./data/catalog.js";
 import { evaluateBuild, stageDetails, stackMass_kg } from "./physics.js";
+import { optionsWithCompat } from "./compat.js";
 import { SCALE, buildManifest, sceneBounds } from "./layout.js";
 import { createMaterials, createPart, createPad, createStars } from "./parts.js";
 import { createChoreographer } from "./choreo.js";
@@ -41,7 +42,7 @@ let current = loadPreset(presetIds[presetIndex]);
 // ---------- renderer / scene ----------
 const canvas = document.getElementById("scene");
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: !lite, powerPreference: "high-performance" });
-renderer.setPixelRatio(lite ? 1 : Math.min(devicePixelRatio, 2));
+renderer.setPixelRatio(lite ? 1 : Math.min(devicePixelRatio, 1.5)); // 1.5 caps the fill cost on retina screens
 renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -74,16 +75,16 @@ scene.environmentIntensity = 0.25;
 // Light rig (design round 10): one warm peach key from upper-left-front of the home view, a cool fill from the
 // opposite side, a faint hemisphere. Dark graphite shells read by their rims and edges, not by flat white light.
 const KEY_DIR = new THREE.Vector3(-0.34, 1.1, 0.94).normalize(); // from the target toward the key light
-const key = new THREE.DirectionalLight(0xffb48a, 2.2);
+const key = new THREE.DirectionalLight(0xffb48a, 2.8); // contrast: every cylinder shows a light-to-shadow gradient
 key.castShadow = !lite;
 key.shadow.mapSize.set(2048, 2048);
 key.shadow.bias = -0.0004;
 key.shadow.normalBias = 0.02;
 scene.add(key, key.target);
-const fill = new THREE.DirectionalLight(0x6a7fa8, 0.5);
+const fill = new THREE.DirectionalLight(0x6a7fa8, 0.3);
 fill.position.set(0.34, 0.45, -0.94).multiplyScalar(40);
 scene.add(fill);
-scene.add(new THREE.HemisphereLight(0x8fa6c8, 0x0f1118, 0.15));
+scene.add(new THREE.HemisphereLight(0x8fa6c8, 0x0f1118, 0.08));
 
 const root = new THREE.Group(); // shakes on lock
 scene.add(root);
@@ -101,8 +102,6 @@ function disposeTree(obj) {
 // range, pad. The light keeps its direction; only its box follows the preset.
 function applyBounds(b) {
   const H = b.height_u;
-  scene.fog.near = Math.max(45, H * 2.6);
-  scene.fog.far = Math.max(130, scene.fog.near + 85);
   key.target.position.set(0, H * 0.45, 0);
   key.position.copy(key.target.position).addScaledVector(KEY_DIR, H * 1.5 + 20);
   const half = Math.max(8, H * 0.85, b.radius_u * 6);
@@ -131,8 +130,13 @@ const sfx = createSfx();
 const choreo = createChoreographer({ parts, scene, root, camera, controls, sfx, onChange: syncUi, scale: SCALE, bounds: current.bounds, makePart });
 
 // ---------- post ----------
-// GTAO skips what writes no depth (holograms, flashes, the pad ring), so ghosts never darken the stack.
+// GTAO skips what writes no depth (holograms, flashes, the pad ring, x-ray shells), so they never darken the
+// stack. It runs at half resolution (the AO is soft anyway) and is a luxury: off while anything animates,
+// off on stacks over 230 pieces, and off for the session if frames average over 22 ms (see frame()).
 class SolidGTAOPass extends GTAOPass {
+  setSize(width, height) {
+    super.setSize(Math.max(1, Math.round(width / 2)), Math.max(1, Math.round(height / 2)));
+  }
   _overrideVisibility() {
     super._overrideVisibility();
     const cache = this._visibilityCache;
@@ -145,10 +149,12 @@ class SolidGTAOPass extends GTAOPass {
   }
 }
 let composer = null;
+let gtao = null;
 if (!lite) {
   composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
-  const gtao = new SolidGTAOPass(scene, camera, innerWidth, innerHeight);
+  const pr = renderer.getPixelRatio();
+  gtao = new SolidGTAOPass(scene, camera, innerWidth * pr, innerHeight * pr);
   gtao.updateGtaoMaterial({ radius: 0.6, distanceExponent: 1.5, thickness: 1.2, scale: 1, samples: 16 });
   gtao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 6, rings: 2, samples: 16 });
   gtao.blendIntensity = 0.55; // dark shells need little AO
@@ -174,7 +180,7 @@ const cardContext = (part = card.part) => {
   return {
     ...ctx,
     complete: shown ? shown.complete : isComplete(),
-    options: part ? optionsFor(part.kind, ctx.build, part.stageIndex) : [],
+    options: part?.record ? optionsWithCompat(ctx.build, catalog, part.kind, part.stageIndex) : [],
     optionsDisabled: choreo.state.busy > 0,
     fairing: part?.kind === "payload" ? parts.find((p) => p.kind === "fairing" && p.built) : null,
   };
@@ -219,6 +225,8 @@ const selector = createSelector({
 });
 
 // ---------- UI ----------
+const btnRockets = document.getElementById("btn-rockets");
+const rocketsEl = document.getElementById("rockets");
 const btnBuildAll = document.getElementById("btn-build-all");
 const btnExplode = document.getElementById("btn-explode");
 const btnReset = document.getElementById("btn-reset");
@@ -226,6 +234,46 @@ const btnSound = document.getElementById("btn-sound");
 const hudText = document.getElementById("hud-text");
 
 btnBuildAll.addEventListener("click", () => choreo.buildAll());
+
+// Rockets: the presets as an in-place list above the bar. One line each: name, stages, height est.,
+// payload → mission (all from the records and the layout). Choosing one loads it and builds it.
+function rocketsHtml() {
+  const rows = presetIds.map((id, i) => {
+    const p = getPreset(id);
+    const b = presetToBuild(p);
+    const height = sceneBounds(buildManifest(b, catalog)).height_m;
+    const payload = catalog.payloads.find((x) => x.id === b.payloadId);
+    const mission = catalog.missions.find((x) => x.id === b.missionId);
+    const n = b.stages.length;
+    const meta = `${n} stage${n === 1 ? "" : "s"} · ${f.m(height)} est. · ${payload?.name ?? b.payloadId} → ${mission?.name ?? b.missionId}`;
+    const cur = i === presetIndex && !current.modified;
+    return `<li><button type="button" class="opt" data-i="${i}"${cur ? ' aria-current="true"' : ""}><span class="opt-name">${f.esc(p.name)}</span><span class="opt-meta" title="${f.esc(meta)}">${f.esc(meta)}</span></button></li>`;
+  });
+  return `<ul>${rows.join("")}</ul>`;
+}
+function setRocketsOpen(open) {
+  if (open === !rocketsEl.hidden) return;
+  if (open) {
+    selector.clear(); // one panel at a time (the card is a bottom sheet on phones)
+    rocketsEl.innerHTML = rocketsHtml();
+  }
+  rocketsEl.hidden = !open;
+  btnRockets.setAttribute("aria-expanded", String(open));
+  if (open && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    rocketsEl.animate([{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "none" }], { duration: 180, easing: "ease-out" });
+  }
+}
+btnRockets.addEventListener("click", () => setRocketsOpen(rocketsEl.hidden));
+rocketsEl.addEventListener("click", (e) => {
+  const opt = e.target.closest(".opt");
+  if (!opt) return;
+  setRocketsOpen(false);
+  switchPreset(Number(opt.dataset.i) - presetIndex);
+  choreo.buildAll();
+});
+addEventListener("pointerdown", (e) => {
+  if (!rocketsEl.hidden && !e.target.closest("#rockets, #btn-rockets")) setRocketsOpen(false);
+});
 btnExplode.addEventListener("click", () => choreo.toggleExplode());
 btnReset.addEventListener("click", () => reset());
 btnSound.addEventListener("click", () => {
@@ -312,6 +360,7 @@ function switchPreset(step) {
   choreo.setBounds(current.bounds);
   selector.setParts(parts);
   choreo.rebuild(parts);
+  if (!rocketsEl.hidden) rocketsEl.innerHTML = rocketsHtml();
   const q = new URLSearchParams(location.search);
   q.set("build", current.preset.id);
   history.replaceState(null, "", `${location.pathname}?${q}${location.hash}`);
@@ -334,6 +383,7 @@ function onPartKey(part) {
 addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.target.closest?.("input, textarea, select")) return;
+  if (e.key === "Escape" && !rocketsEl.hidden) return setRocketsOpen(false);
   const k = e.key.toLowerCase();
   const byKey = parts.find((p) => p.key === k);
   if (byKey) return onPartKey(byKey);
@@ -361,12 +411,39 @@ choreo.prewarm(renderer);
 choreo.home();
 syncUi();
 
+// GTAO budget: frame times are averaged over 2 s windows while it is on; one slow window drops it for the
+// session. The first window after load is skipped (shader compiles and uploads land there).
+const GTAO_MAX_PIECES = 230;
+const perf = { gtaoOk: true, sum: 0, n: 0, windows: 0 };
+const pieceCount = () => parts.reduce((n, p) => n + p.pieces.length, 0);
+function gtaoBudget(rawDt) {
+  if (!gtao) return;
+  gtao.enabled = perf.gtaoOk && choreo.state.busy === 0 && pieceCount() <= GTAO_MAX_PIECES;
+  if (!gtao.enabled) {
+    perf.sum = perf.n = 0;
+    return;
+  }
+  perf.sum += rawDt;
+  perf.n++;
+  if (perf.sum < 2) return;
+  if (perf.windows++ > 0 && perf.sum / perf.n > 0.022) perf.gtaoOk = false;
+  perf.sum = perf.n = 0;
+}
+
 const clock = new THREE.Clock();
 function frame() {
-  const dt = Math.min(clock.getDelta(), 0.05);
+  const rawDt = clock.getDelta();
+  const dt = Math.min(rawDt, 0.05);
   const t = clock.elapsedTime;
+  gtaoBudget(rawDt);
   choreo.update(dt, t);
   controls.update();
+  // Depth cue: fog (background colour) in a band around the orbit target, sized by what is framed, so the far
+  // side of the rocket and its far lines fade toward black while the near silhouette stays bright.
+  const R = choreo.framedRadius();
+  const dist = camera.position.distanceTo(controls.target);
+  scene.fog.near = Math.max(0.1, dist - 0.6 * R);
+  scene.fog.far = dist + 3 * R;
   if (pad?.ringMat) pad.ringMat.opacity = 0.55 + 0.3 * (0.5 + 0.5 * Math.sin(t * 1.6));
   if (composer) composer.render();
   else renderer.render(scene, camera);
