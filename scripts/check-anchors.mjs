@@ -2,7 +2,9 @@
 // createPad in src/parts.js (deck, plinth, trench, mount, clamps, rails) and createDroneShip.
 // Real sizes (1.8 m person, 25 m masts + 6 m air terminal), tower = 1.08 × stack, one arm per interstage plus
 // the payload adapter reaching the vehicle without entering it, deck top at y = 0, ≤ 60 draws for pad +
-// anchors, shadows only on the deck, tower and arms, fog on every line, nothing pickable, no NaN.
+// anchors, shadows only on the deck, tower and arms, fog on every line, nothing pickable, no NaN. Looks: every
+// structural prop starts painted (lines at 0.15 / 0.35 of their x-ray level, the person a silhouette) and
+// setPropLook switches all of it to x-ray and back with the same draw count.
 // Run: node scripts/check-anchors.mjs   (no deps; exits 1 on any failure)
 import { registerHooks } from "node:module";
 
@@ -16,7 +18,7 @@ registerHooks({
 const THREE = await import("three");
 const { catalog, presetToBuild } = await import("../src/data/catalog.js");
 const { buildManifest, sceneBounds, SCALE } = await import("../src/layout.js");
-const { createPad, padLayout } = await import("../src/parts.js");
+const { createPad, padLayout, setPropLook } = await import("../src/parts.js");
 const { createAnchors, createDroneShip } = await import("../src/anchors.js");
 
 const failures = [];
@@ -41,9 +43,10 @@ function extent(obj) {
 }
 const draws = (...roots) => {
   let n = 0;
-  for (const r of roots) r.traverseVisible((o) => (o.isMesh || o.isLine || o.isPoints || o.isSprite) && n++);
+  for (const r of roots) r.traverseVisible((o) => (o.isMesh || o.isLine || o.isPoints || o.isSprite) && o.material?.visible !== false && n++);
   return n;
 };
+const PAINTED = /^(pad-(deck|plinth|trench|mount|clamps|rails)|anchor-(tower-frame|arm:.*|cable-tray|masts|human))$/;
 
 const cases = catalog.presets.map((preset) => {
   const manifest = buildManifest(presetToBuild(preset), catalog);
@@ -67,6 +70,23 @@ for (const c of cases) {
       if (o.isLineSegments && !o.material.fog) failures.push(`${c.id}: ${o.name || o.parent?.name} lines ignore fog`);
     });
   }
+  // Looks: painted by default, x-ray through setPropLook, same draws either way.
+  const roots = [pad.group, a.object3d];
+  const looked = [];
+  for (const root of roots) root.traverse((o) => o.isMesh && PAINTED.test(o.name) && looked.push(o));
+  const lineK = 0.15 / 0.35;
+  const linesOf = (o) => o.children.filter((e) => e.isLineSegments && e.userData.base0 !== undefined);
+  expect(looked.length === 10 + a.arms.length && looked.every((o) => o.userData.looks && o.material === o.userData.looks.painted), `${c.id}: props should start painted (${looked.filter((o) => !o.userData.looks).map((o) => o.name)})`);
+  expect(looked.every((o) => linesOf(o).every((e) => Math.abs(e.material.opacity - e.userData.base0 * (o.userData.paintLineK ?? lineK)) < 1e-9 && o.userData.paintLineK <= lineK)), `${c.id}: painted prop lines`);
+  const figure = a.human.getObjectByName("anchor-human-lines");
+  expect(a.human.material.visible && figure && !figure.visible, `${c.id}: painted person should be a silhouette`);
+  const nPaint = draws(...roots);
+  for (const root of roots) setPropLook(root, "xray");
+  expect(looked.every((o) => o.material === o.userData.looks.xray && linesOf(o).every((e) => Math.abs(e.material.opacity - e.userData.base0) < 1e-9)), `${c.id}: x-ray props`);
+  expect(!a.human.material.visible && figure.visible, `${c.id}: x-ray person should be the line figure`);
+  expect(draws(...roots) === nPaint, `${c.id}: draws ${nPaint} painted vs ${draws(...roots)} x-ray`);
+  for (const root of roots) setPropLook(root, "painted");
+  expect(looked.every((o) => o.material === o.userData.looks.painted) && !figure.visible, `${c.id}: back to painted`);
   // Pad: deck top at y = 0, ground at −plinthH, trench below the deck.
   const deck = extent(pad.group.getObjectByName("pad-deck"));
   expect(near(deck.box.max.y, 0) && deck.box.max.x <= L.padR + 1e-6, `${c.id}: deck top ${deck.box.max.y}`);

@@ -241,6 +241,11 @@ function createLineartPlanet({ kind = "earth", radius_u = 40 } = {}) {
   return {
     object3d,
     radius_u: R,
+    mode: "lineart",
+    setScale(s = 1) {
+      object3d.scale.setScalar(s);
+      bodyMat.uniforms.uRadius.value = R * s;
+    },
     update(t = 0, camera = null) {
       body.rotation.y = t * SPIN;
       time.value = t;
@@ -703,10 +708,18 @@ function createPhotorealPlanet({ kind = "earth", radius_u = 40 } = {}) {
     object3d.add(atmo);
   }
   const CLOUD_DRIFT = 0.004; // rad/s relative to the ground
+  const H0 = k.atmo ? k.atmo.H * R : 0;
   return {
     object3d,
     radius_u: R,
     mode: "photoreal",
+    // Uniform scale of the whole globe, keeping the shader lengths (relief, scattering radius and scale
+    // height) in step; use this instead of object3d.scale.
+    setScale(s = 1) {
+      object3d.scale.setScalar(s);
+      bodyMat.uniforms.uRadius.value = R * s;
+      if (atmo) (atmo.material.uniforms.uR.value = R * s), (atmo.material.uniforms.uH.value = H0 * s);
+    },
     update(t = 0) {
       body.rotation.y = t * SPIN;
       if (clouds) {
@@ -731,8 +744,9 @@ function createPhotorealPlanet({ kind = "earth", radius_u = 40 } = {}) {
 // Default look for createPlanet.
 export const PLANET_DEFAULT_MODE = "photoreal";
 // createPlanet({ kind, radius_u, mode }): mode "photoreal" (NASA maps, clouds, scattering) or "lineart"
-// (procedural shading + graticule, for the builder's twin compare). Same API: { object3d, radius_u, update(t),
-// setSunDir(v3), dispose() }. Draws: Earth 3 (body, clouds, atmosphere), Mars 2, Moon 1.
+// (procedural shading + graticule, for the builder's twin compare). Same API: { object3d, radius_u, mode,
+// update(t), setSunDir(v3), setScale(s), dispose() }; setScale scales the globe and its shader lengths
+// together. Draws: Earth 3 (body, clouds, atmosphere), Mars 2, Moon 1.
 export function createPlanet({ kind = "earth", radius_u = 40, mode = PLANET_DEFAULT_MODE } = {}) {
   return mode === "lineart" ? createLineartPlanet({ kind, radius_u }) : createPhotorealPlanet({ kind, radius_u });
 }

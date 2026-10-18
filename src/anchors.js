@@ -3,7 +3,7 @@
 //   createAnchors({ baseRadius_u, stackHeight_u, manifest, scale, cameraAzimuth })
 //     -> { object3d, human, tower, towerFrame, arms, cableTray, masts, lamps, towerHeight_u, setVisible(bool),
 //          update(t), dispose() }
-//   (1) a 1.8 m person (12 line segments) at the deck edge, facing the rocket;
+//   (1) a 1.8 m person at the deck edge, facing the rocket: a dark silhouette (painted) or 12 line segments (x-ray);
 //   (2) the strongback/service tower: a lattice column 1.08 × the stack tall (columns, girders, braces), with
 //       one umbilical arm per stage joint (each interstage) and at the payload adapter, reaching the vehicle;
 //       arms[i] = { mesh, y_u, reach_u, partId } with the mesh's origin on its hinge at the tower face, so
@@ -15,12 +15,13 @@
 //     the booster landing barge: hull, landing circle with a cross, four corner thrusters.
 // Layout comes from padLayout() in parts.js (deck top y = 0, ground at −plinthH; placement around the home
 // camera azimuth: person front-right, tower left and slightly behind, masts at the sides and behind). Steel
-// meshes use the shared prop materials with peach edges; only the tower and its arms cast and receive
+// meshes are painted galvanized dark grey by default (edge lines at 0.15 level) and switch to the x-ray prop
+// materials with peach edges through setPropLook (parts.js); only the tower and its arms cast and receive
 // shadows; nothing is pickable.
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { SCALE } from "./layout.js";
-import { addLines, padLayout, peachLineMaterial, propMaterial, propMaterials } from "./parts.js";
+import { addLines, disposeLooks, padLayout, paintProp, peachLineMaterial, propMaterial, propMaterials } from "./parts.js";
 
 const OPACITY = 0.35; // person line art
 const TOWER_LINES = 0.25; // the tower is tall and close to the rocket, so it sits quieter
@@ -40,22 +41,35 @@ const at = (phi, r, y = 0) => new THREE.Vector3(Math.sin(phi) * r, y, Math.cos(p
 const v = (x, y, z = 0) => new THREE.Vector3(x, y, z);
 const noPick = (o) => ((o.raycast = () => {}), o);
 
-// Merge indexed geometries (boxes, cylinders) on position + normal into one.
-function mergeSolid(geos) {
+// Merge indexed geometries (boxes, cylinders) on position + normal + uv into one. shade: a per-member grey
+// jitter (±shade) in a colour attribute, so a painted lattice reads as separate galvanized members.
+function mergeSolid(geos, { shade = 0 } = {}) {
   const pos = [];
   const nrm = [];
+  const uv = [];
+  const col = [];
   const idx = [];
   let base = 0;
-  for (const g of geos) {
+  geos.forEach((g, k) => {
     const p = g.attributes.position;
     const n = g.attributes.normal;
-    for (let i = 0; i < p.count; i++) pos.push(p.getX(i), p.getY(i), p.getZ(i)), nrm.push(n.getX(i), n.getY(i), n.getZ(i));
+    const t = g.attributes.uv;
+    const h = Math.sin(k * 12.9898 + 4.1) * 43758.5453;
+    const c = 1 + shade * (2 * (h - Math.floor(h)) - 1); // 1 ± shade, fixed per member
+    for (let i = 0; i < p.count; i++) {
+      pos.push(p.getX(i), p.getY(i), p.getZ(i));
+      nrm.push(n.getX(i), n.getY(i), n.getZ(i));
+      uv.push(t ? t.getX(i) : 0, t ? t.getY(i) : 0);
+      if (shade) col.push(c, c, c);
+    }
     for (const i of g.index.array) idx.push(i + base);
     base += p.count;
-  }
+  });
   const out = new THREE.BufferGeometry();
   out.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
   out.setAttribute("normal", new THREE.Float32BufferAttribute(nrm, 3));
+  out.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+  if (shade) out.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
   out.setIndex(idx);
   out.computeBoundingSphere();
   return out;
@@ -70,11 +84,14 @@ function strut(a, b, w, d, out) {
   const xAxis = new THREE.Vector3().crossVectors(yAxis, zAxis).normalize();
   return new THREE.BoxGeometry(d, len, w).applyMatrix4(new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis)).translate((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2);
 }
-function steelMesh(geo, name, { shadows = false, lines = OPACITY } = {}) {
+// Steel prop: x-ray dark steel with peach edges, painted galvanized dark grey (default; see paintProp).
+const LATTICE_LINE_K = 0.2; // painted lattices: their many thin members would read peach at the prop level
+function steelMesh(geo, name, { shadows = false, lines = OPACITY, lineK } = {}) {
   const mesh = noPick(new THREE.Mesh(geo, propMaterial(propMaterials().steelDark)));
   mesh.name = name;
   mesh.castShadow = mesh.receiveShadow = shadows;
   addLines(mesh, lines);
+  paintProp(mesh, geo.attributes.color ? "galvShaded" : "galv", lineK ? { lineK } : {});
   return mesh;
 }
 function lineSet(name, segments, opacity = OPACITY) {
@@ -117,7 +134,29 @@ export function createAnchors({ baseRadius_u = 1, stackHeight_u = 10, manifest =
     humanSegs.push([p(Math.sin(a0) * 0.11, 1.69 + Math.cos(a0) * 0.11), p(Math.sin(a1) * 0.11, 1.69 + Math.cos(a1) * 0.11)]);
   }
   humanSegs.push([p(0, 1.58), p(0, 0.95)], [p(-0.2, 1.45), p(0.2, 1.45)], [p(-0.2, 1.45), p(-0.27, 0.82)], [p(0.2, 1.45), p(0.27, 0.82)], [p(0, 0.95), p(-0.14, 0)], [p(0, 0.95), p(0.14, 0)]);
-  const human = lineSet("anchor-human", humanSegs);
+  // Painted: a dark silhouette (head, torso, arms, legs; 1.8 m, facing the rocket); the 12-segment line figure
+  // is its child and shows only in the x-ray look (the silhouette's x-ray material is invisible).
+  const limb = (x0, y0, x1, y1, w, d) => strut(p(x0, y0), p(x1, y1), m(w), m(d), v(0, 0, 1));
+  const body = [
+    new THREE.SphereGeometry(m(0.11), 12, 8).translate(0, m(1.69), 0),
+    new THREE.CylinderGeometry(m(0.05), m(0.06), m(0.08), 8).translate(0, m(1.55), 0), // neck
+    box(m(0.4), m(0.55), m(0.22), 0, m(1.2), 0), // torso
+    box(m(0.34), m(0.18), m(0.2), 0, m(0.95), 0), // hips
+    limb(-0.2, 1.42, -0.27, 0.82, 0.09, 0.1),
+    limb(0.2, 1.42, 0.27, 0.82, 0.09, 0.1),
+    limb(-0.1, 0.92, -0.14, 0.05, 0.13, 0.15),
+    limb(0.1, 0.92, 0.14, 0.05, 0.13, 0.15),
+    box(m(0.12), m(0.06), m(0.26), -m(0.14), m(0.03), m(0.04)), // boots
+    box(m(0.12), m(0.06), m(0.26), m(0.14), m(0.03), m(0.04)),
+  ].map((g) => (g.index ? g : g.setIndex([...Array(g.attributes.position.count).keys()])));
+  const human = noPick(new THREE.Mesh(mergeSolid(body), propMaterial(propMaterials().steelDark)));
+  human.name = "anchor-human";
+  human.material.visible = false; // x-ray: only the line figure
+  const figure = lineSet("anchor-human-lines", humanSegs);
+  figure.userData.lookOnly = "xray";
+  human.add(figure);
+  if (!paintProp(human, "person")) (human.material.visible = true), (figure.visible = false); // classic look
+  else figure.visible = false;
   const phiH = cameraAzimuth + 0.35;
   human.position.copy(at(phiH, padR * 0.88));
   human.rotation.y = phiH + Math.PI; // the figure's plane faces the rocket axis
@@ -145,7 +184,7 @@ export function createAnchors({ baseRadius_u = 1, stackHeight_u = 10, manifest =
     frame.push(strut(v(c, y0, -c * s), v(c, y1, c * s), bw, bw, v(1, 0, 0)));
     frame.push(strut(v(-c * s, y0, c), v(c * s, y1, c), bw, bw, v(0, 0, 1)), strut(v(-c * s, y0, -c), v(c * s, y1, -c), bw, bw, v(0, 0, -1)));
   }
-  const towerFrame = steelMesh(mergeSolid(frame), "anchor-tower-frame", { shadows: true, lines: TOWER_LINES });
+  const towerFrame = steelMesh(mergeSolid(frame, { shade: 0.08 }), "anchor-tower-frame", { shadows: true, lines: TOWER_LINES, lineK: LATTICE_LINE_K });
   const tower = new THREE.Group();
   tower.name = "anchor-tower";
   const phiT = cameraAzimuth - Math.PI / 2 - 0.35;
@@ -170,7 +209,7 @@ export function createAnchors({ baseRadius_u = 1, stackHeight_u = 10, manifest =
       const up = i % 2 ? 1 : -1;
       for (const zz of [armW / 2, -armW / 2]) parts.push(strut(v(xa, (up * armH) / 2, zz), v(xb, (-up * armH) / 2, zz), bw * 0.8, bw * 0.8, v(0, 0, Math.sign(zz))));
     }
-    const mesh = steelMesh(mergeSolid(parts), `anchor-arm:${a.id}`, { shadows: true, lines: ARM_LINES });
+    const mesh = steelMesh(mergeSolid(parts, { shade: 0.08 }), `anchor-arm:${a.id}`, { shadows: true, lines: ARM_LINES, lineK: LATTICE_LINE_K });
     mesh.position.set(-hw, a.y, 0); // origin on the hinge
     tower.add(mesh);
     return { mesh, y_u: a.y, reach_u: reach, partId: a.id };
@@ -221,7 +260,7 @@ export function createAnchors({ baseRadius_u = 1, stackHeight_u = 10, manifest =
     mastGeos.push(strut(top, top.clone().setY(groundY + mastH + m(ROD_M)), mb * 0.6, mb * 0.6, v(0, 0, 1)));
     lamps.push(base.clone().setY(groundY + mastH * 0.85).add(base.clone().setY(0).normalize().multiplyScalar(-(rb + m(0.6)))));
   }
-  const masts = steelMesh(mergeSolid(mastGeos), "anchor-masts", { lines: MAST_LINES });
+  const masts = steelMesh(mergeSolid(mastGeos, { shade: 0.08 }), "anchor-masts", { lines: MAST_LINES, lineK: LATTICE_LINE_K });
   const lampTex = (() => {
     const n = 32;
     const data = new Uint8Array(n * n * 4);
@@ -267,6 +306,7 @@ export function createAnchors({ baseRadius_u = 1, stackHeight_u = 10, manifest =
       sprites.forEach((s, k) => (s.material.opacity = 0.9 + 0.1 * Math.sin(t * 2.3 + k * 1.7)));
     },
     dispose() {
+      disposeLooks(object3d);
       object3d.traverse((o) => {
         o.geometry?.dispose();
         o.material?.dispose();

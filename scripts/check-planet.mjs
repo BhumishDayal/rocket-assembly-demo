@@ -46,6 +46,9 @@ for (const kind of ["earth", "moon", "mars"]) {
   for (const radius_u of [40, 1.5]) {
     const id = `${kind} r=${radius_u}`;
     const p = createPlanet({ kind, radius_u, mode: "lineart" });
+    p.setScale(2);
+    expect(p.object3d.scale.x === 2 && p.object3d.getObjectByName("planet-body").material.uniforms.uRadius.value === 2 * radius_u, `lineart ${kind}: setScale`);
+    p.setScale(1);
     const n = draws(p.object3d);
     expect(n <= 6 && n === (kind === "moon" ? 2 : 3), `${id}: ${n} draws`);
     p.object3d.traverse((o) => {
@@ -105,6 +108,11 @@ for (const kind of ["earth", "moon", "mars"]) {
     if (clouds) expect(clouds.material.uniforms.uSunDir.value === s, `${id}: clouds do not share the sun`);
     p.setSunDir(new THREE.Vector3(0, 0, 0));
     expect(Number.isFinite(s.x), `${id}: zero sun vector broke the uniform`);
+    p.setScale(2.5);
+    expect(p.object3d.scale.x === 2.5 && Math.abs(body.material.uniforms.uRadius.value - 2.5 * radius_u) < 1e-9, `${id}: setScale should scale the relief`);
+    if (atmo) expect(Math.abs(atmo.material.uniforms.uR.value - 2.5 * radius_u) < 1e-9 && atmo.material.uniforms.uH.value > 0, `${id}: setScale should scale the scattering`);
+    p.setScale(1);
+    expect(Math.abs(body.material.uniforms.uRadius.value - radius_u) < 1e-9 && (!atmo || Math.abs(atmo.material.uniforms.uR.value - radius_u) < 1e-9), `${id}: setScale(1) should restore`);
     for (const m of [body, clouds, atmo].filter(Boolean))
       for (const [k, { value }] of Object.entries(m.material.uniforms)) if (typeof value === "number") expect(Number.isFinite(value), `${id}: NaN ${m.name}.${k}`);
     p.dispose();

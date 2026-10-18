@@ -1760,7 +1760,133 @@ export function addLines(mesh, opacity = LINE_PROP, geo = mesh.geometry) {
   return XRAY ? lineChild(mesh, geo, opacity, "edges") : null;
 }
 
-// Launch pad as a structure (x-ray style: dark see-through deck and plinth, opaque steel inside, peach edges):
+// Painted props (round 16), matching the painted rocket: concrete deck and plinth (scorched toward the trench
+// opening), scorched concrete trench and deflector, dark steel mount and clamps, galvanized dark-grey steel for
+// the tower, arms, masts, rails and tray (per-member shade from vertex colours where the geometry has them),
+// the person as a dark silhouette. Colours and tiles are visual.
+const PROP_LINE_K = LINE_PAINT / LINE_PROP; // prop lines over paint: the props' 0.35 level becomes 0.15
+let propTex = null;
+function propTextures() {
+  if (propTex) return propTex;
+  // Concrete: large stains, form-panel blotches and fine aggregate speckle (colour, sRGB; R doubles as bump).
+  const concrete = dataTexture(
+    256,
+    256,
+    (u, v) => {
+      const stain = fbm(u, v, 3, 71, 4);
+      const agg = vnoise(u, v, 128, 72);
+      const fleck = hash2(Math.floor(u * 256), Math.floor(v * 256), 73);
+      const k = 0.86 + 0.16 * (stain - 0.5) + 0.07 * (agg - 0.5) + (fleck > 0.97 ? -0.12 : fleck < 0.02 ? 0.08 : 0);
+      return [k, k * 0.985, k * 0.96];
+    },
+    { srgb: true },
+  );
+  // Grain: roughness variation for steel (G), streaky along v like weathered galvanizing.
+  const grain = dataTexture(128, 128, (u, v) => {
+    const n = 0.6 * vnoise(u, v * 0.25, 32, 81) + 0.4 * vnoise(u, v, 8, 82);
+    return [0.5, 0.82 + 0.36 * (n - 0.5), 1];
+  });
+  propTex = { concrete, grain };
+  return propTex;
+}
+// A texture clone with its own repeat (shares the pixels).
+function tiled(tex, rx, ry = rx) {
+  const t = tex.clone();
+  t.repeat.set(rx, ry);
+  t.needsUpdate = true;
+  return t;
+}
+// Scorch: darkens a prop toward its origin's axis (the pad centre) in uneven radial streaks.
+// material.scorch = { value: Vector4(r0, r1, strength, 0) }: full strength inside r0, gone past r1.
+function scorchHook(shader) {
+  shader.uniforms.uScorch = this.scorch ?? (this.scorch = { value: new THREE.Vector4(0, 1, 0, 0) });
+  shader.vertexShader = shader.vertexShader
+    .replace("#include <common>", "#include <common>\nvarying vec3 vScorchP;")
+    .replace("#include <begin_vertex>", "#include <begin_vertex>\nvScorchP = position;");
+  shader.fragmentShader = shader.fragmentShader
+    .replace("#include <common>", "#include <common>\nvarying vec3 vScorchP;\nuniform vec4 uScorch;")
+    .replace(
+      "#include <map_fragment>",
+      `#include <map_fragment>
+      float scA = atan(vScorchP.z, vScorchP.x);
+      float scS = 0.5 + 0.3 * sin(scA * 17.0 + 2.0 * sin(scA * 5.0)) + 0.2 * sin(scA * 43.0);
+      float scG = 1.0 - smoothstep(uScorch.x, uScorch.x + (uScorch.y - uScorch.x) * (0.5 + 0.7 * scS), length(vScorchP.xz));
+      float scorch = uScorch.z * scG * (2.0 - scG);
+      diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.05, 0.045, 0.04), scorch);`,
+    )
+    .replace("#include <roughnessmap_fragment>", "#include <roughnessmap_fragment>\nroughnessFactor = mix(roughnessFactor, 1.0, scorch);");
+}
+const scorchKey = () => "prop-scorch-v1";
+let propPaint = null;
+function propPaintMaterials() {
+  if (propPaint) return propPaint;
+  const t = propTextures();
+  const po = { polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 };
+  const std = (o) => new THREE.MeshStandardMaterial({ fog: true, metalness: 0, ...po, ...o });
+  const scorchable = (m) => {
+    m.onBeforeCompile = scorchHook;
+    m.customProgramCacheKey = scorchKey;
+    return m;
+  };
+  propPaint = {
+    concrete: scorchable(std({ color: 0xb3b0aa, roughness: 0.92, map: t.concrete, bumpMap: t.concrete, bumpScale: 0.6 })),
+    trench: scorchable(std({ color: 0x5a5550, roughness: 0.96, map: t.concrete, bumpMap: t.concrete, bumpScale: 0.8 })),
+    steel: std({ color: 0x34373c, metalness: 0.75, roughness: 0.42, roughnessMap: t.grain }),
+    galv: std({ color: 0x5b5f64, metalness: 0.65, roughness: 0.5, roughnessMap: t.grain }),
+    galvShaded: std({ color: 0x5b5f64, vertexColors: true, metalness: 0.65, roughness: 0.5, roughnessMap: t.grain }),
+    person: std({ color: 0x16181c, roughness: 0.85 }),
+  };
+  return propPaint;
+}
+// Gives a prop mesh its painted twin (default) next to its x-ray material; key names propPaintMaterials().
+// Returns the painted clone so callers can set its textures or scorch. No-op in the classic look.
+// lineK: painted line opacity / x-ray line opacity (default PROP_LINE_K; thin lattices go lower so their lines
+// do not tint the steel).
+export function paintProp(mesh, key, { repeat = null, scorch = null, lineK = PROP_LINE_K } = {}) {
+  if (!XRAY) return null;
+  mesh.userData.paintLineK = lineK;
+  const painted = cloneMat(propPaintMaterials()[key]);
+  if (repeat && painted.map) painted.map = tiled(painted.map, ...repeat);
+  if (repeat && painted.bumpMap) painted.bumpMap = painted.map ?? tiled(painted.bumpMap, ...repeat);
+  if (scorch) painted.scorch = { value: new THREE.Vector4(...scorch, 0) };
+  mesh.userData.looks = { xray: mesh.material, painted };
+  mesh.material = painted;
+  for (const e of [mesh.userData.edges, ...mesh.children.filter((c) => c.isLineSegments)]) {
+    if (!e?.userData || e.userData.base === undefined) continue;
+    e.userData.base0 ??= e.userData.base;
+    e.userData.base = e.userData.base0 * lineK;
+    e.material.opacity = e.userData.base;
+  }
+  return painted;
+}
+// Switches every prop under root (pad, anchors) between "painted" (default) and "xray": material twins,
+// edge lines (0.15 vs 0.35 level), and line-art that exists only in one look (userData.lookOnly). Props follow
+// the builder: x-ray only while the whole build is in the clear look.
+export function setPropLook(root, look = "painted") {
+  const paint = look !== "xray";
+  root.traverse((o) => {
+    const looks = o.userData.looks;
+    if (looks && !o.userData.partId) {
+      o.material = paint ? looks.painted : looks.xray;
+      for (const e of o.children) {
+        if (!e.isLineSegments || e.userData.base0 === undefined) continue;
+        e.userData.base = paint ? e.userData.base0 * (o.userData.paintLineK ?? PROP_LINE_K) : e.userData.base0;
+        e.material.opacity = e.userData.base;
+      }
+    }
+    if (o.userData.lookOnly) o.visible = o.userData.lookOnly === (paint ? "painted" : "xray");
+  });
+}
+// Disposes both looks of every mesh under root (geometry and the material in use are the caller's).
+export function disposeLooks(root) {
+  root.traverse((o) => {
+    for (const m of Object.values(o.userData.looks ?? {})) if (m !== o.material) m.dispose();
+  });
+}
+
+// Launch pad as a structure, painted by default (concrete deck and plinth, scorched trench, dark steel mount,
+// clamps and rails; see paintProp / setPropLook), x-ray in the clear look (dark see-through deck and plinth,
+// opaque steel inside, peach edges):
 // a raised hardstand with a deck of 8 plates (expansion joints between them) around an opening over the flame
 // trench; the trench as a recessed channel with side and back walls and a deflector wedge under the engines,
 // exiting through the plinth wall; the launch-mount ring with struts; four hold-down clamps with bolt rings;
@@ -1772,7 +1898,7 @@ export function createPad({ baseRadius_u = 1, cameraAzimuth = 0.58 } = {}) {
   const mats = propMaterials();
   const g = new THREE.Group();
   g.name = "pad";
-  const add = (geo, mat, { shadows = false, lineGeo = null, ry = 0, name, opacity = null } = {}) => {
+  const add = (geo, mat, { shadows = false, lineGeo = null, ry = 0, name, opacity = null, paint = null } = {}) => {
     const m = new THREE.Mesh(geo, cloneMat(mat));
     if (opacity !== null && m.material.transparent) m.material.opacity = opacity;
     m.rotation.y = ry;
@@ -1780,9 +1906,11 @@ export function createPad({ baseRadius_u = 1, cameraAzimuth = 0.58 } = {}) {
     m.name = name;
     m.raycast = () => {};
     addLines(m, LINE_PROP, lineGeo ?? geo);
+    if (paint) paintProp(m, paint.key, paint);
     g.add(m);
     return m;
   };
+  const tile_u = 8 * S; // concrete texture tile (8 m)
 
   // Deck: 8 plates around the trench opening, separated by expansion joints.
   const joint = 0.012 * padR;
@@ -1795,11 +1923,12 @@ export function createPad({ baseRadius_u = 1, cameraAzimuth = 0.58 } = {}) {
     shape.absarc(0, 0, holeR, a1 - joint / (2 * holeR), a0 + joint / (2 * holeR), true);
     plates.push(new THREE.ExtrudeGeometry(shape, { depth: deckT, bevelEnabled: false, curveSegments: 12 }));
   }
-  add(merge(plates).rotateX(-Math.PI / 2).translate(0, -deckT, 0), mats.body, { shadows: true, name: "pad-deck", opacity: 0.75 });
+  // Painted: light concrete (extrude UVs are in units), scorched around the opening; the joints read as dark seams.
+  add(merge(plates).rotateX(-Math.PI / 2).translate(0, -deckT, 0), mats.body, { shadows: true, name: "pad-deck", opacity: 0.75, paint: { key: "concrete", repeat: [1 / tile_u], scorch: [holeR * 1.05, holeR * 2.8, 0.75] } });
 
   // Plinth wall: open ring under the deck with a gap where the trench comes out.
   const gapHalf = Math.asin(Math.min(0.95, (holeR + 0.1 * b) / padR));
-  add(lathe([[padR, -P], [padR, -deckT]], 96, trenchPhi + gapHalf, TAU - 2 * gapHalf), mats.body, { name: "pad-plinth" });
+  add(lathe([[padR, -P], [padR, -deckT]], 96, trenchPhi + gapHalf, TAU - 2 * gapHalf), mats.body, { name: "pad-plinth", paint: { key: "concrete", repeat: [(TAU * padR) / tile_u, (P - deckT) / tile_u] } });
 
   // Flame trench (local +X runs out along trenchPhi): floor, side and back walls, deflector wedge.
   const hw = holeR;
@@ -1820,7 +1949,7 @@ export function createPad({ baseRadius_u = 1, cameraAzimuth = 0.58 } = {}) {
     box(wt, depth, 2 * hw + 2 * wt, x0 - wt / 2, -P + depth / 2, 0),
     new THREE.ExtrudeGeometry(wedge, { depth: 1.92 * hw, bevelEnabled: false }).translate(0, 0, -0.96 * hw),
   ]);
-  add(trench, mats.steelDark, { ry: trenchPhi - Math.PI / 2, name: "pad-trench" });
+  add(trench, mats.steelDark, { ry: trenchPhi - Math.PI / 2, name: "pad-trench", paint: { key: "trench", repeat: [1], scorch: [holeR * 0.6, holeR * 3.5, 0.85] } });
 
   // Launch-mount ring around the opening, braced by 8 struts down to the deck.
   const mh = 0.05 * b + 0.03;
@@ -1832,7 +1961,7 @@ export function createPad({ baseRadius_u = 1, cameraAzimuth = 0.58 } = {}) {
     const t = new THREE.Vector3(Math.cos(phi), 0, -Math.sin(phi));
     struts.push(strut(o.clone().multiplyScalar(mountR * 0.96).setY(mh), o.clone().multiplyScalar(mountR * 1.55).setY(0), 0.05 * b, 0.04 * b, t));
   }
-  add(merge([mountRing.clone(), ...struts]), mats.machined, { name: "pad-mount" });
+  add(merge([mountRing.clone(), ...struts]), mats.machined, { name: "pad-mount", paint: { key: "steel" } });
 
   // Hold-down clamps at 0/90/180/270° (layout azimuths, clear of S-IC style fins at 45°): base plate with a
   // bolt ring on the mount ring, an upright arm and a jaw against the vehicle's base.
@@ -1848,7 +1977,7 @@ export function createPad({ baseRadius_u = 1, cameraAzimuth = 0.58 } = {}) {
     clamps.push(merge([body.clone(), bolts]).rotateY(-a));
     clampLines.push(body.rotateY(-a));
   }
-  add(merge(clamps), mats.steelDark, { name: "pad-clamps", lineGeo: merge(clampLines) });
+  add(merge(clamps), mats.steelDark, { name: "pad-clamps", lineGeo: merge(clampLines), paint: { key: "steel" } });
 
   // Transporter-erector rails (local +X runs out along railPhi): a ramp from the deck down to the ground,
   // rails on the ramp and on the ground, sleepers on the flat part.
@@ -1868,7 +1997,7 @@ export function createPad({ baseRadius_u = 1, cameraAzimuth = 0.58 } = {}) {
     box(r2 - r1, 0.03, 0.03, (r1 + r2) / 2, -P + 0.015, -gauge / 2),
   ];
   for (let x = r1 + 0.15; x < r2; x += 0.3) rails.push(box(0.05, 0.012, gauge + 0.15, x, -P + 0.006, 0));
-  add(merge(rails), mats.steelDark, { ry: railPhi - Math.PI / 2, name: "pad-rails" });
+  add(merge(rails), mats.steelDark, { ry: railPhi - Math.PI / 2, name: "pad-rails", paint: { key: "galv" } });
 
   // Holo rings on the deck (main pulses ringMat), ground and grid at the foot of the hardstand.
   const ringMat = new THREE.MeshBasicMaterial({ color: COLORS.holo, transparent: true, opacity: 0.85 });
