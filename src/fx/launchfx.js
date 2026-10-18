@@ -629,6 +629,13 @@ export function createCloudLayer({ altitude_u = 50, radius_u = 60, count = 40 } 
   };
 }
 
+// Drone-ship motion on a gentle swell: ±0.3 m heave (+ chop), ≤ 1.2° / 0.8° roll and pitch (scene units, radians).
+export const shipBob = (t, scale = SCALE) => ({
+  y: 0.3 * scale * Math.sin(t * 0.7) + 0.08 * scale * Math.sin(t * 1.9 + 0.7),
+  rx: ((1.2 * Math.PI) / 180) * Math.sin(t * 0.45),
+  rz: ((0.8 * Math.PI) / 180) * Math.sin(t * 0.33 + 1),
+});
+
 // (10) Sea: dark water disc with faint peach swell lines (fog on); bob(t) for the drone ship.
 export function createSea({ radius_u = 80, spacing_u = null, scale = SCALE } = {}) {
   const R = Math.max(1, radius_u);
@@ -655,11 +662,7 @@ export function createSea({ radius_u = 80, spacing_u = null, scale = SCALE } = {
   waves.name = "fx-sea-waves";
   const object3d = group("fx-sea", water, waves);
   let time = 0;
-  const bob = (t) => ({
-    y: 0.3 * scale * Math.sin(t * 0.7) + 0.08 * scale * Math.sin(t * 1.9 + 0.7), // ±0.3 m heave (+ chop)
-    rx: ((1.2 * Math.PI) / 180) * Math.sin(t * 0.45),
-    rz: ((0.8 * Math.PI) / 180) * Math.sin(t * 0.33 + 1),
-  });
+  const bob = (t) => shipBob(t, scale);
   return {
     object3d,
     bob,

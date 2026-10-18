@@ -108,18 +108,27 @@ const one = createAnchors({ baseRadius_u: 0.5, stackHeight_u: 10 });
 const two = createAnchors({ baseRadius_u: 0.5, stackHeight_u: 20 });
 expect(near(two.towerHeight_u, 2 * one.towerHeight_u), "tower height does not scale with the stack");
 
-// Drone ship: 5 draws, size follows size_u, deck top at y = 0.
-for (const size_u of [6, 12]) {
-  const ds = createDroneShip({ size_u });
-  expect(draws(ds.object3d) === 5, `drone ${size_u}: ${draws(ds.object3d)} draws`);
-  const hull = extent(ds.object3d.getObjectByName("drone-hull"));
-  expect(near(hull.box.max.x - hull.box.min.x, size_u) && near(hull.box.max.y, 0), `drone ${size_u}: hull ${hull.box.max.x - hull.box.min.x} long, top ${hull.box.max.y}`);
-  const circle = extent(ds.object3d.getObjectByName("drone-landing-circle"));
-  expect(circle && circle.box.max.x < size_u / 2, `drone ${size_u}: landing circle`);
-  ds.dispose();
+// Drone ship: x-ray 5 draws, painted (default) 3; size follows size_u, deck top at y = 0 (painted: the marks sit
+// a hair above it, bulwarks and deckhouses stand on it), shadows on the hull, nothing pickable.
+for (const look of ["xray", "painted"]) {
+  for (const size_u of [6, 12]) {
+    const id = `drone ${look} ${size_u}`;
+    const ds = createDroneShip({ size_u, ...(look === "xray" ? { look } : {}) });
+    expect(draws(ds.object3d) === (look === "xray" ? 5 : 3), `${id}: ${draws(ds.object3d)} draws`);
+    const hullMesh = ds.object3d.getObjectByName("drone-hull");
+    const hull = extent(hullMesh);
+    expect(hull && near(hull.box.max.x - hull.box.min.x, size_u), `${id}: hull ${hull && hull.box.max.x - hull.box.min.x} long`);
+    expect(look === "xray" ? near(hull.box.max.y, 0) : hull.box.max.y > 0 && hull.box.max.y < 0.1 * size_u, `${id}: hull top ${hull.box.max.y}`);
+    expect(hullMesh.castShadow && hullMesh.receiveShadow, `${id}: hull shadows`);
+    const circle = extent(ds.object3d.getObjectByName("drone-landing-circle"));
+    expect(circle && circle.box.max.x < size_u / 2 && circle.box.min.y >= -1e-6 && circle.box.max.y < 0.005 * size_u, `${id}: landing circle`);
+    ds.object3d.traverse((o) => o.isMesh && o.raycast !== THREE.Mesh.prototype.raycast || !o.isMesh || failures.push(`${id}: ${o.name} pickable`));
+    expect(ds.deckY === 0, `${id}: deckY`);
+    ds.dispose();
+  }
 }
 
-console.log(`props checked: ${cases.length} pad/anchor cases, 2 drone ships`);
+console.log(`props checked: ${cases.length} pad/anchor cases, 4 drone ships`);
 if (failures.length) {
   console.log(`FAIL (${failures.length})\n  ` + failures.join("\n  "));
   process.exitCode = 1;

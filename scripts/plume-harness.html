@@ -59,6 +59,8 @@
       const key = new THREE.DirectionalLight(0xffb48a, 2.2);
       key.position.set(-H * 0.45, H * 0.95, H * 0.75);
       key.castShadow = true;
+      Object.assign(key.shadow, { bias: -0.0004, normalBias: 0.02 }); // as main.js
+      key.shadow.mapSize.set(2048, 2048);
       Object.assign(key.shadow.camera, { left: -H * 0.75, right: H * 0.75, top: H * 0.75, bottom: -H * 0.75, near: 1, far: H * 3 });
       const fill = new THREE.DirectionalLight(0x6a7fa8, 0.5);
       fill.position.set(H * 0.6, H * 0.3, -H * 0.6);
@@ -121,6 +123,7 @@
         twin?.update(camera);
         anchors?.update(clock.elapsedTime);
         composer.render();
+        if (q.get("debug") === "1") Object.assign(window, { __scene: scene, __renderer: renderer, __camera: camera });
         if (++frames === 40) {
           document.title = `ready ${plumes.length} plumes · p ${pressure} Pa · ${renderer.info.render.calls} calls`;
           window.__ready = true;

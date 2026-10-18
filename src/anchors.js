@@ -18,6 +18,7 @@
 // meshes use the shared prop materials with peach edges; only the tower and its arms cast and receive
 // shadows; nothing is pickable.
 import * as THREE from "three";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { SCALE } from "./layout.js";
 import { addLines, padLayout, peachLineMaterial, propMaterial, propMaterials } from "./parts.js";
 
@@ -276,9 +277,12 @@ export function createAnchors({ baseRadius_u = 1, stackHeight_u = 10, manifest =
   };
 }
 
-// Booster landing barge in the x-ray style: see-through hull (deck top at y = 0), a peach landing circle with a
-// cross, four azimuth thrusters under the corners. size_u = length; width 0.57 × length (visual ratio).
-export function createDroneShip({ size_u = 6 } = {}) {
+// Booster landing barge, deck top at y = 0, four azimuth thrusters under the corners. size_u = length; width
+// 0.57 × length (visual ratio). look "painted" (default, for the photoreal ocean): charcoal hull, grey deck,
+// bulwarks and stern deckhouses, a white landing circle with a cross; 3 draws. look "xray": see-through hull
+// and a peach circle, as before; 5 draws. The deck receives shadows (the booster's, at touchdown).
+export function createDroneShip({ size_u = 6, look = "painted" } = {}) {
+  if (look === "painted") return paintedDroneShip(size_u);
   const Lh = Math.max(0.1, size_u);
   const W = 0.57 * Lh;
   const D = 0.09 * Lh;
@@ -317,6 +321,73 @@ export function createDroneShip({ size_u = 6 } = {}) {
     deckY: 0,
     length_u: Lh,
     width_u: W,
+    freeboard_u: 0.45 * D, // deck height above the water when floating (visual)
+    dispose() {
+      object3d.traverse((o) => {
+        o.geometry?.dispose();
+        o.material?.dispose();
+      });
+      object3d.removeFromParent();
+    },
+  };
+}
+
+function paintedDroneShip(size_u) {
+  const Lh = Math.max(0.1, size_u);
+  const W = 0.57 * Lh;
+  const D = 0.09 * Lh;
+  // Box with a flat colour per face: top faces take `top`, the rest `side`.
+  const box = (sx, sy, sz, x, y, z, side, top = side) => {
+    const g = new THREE.BoxGeometry(sx, sy, sz).translate(x, y, z);
+    const n = g.attributes.normal;
+    const col = new Float32Array(n.count * 3);
+    const a = new THREE.Color(side);
+    const b = new THREE.Color(top);
+    for (let i = 0; i < n.count; i++) (n.getY(i) > 0.5 ? b : a).toArray(col, i * 3);
+    g.setAttribute("color", new THREE.BufferAttribute(col, 3));
+    return g;
+  };
+  // Visual proportions of the length (bulwark height, deckhouse size).
+  const hb = 0.022 * Lh;
+  const tb = 0.006 * Lh;
+  const parts = [
+    box(Lh, D, W, 0, -D / 2, 0, 0x2a2d32, 0x4f5358), // charcoal hull, grey deck
+    box(Lh * 0.92, hb, tb, -Lh * 0.04, hb / 2, W / 2 - tb / 2, 0x2c2f34), // bulwarks along both sides
+    box(Lh * 0.92, hb, tb, -Lh * 0.04, hb / 2, -W / 2 + tb / 2, 0x2c2f34),
+    box(tb, hb * 1.6, W * 0.62, -Lh / 2 + tb / 2 + 0.07 * Lh, hb * 0.8, 0, 0x2c2f34), // stern blast wall
+  ];
+  for (const sz of [1, -1]) parts.push(box(0.11 * Lh, 0.045 * Lh, 0.16 * W, -Lh / 2 + 0.06 * Lh, 0.0225 * Lh, sz * (W / 2 - 0.1 * W), 0x3b3f45, 0x55595f)); // deckhouses
+  const hull = noPick(new THREE.Mesh(mergeGeometries(parts), new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.78, metalness: 0.15 })));
+  hull.name = "drone-hull";
+  hull.castShadow = hull.receiveShadow = true;
+  // Landing marks: a white ring with a cross, a hair above the deck.
+  const R = 0.38 * W;
+  const k = R * 0.62;
+  const bar = (len, ang) => new THREE.PlaneGeometry(len, R * 0.07).rotateZ(ang);
+  const marks = mergeGeometries([new THREE.RingGeometry(R * 0.92, R, 96), bar(2 * k, Math.PI / 4), bar(2 * k, -Math.PI / 4)].map((g) => g.deleteAttribute("uv") && g)).rotateX(-Math.PI / 2).translate(0, 0.0015 * Lh, 0);
+  const circle = noPick(new THREE.Mesh(marks, new THREE.MeshStandardMaterial({ color: 0xe6e6e2, roughness: 0.85, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })));
+  circle.name = "drone-landing-circle";
+  circle.receiveShadow = true;
+  const thr = [];
+  for (const sx of [1, -1]) {
+    for (const sz of [1, -1]) {
+      const x = sx * 0.42 * Lh;
+      const z = sz * 0.38 * W;
+      thr.push(new THREE.CylinderGeometry(0.035 * Lh, 0.035 * Lh, 0.05 * Lh, 16).translate(x, -D - 0.025 * Lh, z), new THREE.CylinderGeometry(0.05 * Lh, 0.05 * Lh, 0.012 * Lh, 20).translate(x, -D - 0.05 * Lh, z));
+    }
+  }
+  const thrusters = noPick(new THREE.Mesh(mergeSolid(thr), new THREE.MeshStandardMaterial({ color: 0x2a2c30, roughness: 0.6, metalness: 0.5 })));
+  thrusters.name = "drone-thrusters";
+  const object3d = new THREE.Group();
+  object3d.name = "drone-ship";
+  object3d.add(hull, thrusters, circle);
+  return {
+    object3d,
+    deckY: 0,
+    length_u: Lh,
+    width_u: W,
+    freeboard_u: 0.45 * D, // deck height above the water when floating (visual)
+    look: "painted",
     dispose() {
       object3d.traverse((o) => {
         o.geometry?.dispose();

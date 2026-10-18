@@ -26,9 +26,11 @@ import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { SCALE } from "./layout.js";
 
-// Round-10 x-ray look (docs/v2-design.md §5): dark see-through graphite shells with a peach fresnel rim,
-// opaque steel internals, peach edge lines on every piece. It is the default; ?look=classic shows the
-// earlier painted look for comparison.
+// Two looks per piece (round 15), switched by setShellOpacity: painted PBR (default, shell value ≥ 0.9: clear-
+// coated paint with micro-roughness, soot near the base, brushed bare-metal bells, black composite with a weave
+// normal, edge lines at 0.15) and the round-10 x-ray look (docs/v2-design.md §5, below 0.9: dark see-through
+// graphite shells with a peach fresnel rim, opaque steel internals, peach edge lines). ?look=classic shows the
+// round-9 painted look with no switching.
 const XRAY = !(typeof location !== "undefined" && /[?&]look=classic(&|$)/.test(location.search ?? ""));
 export const LOOK = XRAY ? "xray" : "classic";
 const PEACH = 0xffb48a;
@@ -36,6 +38,8 @@ const SHELL_OPACITY = 0.55; // built; choreo sets 0.30 exploded, 0.15 selected t
 const LINE_STRUCT = 0.55; // rings, flanges, bell lips, fins, legs, shell rims and seams
 const LINE_FINE = 0.2; // weld lands, raceway clamps, shell panel seams
 const LINE_INTERIOR = 0.3; // internals seen through the shells (domes, baffles, bottles)
+const PAINT_AT = 0.9; // setShellOpacity at or above this shows the painted look
+const LINE_PAINT = 0.15; // structural edge lines over paint (others scale by the same factor)
 
 export const COLORS = {
   body: 0xd6d8d4,
@@ -205,6 +209,51 @@ function textures() {
       },
       { srgb: true, channel: 1, tile_m: 3 },
     ),
+    // Paint skin, 4 m tile on uv1: the seams map's welds and panel seam (R bump) plus micro-roughness noise in G
+    // so highlights break up across the clear coat.
+    paint: dataTexture(
+      W,
+      W,
+      (u, v) => {
+        const n = fbm(u, v, 4, 11);
+        const micro = fbm(u, v, 24, 5, 3);
+        const weld = Math.exp(-(((v - 0.5) / (1.6 * px)) ** 2));
+        const seam = Math.exp(-(((u - 0.5) / (1.0 * px)) ** 2));
+        return [0.5 + 0.22 * weld - 0.25 * seam, 0.9 + (micro - 0.5) * 0.22 + (n - 0.5) * 0.12 - 0.12 * weld, 1];
+      },
+      { channel: 1, tile_m: 4 },
+    ),
+    // Brushed metal: fine streaks along v (roughness in G), for the bare-metal bells; uv.x counts cooling tubes.
+    brushed: (() => {
+      const tex = dataTexture(256, 8, (u) => {
+        const n = 0.6 * vnoise(u, 0, 128, 61) + 0.4 * vnoise(u, 0, 32, 62);
+        return [0.5, 0.7 + 0.5 * (n - 0.5), 1];
+      });
+      tex.repeat.set(1 / 12, 1);
+      return tex;
+    })(),
+    // Carbon composite twill as a normal map (from the weave height below), 0.5 m tile on uv1.
+    weaveN: (() => {
+      const h = (u, v) => {
+        const cu = Math.floor(u * 16);
+        const cv = Math.floor(v * 16);
+        const alongU = (((cu + cv) % 4) + 4) % 4 < 2;
+        const f = alongU ? (((v * 16) % 1) + 1) % 1 : (((u * 16) % 1) + 1) % 1;
+        return 0.5 + 0.3 * Math.sin(f * Math.PI);
+      };
+      const e = 1 / 128;
+      return dataTexture(
+        128,
+        128,
+        (u, v) => {
+          const dx = (h(u + e, v) - h(u - e, v)) * 1.6;
+          const dy = (h(u, v + e) - h(u, v - e)) * 1.6;
+          const l = Math.hypot(dx, dy, 1);
+          return [(-dx / l) * 0.5 + 0.5, (-dy / l) * 0.5 + 0.5, (1 / l) * 0.5 + 0.5];
+        },
+        { channel: 1, tile_m: 0.5 },
+      );
+    })(),
     // Carbon composite twill, 0.5 m tile on uv1.
     weave: dataTexture(
       64,
@@ -273,7 +322,109 @@ export function createMaterials() {
   classic.copv = classic.composite;
   classic.steelDark = classic.darkMetal;
   if (!XRAY) return classic;
-  return xrayMaterials(t, classic);
+  const x = xrayMaterials(t, classic);
+  const paint = paintedMaterials(t, classic);
+  // Each role gets its own x-ray object (the x-ray set shares a few) carrying its painted twin; piece() reads
+  // material.painted and keeps both on the mesh (setShellOpacity switches).
+  const seen = new Set();
+  for (const k of Object.keys(x)) {
+    let m = x[k];
+    if (seen.has(m)) {
+      const c = cloneMat(m);
+      if (m.asShell) Object.defineProperty(c, "asShell", { value: m.asShell });
+      m = x[k] = c;
+    }
+    seen.add(m);
+    if (paint[k]) Object.defineProperty(m, "painted", { value: paint[k], configurable: true });
+  }
+  return x;
+}
+
+// Soot: darkens paint toward the part's base in uneven vertical streaks, and dulls its roughness and clear
+// coat. Per material: material.soot = { value: Vector4(y0, height, strength, 0) } in mesh-local units: full
+// strength at y0, gone by y0 + height
+// (set by createPart; strength 0 = clean). The streak pattern runs on the mesh-local azimuth.
+function sootHook(shader) {
+  shader.uniforms.uSoot = this.soot ?? (this.soot = { value: new THREE.Vector4(0, 1, 0, 0) });
+  shader.vertexShader = shader.vertexShader
+    .replace("#include <common>", "#include <common>\nvarying vec2 vSoot;")
+    .replace("#include <begin_vertex>", "#include <begin_vertex>\nvSoot = vec2(position.y, atan(position.x, position.z));");
+  shader.fragmentShader = shader.fragmentShader
+    .replace("#include <common>", "#include <common>\nvarying vec2 vSoot;\nuniform vec4 uSoot;")
+    .replace(
+      "#include <map_fragment>",
+      `#include <map_fragment>
+      float sootStreak = 0.5 + 0.25 * sin(vSoot.y * 23.0 + 1.7 * sin(vSoot.y * 7.0)) + 0.25 * sin(vSoot.y * 61.0 + 0.4);
+      float sootG = 1.0 - smoothstep(uSoot.x, uSoot.x + uSoot.y * (0.55 + 0.9 * sootStreak), vSoot.x);
+      float soot = uSoot.z * sootG * (2.0 - sootG);
+      diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.035, 0.032, 0.03), soot);`,
+    )
+    .replace("#include <roughnessmap_fragment>", "#include <roughnessmap_fragment>\nroughnessFactor = mix(roughnessFactor, 0.85, soot);")
+    .replace(
+      "#include <lights_physical_fragment>",
+      `#include <lights_physical_fragment>
+      #ifdef USE_CLEARCOAT
+        material.clearcoat *= 1.0 - 0.8 * soot;
+      #endif`,
+    );
+}
+const sootKey = () => "paint-soot-v1";
+
+// Painted PBR twins of every role (round 15). Paint: MeshPhysicalMaterial, clear coat 0.4, roughness 0.35-0.5
+// broken up by the paint map's micro-roughness, soot near the base (sootHook). Bells: brushed bare metal with an
+// anisotropic highlight. Composite: black with a weave normal. Metals and blankets keep their classic look.
+// polygonOffset on all, so the faint edge lines sit cleanly on them. Colours are visual.
+function paintedMaterials(t, classic) {
+  const po = { polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 };
+  const phys = (o) => new THREE.MeshPhysicalMaterial({ metalness: 0, roughness: 0.42, clearcoat: 0.4, clearcoatRoughness: 0.22, fog: true, ...po, ...o });
+  const sooty = (m) => {
+    m.onBeforeCompile = sootHook;
+    m.customProgramCacheKey = sootKey;
+    m.userData.soot = true;
+    return m;
+  };
+  const paint = (color, extra = {}) => phys({ color, roughnessMap: t.paint, bumpMap: t.paint, bumpScale: 1.0, ...extra });
+  const composite = () => phys({ color: 0x15161a, metalness: 0.2, roughness: 0.38, roughnessMap: t.weave, normalMap: t.weaveN, normalScale: new THREE.Vector2(0.7, 0.7), clearcoat: 0.5, clearcoatRoughness: 0.18 });
+  const keep = (m) => {
+    const c = cloneMat(m);
+    Object.assign(c, po);
+    return c;
+  };
+  const white = sooty(paint(0xe9eae6));
+  return {
+    body: white,
+    roll: sooty(paint(0xe9e9e5, { map: t.roll })),
+    foam: sooty(phys({ color: 0xffffff, map: t.foam, bumpMap: t.foam, bumpScale: 1.6, roughness: 0.82, clearcoat: 0.05 })),
+    bronze: sooty(paint(0xa65f35, { metalness: 0.15, roughness: 0.45 })),
+    silver: sooty(paint(0xb9bdc2, { metalness: 0.7, roughness: 0.35 })),
+    composite: sooty(composite()),
+    heatShield: keep(classic.heatShield),
+    raceway: paint(0xc4c6c1),
+    skirt: keep(classic.skirt),
+    metal: keep(classic.metal),
+    darkMetal: keep(classic.darkMetal),
+    interior: keep(classic.interior),
+    steelDark: keep(classic.darkMetal),
+    trim: paint(0xe9eae6),
+    leg: composite(),
+    copv: composite(),
+    machined: keep(classic.machined),
+    // Bare-metal bell: vertex colours (heat tint, flanges) lifted to read as metal, brushed streaks, tube ridges.
+    engine: phys({ color: new THREE.Color(2.6, 2.6, 2.6), vertexColors: true, metalness: 1, roughness: 0.34, roughnessMap: t.brushed, bumpMap: t.ridges, bumpScale: 0.25, anisotropy: 0.55, anisotropyRotation: Math.PI / 2, clearcoat: 0, envMapIntensity: 0.9 }),
+    chamber: keep(classic.chamber),
+    powerhead: keep(classic.powerhead),
+    valve: keep(classic.valve),
+    pump: keep(classic.pump),
+    pipe: keep(classic.pipe),
+    actuator: keep(classic.actuator),
+    gimbal: keep(classic.gimbal),
+    gridFin: keep(classic.gridFin),
+    gold: keep(classic.gold),
+    mliSilver: keep(classic.mliSilver),
+    panel: keep(classic.panel),
+    accent: keep(classic.accent),
+    dark: keep(classic.dark),
+  };
 }
 
 // Fresnel rim in peach, added to the emissive term; the rim also lifts alpha so silhouettes read through.
@@ -585,7 +736,14 @@ function piece(geo, material, { x = 0, y = 0, z = 0, ry = 0, order = 0, dir = UP
   const src = xrayShell && material.asShell ? material.asShell : material;
   const mat = cloneMat(src);
   if (side !== undefined && !xrayShell) mat.side = side; // x-ray shells stay front-side
-  const mesh = new THREE.Mesh(g, mat);
+  // Painted twin (default look); both live on the mesh and setShellOpacity switches between them.
+  const painted = XRAY && material.painted ? cloneMat(material.painted) : null;
+  if (painted && side !== undefined) painted.side = side;
+  const mesh = new THREE.Mesh(g, painted ?? mat);
+  if (painted) {
+    mesh.userData.looks = { xray: mat, painted };
+    for (const m of [mat, painted]) if (m.emissive) m.userData.emissive0 = [m.emissive.getHex(), m.emissiveIntensity];
+  }
   mesh.position.set(x * S, y * S, z * S);
   mesh.rotation.y = ry;
   // Performance: only shells cast and receive shadows (internals sit inside them anyway).
@@ -1510,6 +1668,15 @@ export function createPart(spec, mats) {
       spin: 0,
     };
   });
+  // Soot near the vehicle's base, from each piece's own bottom edge up: engine-section skins over their whole
+  // height, the first-stage tank over its lowest share (visual strengths and shares).
+  const soot = spec.kind === "engines" ? [0.95, null] : spec.kind === "tank" && spec.stageIndex === 0 ? [0.7, 0.12 * spec.height] : null;
+  for (const p of pieces) {
+    const m = p.mesh.userData.looks?.painted;
+    if (!m?.userData.soot) continue;
+    const bb = p.mesh.geometry.boundingBox;
+    m.soot = { value: new THREE.Vector4(bb.min.y, soot ? (soot[1] ?? bb.max.y - bb.min.y) : 1, soot ? soot[0] : 0, 0) };
+  }
   axisOffsets(pieces, clamp(0.035 * spec.height, 0.04, 0.3));
   pieces.sort((a, b) => a.order - b.order || a.bottomY - b.bottomY);
   assignSpins(pieces, spec.id);
@@ -1523,9 +1690,32 @@ export function createPart(spec, mats) {
 // Pieces with an articulated deploy (see the header for the hinge formula), in deploy order.
 export const deployables = (part) => part.pieces.filter((p) => p.deploy).sort((a, b) => a.deploy.order - b.deploy.order);
 
-// Shell pieces of a part, and their opacity (mesh + edge lines together; lines scale with the shell).
+// Shell pieces of a part, and their look: value ≥ PAINT_AT shows the painted materials (opaque, every edge line
+// at LINE_PAINT / LINE_STRUCT of its built opacity); below it the x-ray materials, shells at opacity value and
+// their lines scaled with them. Lines keep userData.base current for the look, so a caller that resets lines to
+// base × dim (choreo) follows. A material switched out gets its own emissive back (no stuck highlight).
 export const shellPieces = (part) => part.pieces.filter((p) => p.mesh.userData.kind === "shell");
+const lineK = LINE_PAINT / LINE_STRUCT;
 export function setShellOpacity(part, value) {
+  const paint = value >= PAINT_AT;
+  for (const p of part.pieces) {
+    const looks = p.mesh.userData.looks;
+    if (!looks) continue;
+    const want = paint ? looks.painted : looks.xray;
+    if (p.mesh.material !== want) {
+      const old = p.mesh.material;
+      const e0 = old.userData.emissive0;
+      if (e0) old.emissive.setHex(e0[0]), (old.emissiveIntensity = e0[1]);
+      p.mesh.material = want;
+    }
+    for (const e of [p.mesh.userData.edges, p.mesh.userData.edgesFine]) {
+      if (!e) continue;
+      e.userData.base0 ??= e.userData.base;
+      e.userData.base = paint ? e.userData.base0 * lineK : e.userData.base0;
+      e.material.opacity = e.userData.base;
+    }
+  }
+  if (paint) return;
   for (const p of shellPieces(part)) {
     const m = p.mesh.material;
     if (!m.transparent) (m.transparent = true), (m.needsUpdate = true);
