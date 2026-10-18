@@ -1,0 +1,47 @@
+[
+  {
+    "id": "falcon-9",
+    "name": "Falcon 9 Block 5",
+    "liftoffMass_kg": 549054,
+    "liftoffThrust_kN": 7607,
+    "payloadLEO_kg": 22800,
+    "stages": 2,
+    "source": "https://www.spacex.com/vehicles/falcon-9/"
+  },
+  {
+    "id": "falcon-heavy",
+    "name": "Falcon Heavy",
+    "liftoffMass_kg": 1420788,
+    "liftoffThrust_kN": 22819,
+    "payloadLEO_kg": 63800,
+    "stages": 2,
+    "source": "https://www.spacex.com/vehicles/falcon-heavy/"
+  },
+  {
+    "id": "saturn-v",
+    "name": "Saturn V",
+    "liftoffMass_kg": 2800000,
+    "liftoffThrust_kN": 34500,
+    "payloadLEO_kg": 118000,
+    "stages": 3,
+    "source": "https://www.nasa.gov/learning-resources/for-kids-and-students/what-was-the-saturn-v-grades-5-8/"
+  },
+  {
+    "id": "starship",
+    "name": "Starship (Super Heavy + Starship, V3)",
+    "liftoffMass_kg": 5500000,
+    "liftoffThrust_kN": 80807,
+    "payloadLEO_kg": 100000,
+    "stages": 2,
+    "source": "https://www.spacex.com/vehicles/starship/ (thrust 8,240 tf, payload \"100+ t\" TARGET); liftoff mass 5,500 t from GCAT lv.tsv \"Starship V3\" (?-flagged) https://planet4589.org/space/gcat/tsv/tables/lv.tsv"
+  },
+  {
+    "id": "sls-block-1",
+    "name": "SLS Block 1",
+    "liftoffMass_kg": 2603000,
+    "liftoffThrust_kN": 36786,
+    "payloadLEO_kg": 95000,
+    "stages": 2,
+    "source": "https://www.nasa.gov/wp-content/uploads/2022/03/sls-reference-guide-2022-v2-508-0.pdf"
+  }
+]

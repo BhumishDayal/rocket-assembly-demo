@@ -1,0 +1,338 @@
+# Rocket Assembly demo v2 — design (head chat, 2026-10-17)
+
+Goal from the user: make the demo real. Real physics (same math as the team app), 3D shapes generated from
+the real dataset records, more parts, a detail card that appears only when a single part is clicked (build or
+exploded view), keep the empty dark look and the page exactly as it is (no new panels/decoration), and raise
+the quality so it stops looking like a toy.
+
+This doc is the result of six ideation/debate rounds (section 1), followed by the contracts the three
+executing chats build against (section 2) and the work split (section 3).
+
+Hard rules for everyone (same culture as the team repo):
+- Never invent a real-world number. Every displayed number is either a field of a dataset record (with its
+  `source`) or a value computed by a named formula from such fields (label it "est." or "derived").
+  Visual-only proportions (ratios used to shape geometry when data has none) are fine but live in code
+  comments, never on screen as facts.
+- No commits, no pushes, no deploys, no `vite build`: the head chat (harvard-space-b3) does those.
+- Do not start a dev server on port 5173: the head chat runs it so the user can watch live.
+  Use another port if you need your own.
+- No new npm dependencies (three 0.180 + animejs 4 only; three/addons are fine).
+- Touch only the files you own (section 3). Talk to the other chats directly for integration
+  questions, and message harvard-space-b3 when done (summary + file list + anything unresolved).
+- No personal data in any web request (generic User-Agent).
+
+---
+
+## 1. Ideation rounds
+
+### Round 1 — "Port the app into the demo"
+Idea: copy the five JSON tables from `SpaxeX/src/data` (branch `phase1_bhumish`) into the demo, port
+`SpaxeX/src/lib/physics/*.ts` to JS verbatim, size the six existing parts from the Falcon 9 records, show a
+card when a part is clicked.
+Debate: this gives correct numbers but the picture barely changes. The stack just becomes 19:1 slender.
+The materials are still plastic, nothing on the engines says "engine", there is no second rocket, and with
+the parts column gone there is no way to pick what to build. Scale is also unsolved: fog, shadow camera,
+star shell, pad, camera distances were all tuned for a 17-unit stack.
+Keep: exact physics port, JSON copies, click-to-card. Fix the rest in later rounds.
+
+### Round 2 — "Presets and a manifest"
+Idea: the demo builds a *preset* `BuildState` (the same object the team app evaluates): stages of
+`{engineId, engineCount, tankId}` + `payloadId` + `missionId`. A pure function turns a build into an
+ordered **manifest** of parts: for each stage `engines` → `tank` → (`interstage` if a stage follows), then
+`payload` (on an adapter) and `fairing`. Interstage, adapter and fairing are *derived structures* sized from
+the neighbouring records; they carry no mass in the dataset and the card says so.
+Presets (all engine counts from the sources already in the dataset research):
+- `falcon-9`: 9 × merlin-1d + falcon9-s1-tank; 1 × merlin-1d-vac + falcon9-s2-tank; payload goes-r; mission gto.
+- `saturn-v`: 5 × f-1 + s-ic; 5 × j-2 + s-ii; 1 × j-2 + s-ivb; payload apollo (new sourced record); mission moon-transfer.
+- `atlas-v-401`: 1 × rd-180 + atlas-v-ccb; 1 × rl10c-1 + centaur-iii; payload goes-r; mission gto.
+- `delta-iv-m`: 1 × rs-68a + delta-iv-cbc; 1 × rl10b-2 + dcss-5m; payload nova-c; mission moon-transfer.
+- `demo-build`: the team's demo story (9 × merlin-1d + falcon9-s1-tank; 1 × rl10b-2 + dcss-5m-tank; jwst; moon-transfer).
+Switch with `[` / `]` or `?build=<id>`; the hint line under the title mentions the keys (text only, no new UI).
+World scale: `SCALE = 0.25` scene units per metre (Falcon 9 = 17.5 u, Saturn V ≈ 27.7 u). Camera, pad,
+shadow bounds, fog adapt from the manifest's bounds instead of constants.
+Debate: (a) The app's 4 % dry-mass rule flags the real Falcon 9 second stage (3.2 %). We do not hide this:
+the demo computes exactly what the app computes and the tank card prints "dry fraction 3.2 % (app rule ≥ 4 %)".
+That is the honest state and it is the evidence P2 needs to relax the rule. (b) The app's engine-fit rule
+`floor(0.6·(D/d)²)` allows only 4 F-1 on the S-IC (real: 5). `evaluateBuild` does not enforce the fit rule, so
+Saturn V still evaluates; the engines card shows "fit rule: 4 (real vehicle flew 5)". (c) Derived parts must
+never show a mass. (d) Why presets and not a free configurator? The team app is the configurator; the demo
+proves the cinematic build + physics; a free picker needs the parts column the user wants gone.
+
+### Round 3 — "Looks: what makes it stop being a toy"
+Toy signals today: one plastic white, no small-scale detail, no scale cue, perfectly clean, random exploded
+directions, flat environment light. Fixes, all procedural, no asset downloads:
+- Engines: one merged geometry per engine = bell (parabolic contour, exit diameter from the record,
+  length from a sourced table where we have it, else 1.8 × exit diameter for sea-level engines and 1.3 × for
+  vacuum engines — visual ratios, commented) + chamber + powerhead: a turbopump cylinder offset to one side,
+  two feed pipes (tube geometry on a curve) from pump to chamber, a gimbal block. Bell material: dark metal
+  with a procedural vertical-ridge roughness (regen channels) and a faint heat tint toward the throat.
+- Cluster layouts from the engine count: 1 centre; 2 pair; 3 triangle; 4 square; 5 quincunx (4 + centre);
+  6 hexagon; 7 hexagon + centre; 8 ring; 9 ring + centre (octaweb). Ring radius is the geometric minimum so
+  bells do not overlap (plus 3 % gap); it may exceed the tank radius slightly (the real S-IC does).
+- Tanks: cylinder at true D × H; a dark thrust-structure skirt at the base; a raceway strip along the full
+  length; panel seams and ring welds as a shared procedural bump/roughness texture; finish from a per-tank
+  visual table (white, white with black roll-pattern stripes for Saturn, orange foam for SLS/Shuttle/Delta,
+  bronze for Atlas CCB), each with a photo-page source.
+- Interstage: cylinder when both stages share a diameter, frustum otherwise; black composite for Falcon,
+  body finish for the others. Length = upper engine length + 0.4 m clearance (the upper engine hangs inside it).
+- Signature features from the visual table, no numbers claimed: Falcon 9 first stage gets four folded landing
+  legs and four folded grid fins; S-IC gets four fins and engine fairings.
+- Payloads by archetype keyed by id: telescope (cylinder + aperture door; Hubble, JWST stowed), weather
+  satellite (box bus + folded panel + dish; GOES-R), lander (hex prism + legs; Nova-C), capsule stack (Apollo
+  CSM + LM adapter; exposed, no fairing).
+- Fairing: diameter = max(upper-stage D, 1.2 × payload D); cylinder = payload H + adapter; ogive nose
+  1.3 × D; two halves.
+- Lighting: keep the night pad. Add ground-truth cues: GTAO (ambient occlusion) pass when not `?lite`,
+  key light shadow bounds that follow the stack, slightly lower exposure, bloom unchanged.
+Debate: piece count vs. the reveal shader. Reveal needs translation-only pieces (rotation about Y is fine,
+bake X/Z rotations into geometry). Merging each engine into one piece keeps the Saturn S-IC at 5 engine
+pieces + mount + fairings, so fly-in stagger and swarm sampling stay cheap. Textures are generated once on a
+canvas and shared. Materials stay `MeshStandardMaterial`/`MeshPhysicalMaterial` so reveal.js keeps working.
+
+### Round 4 — "Physics you can feel"
+- `evaluateBuild` port is byte-for-byte the same math (G0 = 9.80665, SL Isp for stage 0, vacuum above,
+  stage mass = n·engine + tank dry + propellant, TWR ≥ 1.2, blocking rules, closest rocket by log distance).
+  Verified against golden numbers produced by running the team's TypeScript on the same presets.
+- Extra derived numbers (standard formulas, labelled "est."): mass flow ṁ = F/(Isp·g0); burn time =
+  propellant/(n·ṁ) at full throttle in the regime used for that stage; mass ratio m_start/m_end; liftoff
+  acceleration (TWR − 1)·g0.
+- HUD (existing top-right element) becomes the verdict line once the stack is complete:
+  `Falcon 9 Block 5 · 70.0 m · 549 t · Δv 9 420 / 11 900 m/s · TWR 1.41 · GO` (numbers come from the code,
+  these are placeholders). While building it shows the running tally: parts built, stacked height, stacked mass.
+- Cards: engine → name, "9 × Merlin 1D", propellant, thrust SL/vac per engine and total, Isp SL/vac, mass each
+  and total, exit diameter, sourced length if any, fit-rule note, stage footer (stage index, Δv, burn est.);
+  tank → propellant, propellant mass, dry mass, dry fraction with the app rule, D × H, mass ratio, stage Δv;
+  payload → mass, D × H, mission and required Δv; interstage/fairing → "derived structure", sizes, "mass not
+  modelled / included in stage dry mass". Every card ends with the record's source hostname as a link.
+Debate: do we show stage Δv before the whole rocket is built? No: a stage's Δv depends on everything above it.
+During the build the cards show record facts; the stage physics footer appears once the preset is complete.
+Keeps every number true at every moment.
+
+### Round 5 — "Interaction without the parts column"
+- The next buildable part shows as a faint always-on hologram ghost at its slot (opacity ~0.12, rises to ~0.35
+  on hover). Clicking the ghost builds it. This is the Subnautica affordance and adds no UI.
+- Clicking a built part (any piece, build or exploded view) selects the whole part: a soft emissive pulse in the
+  select colour on its pieces, and the card slides in at the left where the column used to be, same visual
+  language. Click empty space or press Esc to dismiss; clicking another part swaps the card.
+- Click vs. orbit: select only on pointerup with < 5 px travel since pointerdown.
+- Keys: 1–9 and 0 build the nth part, Space explode/assemble, B build all, R reset, M mute, `[` `]` preset.
+- Explode becomes an engineering exploded view: stages separate along the axis, engines drop below their tank,
+  tank shells open radially, fairing halves swing out sideways, payload lifts. Still springs, still staggered.
+Debate: should the card be a 3D callout with a leader line? Cleaner on screen to keep it fixed-left and tie it
+to the part with the highlight; no overlap with the rocket, no projection clamping, reuses the existing style.
+Mobile: the card becomes a bottom sheet above the bar.
+
+### Round 6 — "Polish and stretch"
+- Camera framing uses real heights; reset returns to a home computed from the preset.
+- `?demo=1` still auto-builds; `?lite=1` still drops post-processing and shadows (and now GTAO).
+- Sound unchanged.
+- Stretch (only after the core is verified end to end): a launch sequence. 1-D vertical ascent integrated from
+  the same thrust/mass/Isp numbers (gravity, simple drag), staging events, exhaust plume, camera chase; triggered
+  from the existing Build-all button relabelled "Launch" once the stack is complete. Not assigned yet.
+- Starship preset when its numbers are complete (Raptor data still pending in the research).
+
+---
+
+## 2. Contracts
+
+### 2.1 Data (owner A: harvard-space-9d) — `src/data/`
+- `engines.json`, `tanks.json`, `payloads.json`, `missions.json`, `reference-rockets.json`: verbatim copies of
+  `SpaxeX/src/data/*.json` from branch `phase1_bhumish`.
+- `payloads.extra.json`: demo-only payload records in the same shape (`id, name, mass_kg, diameter_m, height_m,
+  source`), e.g. `apollo-csm-lm` (CSM + LM mass to TLI, NASA source). Merged into `catalog.payloads`.
+- `visuals.json`: visual facts, every entry with a `source` URL.
+  ```json
+  {
+    "engines": { "merlin-1d": { "length_m": 2.92, "source": "https://..." } },
+    "tanks":   { "falcon9-s1-tank": { "finish": "white", "interstage": "black-composite",
+                                      "features": ["landing-legs", "grid-fins", "raceway"], "source": "https://..." } },
+    "payloads": { "goes-r": { "archetype": "weather-sat", "exposed": false, "source": "https://..." },
+                  "apollo-csm-lm": { "archetype": "capsule", "exposed": true, "source": "https://..." } }
+  }
+  ```
+  Allowed `finish`: `white | white-black-roll | orange-foam | bronze | silver`. Allowed `interstage`:
+  `black-composite | body`. Allowed `features`: `landing-legs | grid-fins | raceway | fins | engine-fairings`.
+  Allowed `archetype`: `telescope | weather-sat | lander | capsule`. Missing entries are fine: geometry falls back
+  to ratios and the plain white finish.
+- `presets.json`: `[{ "id", "name", "missionId", "payloadId", "stages": [{ "engineId", "engineCount", "tankId" }],
+  "note", "source" }]` for `falcon-9`, `saturn-v`, `atlas-v-401`, `delta-iv-m`, `demo-build`.
+- `catalog.js`:
+  ```js
+  export const catalog = { engines, tanks, payloads, missions, referenceRockets, visuals, presets }; // payloads = base + extra
+  export const byId = (list, id) => list.find((x) => x.id === id);
+  export const presetIds = [...];               // in display order, falcon-9 first
+  export function getPreset(id) -> preset | undefined
+  export function presetToBuild(preset) -> BuildState   // { missionId, stages, payloadId, livery }
+  ```
+
+### 2.2 Physics (owner A) — `src/physics.js`
+Same names and semantics as `SpaxeX/src/lib/physics/*.ts` (deltav, twr, closest, feasibility), in plain JS:
+```js
+export const G0 = 9.80665;
+export const stageMass_kg = (engine, engineCount, tank) => ...
+export const rocketEquationDeltaV_ms = (isp_s, startMass_kg, endMass_kg) => ...
+export const ispForStage_s = (engine, stageIndex) => ...
+export const liftoffTWR = (engine, engineCount, startMass_kg) => ...
+export const liftoffThrust_kN = (engine, engineCount) => ...
+export const maxEngineCount = (tankDiameter_m, engineDiameter_m) => ...
+export const clampEngineCount = (n, tank, engine) => ...
+export const isVacuumOnly = (engine) => ...
+export const rocketDistance = (buildMass_kg, buildThrust_kN, ref) => ...
+export const closestRocketId = (buildMass_kg, buildThrust_kN, refs) => ...
+export const evaluateBuild = (build, catalog) => Verdict   // identical field set to the TS Verdict
+export const RULES = { TWR_OK: 1.2, TWR_BLOCKING: 1.0, DRY_MASS_MIN_FRACTION: 0.04, MAX_ENGINE_COUNT: 9 };
+// demo extras (standard formulas, label as "est." on screen):
+export const massFlow_kgs = (engine, regime /* "sl" | "vac" */) => thrust_kN*1000 / (isp_s*G0)
+export const burnTime_s = (engine, engineCount, tank, stageIndex) => tank.propellantMass_kg / (engineCount * massFlow_kgs(engine, stageIndex === 0 ? "sl" : "vac"))
+export const stageDetails = (build, catalog) => [{
+  stageIndex, engine, engineCount, tank,
+  startMass_kg, endMass_kg, propellantMass_kg, dryMass_kg, massRatio,
+  ispUsed_s, deltaV_ms, thrust_kN /* regime of that stage */, twr /* stage 0 only, else null */,
+  burnTime_s, fitMaxEngines, dryFraction, warnings: [] /* strings from the rules that hit THIS stage */
+}]
+export const stackMass_kg = (build, catalog, { stages: [0..k], payload: bool }) => number   // running tally for the HUD
+```
+Golden check: run the team's TS physics on every preset (copy `src/lib/physics/*.ts` + `src/types/index.ts` to the
+scratchpad and run with `npx tsx`; do not add files to SpaxeX) and assert the JS port matches to 1e-6 relative.
+Put the check in `scripts/check-physics.mjs` (node, no deps) with the golden numbers inlined and their origin noted.
+
+### 2.3 Layout and geometry (owner B: harvard-space-e2) — `src/layout.js`, `src/parts.js`
+```js
+// layout.js
+export const SCALE = 0.25;                       // scene units per metre
+export function buildManifest(build, catalog) -> PartSpec[]   // ordered bottom → top in build order
+export function sceneBounds(manifest) -> { height_u, radius_u, height_m, baseRadius_u }
+```
+`PartSpec`:
+```js
+{
+  id: "s0-engines" | "s0-tank" | "s0-interstage" | "s1-engines" | … | "payload" | "fairing",
+  kind: "engines" | "tank" | "interstage" | "payload" | "fairing",
+  name: "Merlin 1D", sub: "9 × sea-level engines · stage 1", key: "1".."9" | "0",
+  stageIndex: number | null,
+  record: engine | tank | payload | null,       // the dataset record this part is made from
+  count: number,                                // engines on this part, else 1
+  slotY: number, height: number, radius: number, // scene units; part local y=0 is its bottom
+  height_m: number, diameter_m: number,          // for display (derived parts: computed sizes, say so in note)
+  derived: boolean, note: string                 // e.g. "Structure sized from the stage diameters; mass included in the stage dry mass"
+}
+```
+Stack rules: stage 0 engines at y = 0 (bells at the bottom, mount plate on top, part height = engine length +
+0.2 m); tank sits on the mount; interstage sits on the tank; the next stage's engines hang *inside* the
+interstage (slotY = interstage top − engine length − 0.1 m... whatever keeps the bells inside, document it);
+the next tank sits on the interstage; payload adapter + payload on the last tank; fairing around the payload
+(skipped when the payload is `exposed`). Engine cluster per Round 3.
+
+`parts.js` keeps today's runtime shape so choreo.js needs no API change:
+```js
+export const COLORS = { body, accent, metal, gold, panel, holo, select: 0xffb020 };
+export function createMaterials() -> { body, composite, metal, engineDark, gold, panel, ... }
+export function createPart(spec, mats) -> { ...spec, group, pieces: [{ mesh, index, order, bottomY, topY, rest:{position,quaternion}, explode:{dir,dist} }], built:false, busy:false }
+export function createPad({ baseRadius_u }) -> { group, ringMat }
+export function createStars()
+```
+Piece rules: translation-only children (rotation about Y allowed; bake X/Z rotations into geometry with
+`geometry.rotateX/Z`); each piece's material is cloned per mesh (reveal/highlight rely on that); every mesh gets
+`mesh.userData.partId = spec.id`; explode directions structured (engines −Y, shells radial, domes ±Y, fairing
+halves ±X, payload +Y, legs/fins radial); `castShadow`/`receiveShadow` on. Materials: Standard or Physical only
+(reveal.js patches them with onBeforeCompile). Keep `side: DoubleSide` on open shells.
+
+### 2.4 UI, selection, cards, choreography integration (owner C: harvard-space-eb) — `src/main.js`, `src/choreo.js`, `src/ui/`, `index.html`, `src/style.css`
+- `src/ui/select.js`: `createSelector({ canvas, camera, parts, onSelect(part|null), onGhostClick(part) })` with
+  pointerdown/up distance test, raycast over built pieces and ghosts, hover cursor.
+- `src/ui/card.js`: `createCard(rootEl) -> { show(part, { details, verdict, catalog }), hide(), el }` renders the
+  per-kind content of Round 4; all numbers from the record or from `stageDetails`; derived labelled; source link.
+- `src/ui/format.js`: number formatting (thin-space thousands, 1 decimal for metres/tonnes, 0 for m/s, 2 for TWR).
+- `choreo.js` additions: `highlight(part, on)` (emissive pulse in COLORS.select on the part's piece materials),
+  always-on faint ghost for the next buildable part (`setGhost` idle 0.12 / hover 0.35), `rebuild(parts)` for
+  preset switching (cancel, dispose, re-add), `setBounds(bounds)` so `reframe/home` use the preset's height,
+  structured explode offsets in metres × SCALE instead of fixed units.
+- `main.js`: preset from `?build=`, `[`/`]` switching, keys, HUD verdict/tally line, shadow camera bounds and fog
+  from `sceneBounds`, GTAO pass when not lite, card + selector wiring, Esc.
+- `index.html`/`style.css`: remove the parts column; add the card container (same style tokens); hint line text
+  updated; mobile bottom-sheet card. Nothing else added.
+
+---
+
+## 3. Work split and order
+| Chat | Owns | First deliverable | Then |
+|---|---|---|---|
+| A harvard-space-9d | `src/data/**`, `src/physics.js`, `scripts/check-physics.mjs` | data copies + catalog.js + presets.json (so B and C can import) | physics.js + golden check, visuals.json with sources, apollo payload |
+| B harvard-space-e2 | `src/layout.js`, `src/parts.js` | `buildManifest` + `sceneBounds` with simple shapes at true sizes (so C can integrate) | engine detail, cluster layouts, textures/finishes, features, payload archetypes, fairing |
+| C harvard-space-eb | `src/main.js`, `src/choreo.js`, `src/ui/**`, `index.html`, `src/style.css` | selector + card + HUD against the current parts (mock manifest if needed) | integrate layout/physics, presets, structured explode, GTAO, mobile |
+
+Head chat (harvard-space-b3): ideation, review, headless verification (CDP script), commits, deploy.
+Dev server for the user: http://localhost:5173 (head chat runs it; expect brief breakage while files land).
+
+---
+
+## 4. Direction change (user, 2026-10-17 evening): mechanical sub-assemblies, options per slot
+
+Reference: the anime.js homepage hero. It is a camera lens: as you scroll, the barrel sections (knurled rings,
+mount, element groups) slide apart along the lens axis and rotate about it, exposing the inside; scrolling back
+screws them together again. Rigid sub-parts, axial travel + rotation, exact snapping, no particles, no holograms.
+The user wants that for every rocket part: "a part has multiple sub-parts, the sub-parts make one part", the build
+shows them rotating in, the exploded view shows the inside. The particle swarm + crystallize sweep are dropped from
+the build path (modules stay in src/fx for reference; nothing imports them).
+
+### Round 7 — Mechanical motion model (constant for every part kind)
+Every piece has: `rest` (position, quaternion inside the part), `axisOffset` (signed metres×SCALE along +Y where the
+piece sits when the part is pulled apart along the axis), `spin` (radians about Y it carries at the start of an
+arrival / end of a departure), `explode {dir, dist}` (radial direction for shells, legs, fins), `order` (arrival
+order, bottom-up).
+- **build(part)**: pieces are solid from the first frame. They start off-screen at the staging side (the
+  existing `sourcePoint`), each rotated by `spin` about Y and about its own travel axis, and fly in on gentle arcs in
+  `order` (stagger 30–45 ms; engines of a cluster stagger ~110 ms engine-to-engine, sub-pieces inside an engine
+  ~35 ms). Landing = spring (stiffness 260, damping 14) with the spin unwinding to zero in the last 30 % of the
+  path, a `tick` per piece. Part lock = the existing flash + `clunk` + shake. The faint hologram ghost of the next
+  slot stays as the click-to-build preview and vanishes the moment the build starts.
+- **remove(part)**: reverse. Pieces unscrew (spin up, top-down stagger) and leave along the same arcs.
+- **explode()**: engineering exploded view along the rocket axis: parts above lift to make room (stage gap =
+  3 m × SCALE + the part's own spread), every piece goes to `rest + (0, axisOffset, 0) + explode.dir × dist`,
+  rotated by `spin × 0.35`; staggered springs as today; tank shells open radially so domes, baffles, downcomer and
+  pressurant bottles are visible; engine sub-pieces stack up along the axis like the lens rings.
+- **assemble()**: reverse, bottom-up.
+- **swap(part, newSpec)** — the one constant option animation (~2 s total):
+  1. parts above lift by a clearance gap (0.5 s, inOutCubic) — skipped when nothing is above;
+  2. at +0.2 s the old part unscrews and leaves (remove, 0.7 s);
+  3. at +0.7 s the new part flies in (build, 0.9–1.3 s) and locks;
+  4. parts above descend onto the new top (0.5 s) with a `clunk`; HUD verdict and open card refresh.
+  Same timings for engines, tanks, interstage, payload, fairing; only the piece counts differ.
+
+### Round 8 — Sub-assembly anatomy (what the pieces are)
+Sea-level engine (per engine, ~11 pieces, bottom-up): nozzle extension, regen bell, throat + chamber, injector
+dome, main valve block, turbopump (cylinder offset to one side), gas generator (small cylinder), LOX feed pipe,
+fuel feed pipe, gimbal block, actuator pair (one piece). Vacuum engine (~8): long thin nozzle extension, bell,
+chamber, injector, turbopump, 2 pipes, gimbal. Cluster = engines × pieces + mount plate + heat-shield segments
+(8 for a 9-engine octaweb, 4 otherwise). Budget: ≤ 110 pieces per cluster part.
+Tank (~22–28): 4 shell quarters, bottom dome, common-bulkhead dome, top dome, 3–5 slosh baffle rings (inside),
+downcomer / feed line (tube along the axis inside the lower tank), 4 pressurant bottles (inside the upper tank),
+thrust-structure skirt ring, raceway, forward ring; Falcon 9 first stage adds 4 folded legs, 4 leg brackets, 4 grid
+fins; S-IC adds 4 fins and 4 engine fairings.
+Interstage (~8): 4 shell quarters, 12 stringers merged into 2 pieces (front/back halves), top ring, bottom ring,
+4 separation pushers merged into 1. Payload by archetype (6–12): telescope (tube, aperture door, 2 panels, bus,
+adapter), weather-sat (bus, panel, dish, antenna, adapter), lander (hex body, 6 legs as 2 pieces, tank sphere pair,
+engine), capsule (CSM cylinder, cone, SM engine bell, LM adapter cone). Fairing (4–6): 2 halves, separation ring,
+payload adapter cone, 2 vent/door details.
+Interiors must read in the exploded view: when a tank's quarters open, the domes, baffles, downcomer and bottles
+are standing in the middle with their own materials (bare aluminium inside, not the painted finish).
+
+### Round 9 — Options per slot, one button
+- Every manifest part that comes from a record is a **slot**: engines (any engine), tank (any tank), payload (any
+  payload). Interstage and fairing are derived and have no options (no button shown).
+- The card gets exactly ONE control: an "Options" button. Clicking it expands a list inside the card: one line
+  per record (name + one key number: thrust SL/vac for engines, propellant mass for tanks, mass for payloads).
+  Choosing a record calls `applyOption` (catalog.js) → `buildManifest` → `swap` for the changed part + restack of
+  the others; the physics verdict is recomputed and the card refreshes to the new record. Nothing else is added
+  to the page.
+- Engine count stays as in the preset, clamped by the fit rule for the new engine/tank pair (physics.js). The
+  verdict surfaces mismatches (propellant differs, vacuum-only on stage 0, TWR) as warnings. That is the point.
+
+### Contract deltas
+- parts.js (B): every piece gets `axisOffset` (units), `spin` (rad), `order`; interiors as separate pieces with
+  their own materials; counts per the budgets above. Add `kind` on `mesh.userData` too ("shell", "interior",
+  "detail") so C can tune stagger.
+- choreo.js (C): `build`, `remove`, `swap(part, newPart)`, `explode`, `assemble`, `restack(manifest)` (animates
+  each part group's y to its new slotY), `highlight`, ghost, `rebuild`, `setBounds`. No swarm, no reveal.
+- card.js (C): `show(part, ctx)` renders details + the Options button + list; `onOption(part, recordId)` callback.
+- catalog.js (A): `optionsFor(kind, build, stageIndex)`, `applyOption(build, kind, stageIndex, recordId)` (done).

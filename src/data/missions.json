@@ -1,0 +1,44 @@
+[
+  {
+    "id": "leo",
+    "name": "Low Earth orbit",
+    "destination": "LEO (~200 km)",
+    "requiredDeltaV_ms": 9400,
+    "source": "https://en.wikipedia.org/w/index.php?title=Delta-v_budget&oldid=1362285519 (\"about 9.4 km/s\"; table 9.3-10 km/s); cross-check https://seitzman.gatech.edu/classes/ae4451/vehicle_acceleration.pdf (Saturn V 9,267 m/s net of Earth rotation)"
+  },
+  {
+    "id": "gto",
+    "name": "Geostationary transfer orbit",
+    "destination": "GTO",
+    "requiredDeltaV_ms": 11900,
+    "source": "derived: 9,400 m/s surface->LEO incl. losses (https://en.wikipedia.org/w/index.php?title=Delta-v_budget&oldid=1362285519 \"about 9.4 km/s\"; bracketed by Humble/Henry/Larson Table 2.10 via https://seitzman.gatech.edu/classes/ae4451/vehicle_acceleration.pdf) + 2,500 LEO->GTO (https://web.archive.org/web/20070701211813/http://www.pma.caltech.edu/~chirata/deltav.html, chart-read)"
+  },
+  {
+    "id": "moon-transfer",
+    "name": "Moon transfer",
+    "destination": "Moon (trans-lunar injection)",
+    "requiredDeltaV_ms": 12600,
+    "source": "derived: 9,400 m/s surface->LEO incl. losses (https://en.wikipedia.org/w/index.php?title=Delta-v_budget&oldid=1362285519 \"about 9.4 km/s\"; bracketed by Humble/Henry/Larson Table 2.10 via https://seitzman.gatech.edu/classes/ae4451/vehicle_acceleration.pdf) + 3,200 LEO->TLI (https://en.wikipedia.org/w/index.php?title=Delta-v_budget&oldid=1362285519 Gateway table \"3.20\"; Apollo TLI 3.05-3.25 km/s)"
+  },
+  {
+    "id": "lunar-orbit",
+    "name": "Low lunar orbit",
+    "destination": "Moon (low lunar orbit)",
+    "requiredDeltaV_ms": 13500,
+    "source": "derived: 9,400 m/s surface->LEO incl. losses (https://en.wikipedia.org/w/index.php?title=Delta-v_budget&oldid=1362285519 \"about 9.4 km/s\"; bracketed by Humble/Henry/Larson Table 2.10 via https://seitzman.gatech.edu/classes/ae4451/vehicle_acceleration.pdf) + 3,200 TLI + 900 LOI (https://ntrs.nasa.gov/api/citations/20150019648/downloads/20150019648.pdf \"at minimum around 900 m/s\")"
+  },
+  {
+    "id": "mars-transfer",
+    "name": "Mars transfer",
+    "destination": "Mars (trans-Mars injection, minimum energy)",
+    "requiredDeltaV_ms": 13200,
+    "source": "derived: 9,400 m/s surface->LEO incl. losses (https://en.wikipedia.org/w/index.php?title=Delta-v_budget&oldid=1362285519 \"about 9.4 km/s\"; bracketed by Humble/Henry/Larson Table 2.10 via https://seitzman.gatech.edu/classes/ae4451/vehicle_acceleration.pdf) + 3,800 LEO->Mars transfer (https://web.archive.org/web/20070701211813/http://www.pma.caltech.edu/~chirata/deltav.html chart 2.5+0.7+0.6); ULA \"typical\" 4.3 km/s gives 13,700 (https://web.archive.org/web/20111020010301/http://www.ulalaunch.com/site/docs/publications/DepotBasedTransportationArchitecture2010.pdf)"
+  },
+  {
+    "id": "earth-escape",
+    "name": "Earth escape",
+    "destination": "Escape (C3 = 0)",
+    "requiredDeltaV_ms": 12600,
+    "source": "derived: 9,400 m/s surface->LEO incl. losses (https://en.wikipedia.org/w/index.php?title=Delta-v_budget&oldid=1362285519 \"about 9.4 km/s\"; bracketed by Humble/Henry/Larson Table 2.10 via https://seitzman.gatech.edu/classes/ae4451/vehicle_acceleration.pdf) + 3,200 (https://web.archive.org/web/20111020010301/http://www.ulalaunch.com/site/docs/publications/DepotBasedTransportationArchitecture2010.pdf \"a further 3.2 km/sec\")"
+  }
+]

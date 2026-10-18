@@ -1,0 +1,122 @@
+[
+  {
+    "id": "falcon9-s1-tank",
+    "name": "Falcon 9 Block 5 first-stage tank",
+    "propellant": "kerolox",
+    "diameter_m": 3.66,
+    "height_m": 41.2,
+    "propellantMass_kg": 409583,
+    "dryMass_kg": 21395.2,
+    "source": "derived: stage dry 25,600 kg minus 9 x merlin-1d 467.2 kg; https://www.faa.gov/sites/faa.gov/files/space/environmental/nepa_docs/SpaceX_Falcon_Program_Final_EA_and_FONSI.pdf"
+  },
+  {
+    "id": "falcon9-s2-tank",
+    "name": "Falcon 9 Block 5 second-stage tank",
+    "propellant": "kerolox",
+    "diameter_m": 3.66,
+    "height_m": 13.8,
+    "propellantMass_kg": 105664,
+    "dryMass_kg": 3410,
+    "source": "derived: stage dry 3,900 kg minus 1 x merlin-1d-vac 490 kg; https://www.faa.gov/sites/faa.gov/files/space/environmental/nepa_docs/SpaceX_Falcon_Program_Final_EA_and_FONSI.pdf"
+  },
+  {
+    "id": "centaur-iii-tank",
+    "name": "Centaur III (single-engine) tank",
+    "propellant": "hydrolox",
+    "diameter_m": 3.05,
+    "height_m": 12.68,
+    "propellantMass_kg": 20830,
+    "dryMass_kg": 2052.5,
+    "source": "derived: stage dry 2,243 kg minus 1 x rl10c-1 190.5 kg; https://www.ulalaunch.com/docs/default-source/rockets/atlasvusersguide2010.pdf"
+  },
+  {
+    "id": "saturn-v-s-ic-tank",
+    "name": "Saturn V S-IC tank (AS-506 actuals)",
+    "propellant": "kerolox",
+    "diameter_m": 10.058,
+    "height_m": 42.06,
+    "propellantMass_kg": 2145798,
+    "dryMass_kg": 88464.4,
+    "source": "derived: stage dry 130,422 kg minus 5 x f-1 8391.5 kg; https://www.nasa.gov/wp-content/uploads/2023/04/sp-4029.pdf"
+  },
+  {
+    "id": "saturn-v-s-ii-tank",
+    "name": "Saturn V S-II tank (AS-506 actuals)",
+    "propellant": "hydrolox",
+    "diameter_m": 10.058,
+    "height_m": 24.84,
+    "propellantMass_kg": 443235,
+    "dryMass_kg": 28265.2,
+    "source": "derived: stage dry 36,158 kg minus 5 x j-2 1578.5 kg; https://www.nasa.gov/wp-content/uploads/2023/04/sp-4029.pdf"
+  },
+  {
+    "id": "saturn-v-s-ivb-tank",
+    "name": "Saturn V S-IVB tank (AS-506 actuals)",
+    "propellant": "hydrolox",
+    "diameter_m": 6.614,
+    "height_m": 18.07,
+    "propellantMass_kg": 107095,
+    "dryMass_kg": 9694.2,
+    "source": "derived: stage dry 11,273 kg minus 1 x j-2 1578.5 kg; https://www.nasa.gov/wp-content/uploads/2023/04/sp-4029.pdf"
+  },
+  {
+    "id": "atlas-v-ccb-tank",
+    "name": "Atlas V Common Core Booster tank",
+    "propellant": "kerolox",
+    "diameter_m": 3.81,
+    "height_m": 32.46,
+    "propellantMass_kg": 284089,
+    "dryMass_kg": 15574,
+    "source": "derived: stage dry 21,054 kg minus 1 x rd-180 5480 kg; https://www.ulalaunch.com/docs/default-source/rockets/atlasvusersguide2010.pdf"
+  },
+  {
+    "id": "sls-core-tank",
+    "name": "SLS core stage tank",
+    "propellant": "hydrolox",
+    "diameter_m": 8.4,
+    "height_m": 64.6,
+    "propellantMass_kg": 987471,
+    "dryMass_kg": 83830.3,
+    "source": "derived: stage dry 97,935 kg minus 4 x rs-25 3526.2 kg; https://www.nasa.gov/reference/sls-space-launch-system-core-stage"
+  },
+  {
+    "id": "icps-tank",
+    "name": "SLS Interim Cryogenic Propulsion Stage tank",
+    "propellant": "hydrolox",
+    "diameter_m": 5.1,
+    "height_m": 13.7,
+    "propellantMass_kg": 28948,
+    "dryMass_kg": 3498.8,
+    "source": "derived: stage dry 3,800 kg minus 1 x rl10b-2 301.2 kg; https://nasa.gov/wp-content/uploads/2021/11/icps_fact_sheet_11172021.pdf"
+  },
+  {
+    "id": "delta-iv-cbc-tank",
+    "name": "Delta IV Common Booster Core tank",
+    "propellant": "hydrolox",
+    "diameter_m": 5.0,
+    "height_m": 40.8,
+    "propellantMass_kg": 199640,
+    "dryMass_kg": 20074.0,
+    "source": "derived: stage dry 26,760 kg minus 1 x rs-68a 6686.0 kg; http://www.braeunig.us/space/specs/delta.htm"
+  },
+  {
+    "id": "dcss-5m-tank",
+    "name": "Delta IV 5-m Cryogenic Second Stage tank",
+    "propellant": "hydrolox",
+    "diameter_m": 5.0,
+    "height_m": 13.7,
+    "propellantMass_kg": 27200,
+    "dryMass_kg": 3188.8,
+    "source": "derived: stage dry 3,490 kg minus 1 x rl10b-2 301.2 kg; https://www.ulalaunch.com/docs/default-source/rockets/delta-iv-user's-guide.pdf"
+  },
+  {
+    "id": "shuttle-et-tank",
+    "name": "Space Shuttle External Tank",
+    "propellant": "hydrolox",
+    "diameter_m": 8.41,
+    "height_m": 46.94,
+    "propellantMass_kg": 725521,
+    "dryMass_kg": 26943.4,
+    "source": "tank empty mass 26,943 kg (no engines); https://www.nasa.gov/wp-content/uploads/2016/08/174533main_shuttle_propulsion.pdf"
+  }
+]

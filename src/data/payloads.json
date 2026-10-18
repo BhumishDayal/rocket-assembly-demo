@@ -1,0 +1,34 @@
+[
+  {
+    "id": "nova-c",
+    "name": "Nova-C lunar lander",
+    "mass_kg": 1908,
+    "diameter_m": 2,
+    "height_m": 3.938,
+    "source": "https://en.wikipedia.org/w/index.php?title=Intuitive_Machines_Nova-C&oldid=1379202564 (\"launch mass of 1908 kg\"; \"3.938 m tall\"; infobox diameter 2 m)"
+  },
+  {
+    "id": "goes-r",
+    "name": "GOES-R weather satellite",
+    "mass_kg": 5192,
+    "diameter_m": 3.9,
+    "height_m": 6.1,
+    "source": "https://www.nesdis.noaa.gov/our-satellites/currently-flying/goes-east-west/goes-r-series-spacecraft-instruments (\"mass at launch (fueled): 11,446 lbs (5,192 kg)\"; \"6.1 m x 5.6 m x 3.9 m\")"
+  },
+  {
+    "id": "jwst",
+    "name": "James Webb Space Telescope (stowed)",
+    "mass_kg": 6200,
+    "diameter_m": 4.472,
+    "height_m": 10.661,
+    "source": "https://science.nasa.gov/mission/webb/fact-sheet/ (mass \"Approx 6200 kg\"); stowed dims https://www.eucass.eu/images/eucass2022/plenaries/P0-9_ArianeGroup_-_Rongier.pdf"
+  },
+  {
+    "id": "hubble",
+    "name": "Hubble Space Telescope",
+    "mass_kg": 10886,
+    "diameter_m": 4.2,
+    "height_m": 13.3,
+    "source": "https://science.nasa.gov/missions/hubble/a-nasa-refresher-on-hubble-facts-for-the-25th-anniversary"
+  }
+]

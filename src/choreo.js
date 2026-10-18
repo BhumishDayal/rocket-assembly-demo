@@ -1,12 +1,23 @@
 // Choreography: anime.js drives every motion (paths, springs, staggers); three.js only draws.
-// Build  = hologram pieces fly in from the parts panel with stagger → spring-snap → crystallize sweep
-//          (hologram → solid, bottom to top, glowing edge, particle swarm) → lock flash + clunk.
-// Remove = the reverse. Explode/Assemble = anime.js-hero style staggered springs on every piece.
+// Mechanical model (design §4, round 7): pieces are solid from the first frame; constant timings for every kind.
+// Build    = pieces fly in from the staging side on gentle arcs in `order`, each turned by `spin` about Y and
+//            rolled about its travel axis; the turn unwinds over the last 30 % of the path; spring landing
+//            (260/14), a tick per piece; lock = flash + clunk + shake. Engine clusters stagger ~110 ms engine
+//            to engine and ~35 ms between the sub-pieces of one engine; other parts ~38 ms.
+// Remove   = reverse: unscrew (turn winds up over the first 30 %), top-down, back to the staging side.
+// Explode  = engineering exploded view along the axis: every piece to rotY(spin·0.35)·(rest + dir·dist) +
+//            (0, axisOffset, 0); parts lifted so nothing overlaps (3 m × scale between parts; the fairing keeps
+//            the payload's lift). Assemble = reverse, bottom-up.
+// Swap     = applyManifest(specs) / swap(part, spec): parts above lift (0.5 s) → old part unscrews out
+//            (+0.2 s) → new part flies in (+0.7 s) and locks → parts above descend (0.5 s) + clunk.
+//            Collateral changes ride along (an interstage resized by an engine swap, a fairing that appears or
+//            goes with the payload, a clamped engine count). restack(manifest) animates group y to slotY.
+// Ghost    = the next buildable part shows as a faint hologram at its slot (idle 0.12, hover 0.35); hidden
+//            while busy, exploded or auto-building. part.ghostActive marks the clickable one.
+// Highlight = soft emissive pulse in COLORS.select on a selected part's (per-mesh cloned) materials.
 import * as THREE from "three";
-import { animate, spring, utils } from "animejs";
+import { animate, spring } from "animejs";
 import { createHologramMaterial } from "./fx/hologram.js";
-import { makeRevealable } from "./fx/reveal.js";
-import { createSwarm } from "./fx/swarm.js";
 import { createBoltFlash } from "./fx/flash.js";
 import { COLORS } from "./parts.js";
 
@@ -15,16 +26,44 @@ const D = (ms) => (reduced ? ms * 0.55 : ms);
 const rnd = (a, b) => a + Math.random() * (b - a);
 const rnd3 = (r) => new THREE.Vector3(rnd(-r, r), rnd(-r, r), rnd(-r, r));
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const smooth = (x) => (x <= 0 ? 0 : x >= 1 ? 1 : x * x * (3 - 2 * x));
+const Y = new THREE.Vector3(0, 1, 0);
 const tmpQ = new THREE.Quaternion();
-const tmpV = new THREE.Vector3();
+const tmpQ2 = new THREE.Quaternion();
+const tmpC = new THREE.Color();
 
-export function createChoreographer({ parts, scene, root, camera, controls, sfx, onChange }) {
-  const swarm = createSwarm({ maxCount: 12000 });
+const GHOST_IDLE = 0.12;
+const GHOST_HOVER = 0.35;
+const EXPLODE_GAP_M = 3; // exploded view: clearance between parts, metres (visual)
+const SWAP_CLEAR_M = 3; // swap: how far the parts above lift to make room, metres (visual)
+// Timings (ms). Same for every part kind; only piece counts differ.
+const T = {
+  fly: 620, // one piece's path in
+  flyOut: 460, // one piece's path out
+  engineStagger: 110,
+  subStagger: 35,
+  stagger: 38,
+  outStaggerMax: 340, // remove: total stagger cap (top-down), so a 100-piece cluster still leaves in ~0.8 s
+  swapInStaggerMax: 600, // swap: total arrival stagger cap, keeps the new part at 0.9–1.3 s
+  lift: 500,
+  outAt: 200,
+  inAt: 700,
+  descend: 500,
+};
+
+export function createChoreographer({ parts, scene, root, camera, controls, sfx, onChange, scale = 0.25, bounds: initialBounds = null, makePart = null }) {
   const flash = createBoltFlash();
-  scene.add(swarm.object3d, flash.object3d);
+  scene.add(flash.object3d);
 
-  const state = { busy: 0, exploded: false, gen: 0, shake: 0 };
+  const state = { busy: 0, exploded: false, auto: false, gen: 0, shake: 0 };
   const live = new Set();
+  const selectColor = new THREE.Color(COLORS.select ?? 0xffb020);
+  const highlighted = new Set();
+  const emissive0 = new WeakMap(); // material -> { color, intensity } before any highlight
+  const leaving = new Set(); // old parts still flying out of a swap (not in `parts` any more)
+  let bounds = initialBounds;
+  let ghostPart = null;
+  let warmRenderer = null;
 
   // anime.js wrapper: returns a promise, remembers the animation so reset() can cancel it.
   function run(targets, params) {
@@ -45,44 +84,92 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     live.clear();
   }
 
-  // ---------- per-part setup: hologram twins, ghost preview, reveal hooks ----------
-  for (const part of parts) {
-    part.holoFly = createHologramMaterial({ color: COLORS.holo, opacity: 0.6 });
-    part.holoGhost = createHologramMaterial({ color: COLORS.holo, opacity: 0.3 });
+  function changed() {
+    syncGhost();
+    onChange();
+  }
+
+  // Hologram scan-band spacing: ~4 units on a 17-unit stack, proportional on others (hologram.js header).
+  const bandPeriod = () => (bounds ? Math.max(1.5, bounds.height_u * 0.23) : 4);
+
+  // ---------- per-part setup: ghost preview, arrival order, mechanical fallbacks ----------
+  function setupPart(part) {
+    part.holoGhost = createHologramMaterial({ color: COLORS.holo, opacity: 1, bandPeriod: bandPeriod() });
+    part.holoGhost.material.depthTest = false; // seen (and clickable) even inside the interstage
+    part.holoGhost.setOpacity(0);
     part.ghost = new THREE.Group();
     part.ghost.position.y = part.slotY;
     part.ghost.visible = false;
+    part.ghost.renderOrder = 3;
     part.ghostFade = { v: 0 };
+    part.ghostActive = false;
+    part.hl = { v: 0 };
+    part.group.position.y = part.slotY;
+    const n = part.pieces.length;
+    part.arrival = [...part.pieces].sort((a, b) => (a.order ?? a.index) - (b.order ?? b.index) || a.bottomY - b.bottomY);
+    const step = Math.min(0.3, (part.height * 1.2) / Math.max(1, n));
+    part.arrival.forEach((piece, rank) => {
+      piece.rank = rank;
+      piece.axis = Number.isFinite(piece.axisOffset) ? piece.axisOffset : (rank - (n - 1) / 2) * step;
+      piece.turn = Number.isFinite(piece.spin) ? piece.spin : rank % 2 ? -0.9 : 0.9;
+      piece.engineIndex = piece.engine ?? piece.mesh.userData.engine ?? null;
+    });
+    // Rank of each piece inside its own engine (for the 35 ms sub-stagger).
+    const perEngine = new Map();
+    for (const piece of part.arrival) {
+      if (piece.engineIndex == null) continue;
+      const k = perEngine.get(piece.engineIndex) ?? 0;
+      piece.subRank = k;
+      perEngine.set(piece.engineIndex, k + 1);
+    }
     for (const piece of part.pieces) {
       const g = new THREE.Mesh(piece.mesh.geometry, part.holoGhost.material);
       g.position.copy(piece.rest.position);
       g.quaternion.copy(piece.rest.quaternion);
+      g.renderOrder = 3;
+      g.userData.partId = part.id;
+      g.userData.ghost = true;
       part.ghost.add(g);
-
-      piece.holo = new THREE.Mesh(piece.mesh.geometry, part.holoFly.material);
-      piece.holo.visible = false;
-      piece.holo.renderOrder = 2;
-      part.group.add(piece.holo);
-
-      piece.reveal = makeRevealable(piece.mesh, { edgeColor: COLORS.holo, edgeWidth: 0.12 });
-      piece.mesh.visible = false;
+      piece.mesh.userData.partId ??= part.id;
+      piece.mesh.visible = part.built;
     }
     root.add(part.group, part.ghost);
   }
+
+  function retirePart(part) {
+    part.ghostAnim?.cancel();
+    part.hlAnim?.cancel();
+    highlighted.delete(part);
+    leaving.delete(part);
+    if (ghostPart === part) ghostPart = null;
+    root.remove(part.group, part.ghost);
+    for (const piece of part.pieces) {
+      piece.mesh.geometry.dispose();
+      for (const m of [].concat(piece.mesh.material)) m.dispose();
+    }
+    part.holoGhost?.dispose();
+  }
+
+  for (const part of parts) setupPart(part);
 
   const index = (part) => parts.indexOf(part);
   const canBuild = (part) => !part.built && !part.busy && (index(part) === 0 || parts[index(part) - 1].built);
   const isTopBuilt = (part) => part.built && parts.slice(index(part) + 1).every((p) => !p.built);
   const topY = () => parts.reduce((m, p) => (p.built ? Math.max(m, p.slotY + p.height) : m), 0);
+  const nextBuildable = () => {
+    const p = parts.find((q) => !q.built);
+    return p && canBuild(p) ? p : null;
+  };
 
-  // Where pieces come from: off-screen left (the parts panel side), a little toward the camera.
+  // Where pieces come from: the left of the view, a little toward the camera, scaled to the current framing.
   function sourcePoint(part) {
     const fwd = camera.getWorldDirection(new THREE.Vector3());
     const right = new THREE.Vector3().crossVectors(fwd, camera.up).normalize();
-    // Right of the card column, so the particle stream never crosses the card text.
-    return new THREE.Vector3(0, part.slotY + part.height * 0.5 + 1.2, 0)
-      .addScaledVector(right, -6.5)
-      .addScaledVector(fwd, -2.5);
+    const d = camera.position.distanceTo(controls.target);
+    const halfW = d * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * camera.aspect;
+    return new THREE.Vector3(0, part.slotY + part.height * 0.5 + d * 0.05, 0)
+      .addScaledVector(right, -halfW * 0.62)
+      .addScaledVector(fwd, -d * 0.1);
   }
 
   // ---------- camera ----------
@@ -102,111 +189,216 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       },
     });
   }
+  // Framing scales with the preset: the smallest view still shows the engine cluster and some pad; the stack
+  // sits a little above centre so its base clears the bottom bar and its top clears the HUD line.
+  function view() {
+    const r = bounds?.baseRadius_u ?? bounds?.radius_u ?? 1;
+    const H = bounds?.height_u ?? 17;
+    return { minTop: Math.max(3, r * 5), pad: Math.max(4, r * 4), H };
+  }
+  const framing = (top) => ({ ty: top * 0.47, dist: top * 1.62 + view().pad });
   // Frames the built stack, plus `includeTop` (the part on its way in, or the exploded spread).
   function reframe(extra = 1, includeTop = 0) {
-    const top = Math.max(topY(), includeTop, 3.5);
-    return frameTo({ ty: Math.max(2.4, top * 0.5), dist: Math.max(15, top * 1.42 + 5) * extra });
+    const top = Math.max(topY(), includeTop, view().minTop);
+    const f = framing(top);
+    return frameTo({ ty: f.ty, dist: f.dist * extra });
   }
+  // Home: the empty pad with the first ghost near the middle, wide enough to read the scale of what is coming.
   function home() {
-    return frameTo({ ty: 2.5, dist: 18.5, duration: D(900) });
+    const v = view();
+    const top = Math.max(v.minTop, v.H * 0.25);
+    return frameTo({ ty: top * 0.32, dist: framing(top).dist, duration: D(900) });
+  }
+  function setBounds(b) {
+    bounds = b;
+    for (const part of parts) {
+      const u = part.holoGhost?.material.uniforms.uBandPeriod;
+      if (u) u.value = bandPeriod();
+    }
   }
 
-  // ---------- ghost preview on hover ----------
-  function setGhost(part, on) {
-    if (on && (!canBuild(part) || state.busy || state.exploded)) return;
-    utils.remove(part.ghostFade);
-    if (on) part.ghost.visible = true;
-    run(part.ghostFade, {
-      v: on ? 1 : 0,
-      duration: D(on ? 220 : 160),
+  // ---------- ghost: always-on faint preview of the next buildable part ----------
+  function fadeGhost(part, v) {
+    part.ghostAnim?.cancel();
+    part.ghostActive = v > 0;
+    if (v > 0) part.ghost.visible = true;
+    part.ghostAnim = animate(part.ghostFade, {
+      v,
+      duration: D(v > part.ghostFade.v ? 260 : 180),
       ease: "outQuad",
       onUpdate: () => part.holoGhost.setOpacity(part.ghostFade.v),
       onComplete: () => {
-        if (!on) part.ghost.visible = false;
+        if (v === 0) part.ghost.visible = false;
       },
     });
   }
   function hideGhostNow(part) {
-    utils.remove(part.ghostFade);
+    part.ghostAnim?.cancel();
     part.ghostFade.v = 0;
+    part.ghostActive = false;
     part.holoGhost.setOpacity(0);
     part.ghost.visible = false;
   }
+  function syncGhost() {
+    if (ghostPart && !parts.includes(ghostPart)) ghostPart = null;
+    const want = state.busy || state.exploded || state.auto ? null : nextBuildable();
+    if (want === ghostPart) return;
+    if (ghostPart) fadeGhost(ghostPart, 0);
+    ghostPart = want;
+    if (want) fadeGhost(want, GHOST_IDLE);
+  }
+  // Hover on the ghost (from the selector). Ignored for anything but the current ghost.
+  function setGhost(part, on) {
+    if (!part || part !== ghostPart) return;
+    fadeGhost(part, on ? GHOST_HOVER : GHOST_IDLE);
+  }
 
-  // ---------- build ----------
-  function flyIn(part, sourceWorld) {
+  // ---------- highlight: emissive pulse on the selected part ----------
+  const materialsOf = (part) => part.pieces.flatMap((p) => [].concat(p.mesh.material));
+  function highlight(part, on) {
+    if (!part?.pieces) return;
+    part.hlAnim?.cancel();
+    if (on) {
+      for (const m of materialsOf(part)) {
+        if (m.emissive && !emissive0.has(m)) emissive0.set(m, { color: m.emissive.clone(), intensity: m.emissiveIntensity });
+      }
+      highlighted.add(part);
+    } else if (!highlighted.has(part)) return;
+    part.hlAnim = animate(part.hl, {
+      v: on ? 1 : 0,
+      duration: D(on ? 240 : 380),
+      ease: "outQuad",
+      onComplete: () => {
+        if (!on) clearHighlight(part);
+      },
+    });
+  }
+  function clearHighlight(part) {
+    part.hlAnim?.cancel();
+    part.hl.v = 0;
+    highlighted.delete(part);
+    for (const m of materialsOf(part)) {
+      const e0 = emissive0.get(m);
+      if (!e0) continue;
+      m.emissive.copy(e0.color);
+      m.emissiveIntensity = e0.intensity;
+    }
+  }
+  function updateHighlights(t) {
+    const pulse = 0.5 + 0.5 * Math.sin(t * 3.4);
+    for (const part of highlighted) {
+      const k = part.hl.v * (0.12 + 0.12 * pulse);
+      for (const m of materialsOf(part)) {
+        const e0 = emissive0.get(m);
+        if (!e0) continue;
+        m.emissive.copy(e0.color).multiplyScalar(e0.intensity * (1 - k)).add(tmpC.copy(selectColor).multiplyScalar(k));
+        m.emissiveIntensity = 1;
+      }
+    }
+  }
+
+  // ---------- mechanical build / remove ----------
+  // Arrival delays in part.arrival order: engine clusters go engine by engine with the sub-pieces of one engine
+  // close behind each other, then the cluster's shared pieces (mount, heat shield); everything else staggers
+  // evenly in `order`. `cap` compresses the whole stagger to at most `cap` ms (swap).
+  function arrivalDelays(part, cap = Infinity) {
+    const delays = part.arrival.map((p) => (p.engineIndex != null ? p.engineIndex * T.engineStagger + (p.subRank ?? 0) * T.subStagger : p.rank * T.stagger));
+    const engined = part.arrival.filter((p) => p.engineIndex != null);
+    if (engined.length) {
+      let t = Math.max(...part.arrival.map((p, i) => (p.engineIndex != null ? delays[i] : 0)));
+      part.arrival.forEach((p, i) => {
+        if (p.engineIndex == null) delays[i] = t += T.subStagger;
+      });
+    }
+    const max = Math.max(0, ...delays);
+    const k = max > cap ? cap / max : 1;
+    return delays.map((d) => D(d * k));
+  }
+
+  // The piece's rest orientation turned by `spin` about Y and rolled about its travel direction, scaled by s.
+  function turnedQuat(piece, s, travelAxis, roll, out) {
+    out.copy(piece.rest.quaternion);
+    if (roll) out.premultiply(tmpQ2.setFromAxisAngle(travelAxis, roll * s));
+    return out.premultiply(tmpQ2.setFromAxisAngle(Y, piece.turn * s));
+  }
+
+  function flyIn(part, sourceWorld, { cap = Infinity } = {}) {
     const source = part.group.worldToLocal(sourceWorld.clone());
-    const n = part.pieces.length;
-    const stag = n > 8 ? 42 : 75;
+    const k = THREE.MathUtils.clamp(camera.position.distanceTo(controls.target) / 18, 0.6, 2.2);
+    const delays = arrivalDelays(part, cap);
     return Promise.all(
-      part.pieces.map((piece, i) => {
+      part.arrival.map((piece, i) => {
+        const mesh = piece.mesh;
         const end = piece.rest.position;
-        const start = source.clone().add(rnd3(1.3));
+        const start = source.clone().add(rnd3(0.7 * k));
         const mid = start
           .clone()
-          .lerp(end, 0.45)
-          .add(new THREE.Vector3(rnd(-1, 1), rnd(2, 3.6), rnd(-1, 1)));
+          .lerp(end, 0.5)
+          .add(new THREE.Vector3(rnd(-0.4, 0.4) * k, rnd(0.8, 1.6) * k, rnd(-0.4, 0.4) * k)); // gentle arc
         const curve = new THREE.QuadraticBezierCurve3(start, mid, end);
-        const over = curve.getTangent(1).normalize().multiplyScalar(0.16); // tiny overshoot, spring brings it back
-        const spinAxis = rnd3(1).normalize();
-        const spinAngle = (Math.random() < 0.5 ? -1 : 1) * rnd(1.4, 3.2);
-        const holo = piece.holo;
-        holo.position.copy(start);
-        holo.visible = true;
+        const over = curve.getTangent(1).normalize().multiplyScalar(0.06 * k); // tiny overshoot, the spring takes it back
+        const travel = curve.getTangent(0.5).normalize();
+        const roll = (Math.random() < 0.5 ? -1 : 1) * rnd(0.5, 1.1);
         const prog = { t: 0 };
+        mesh.visible = false;
         return run(prog, {
           t: 1,
-          duration: D(640),
-          delay: D(i * stag),
+          duration: D(T.fly),
+          delay: delays[i],
           ease: "outQuart",
-          onUpdate: () => {
-            curve.getPoint(prog.t, holo.position).addScaledVector(over, prog.t);
-            holo.quaternion.copy(piece.rest.quaternion).premultiply(tmpQ.setFromAxisAngle(spinAxis, (1 - prog.t) * spinAngle));
+          onBegin: () => {
+            mesh.visible = true;
           },
-          onComplete: () => sfx.play("tick", { rate: rnd(0.9, 1.12) }),
-        }).then(() =>
-          run(holo.position, { x: end.x, y: end.y, z: end.z, ease: spring({ stiffness: 260, damping: 13 }) }),
-        );
+          onUpdate: () => {
+            const t = prog.t;
+            curve.getPoint(t, mesh.position).addScaledVector(over, t);
+            turnedQuat(piece, 1 - smooth((t - 0.7) / 0.3), travel, roll, mesh.quaternion);
+          },
+          onComplete: () => {
+            mesh.quaternion.copy(piece.rest.quaternion);
+            sfx.play("tick", { rate: rnd(0.9, 1.12) });
+          },
+        }).then(() => run(mesh.position, { x: end.x, y: end.y, z: end.z, ease: spring({ stiffness: 260, damping: 14 }) }));
       }),
     );
   }
 
-  async function crystallize(part, sourceWorld, { reverse = false } = {}) {
-    const H = part.height;
-    const h = { v: reverse ? H + 0.3 : -0.25 };
-    for (const piece of part.pieces) {
-      piece.mesh.visible = true;
-      piece.reveal.setActive(true);
-      piece.reveal.setCut(h.v - piece.mesh.position.y);
-      if (reverse) {
-        piece.holo.position.copy(piece.rest.position);
-        piece.holo.quaternion.copy(piece.rest.quaternion);
-        piece.holo.visible = true;
-      }
-    }
-    let dur = D(470 + H * 42);
-    if (!reverse) {
-      // Particles pour in first; the sweep runs exactly over the window in which they land (swarm.timing).
-      swarm.play({ source: sourceWorld, targets: part.pieces.map((p) => p.mesh), duration: (dur + 380) / 1000, color: COLORS.holo });
-      const { firstLanding = 0, lastLanding = dur / 1000 } = swarm.timing ?? {};
-      await wait(firstLanding * 1000);
-      dur = Math.max(220, (lastLanding - firstLanding) * 1000);
-    }
-    sfx.play("shimmer", { rate: reverse ? 0.85 : 1 });
-    await run(h, {
-      v: reverse ? -0.25 : H + 0.3,
-      duration: dur,
-      ease: "inOutSine",
-      onUpdate: () => {
-        for (const piece of part.pieces) piece.reveal.setCut(h.v - piece.mesh.position.y);
-        part.holoFly.setOpacity(1 - THREE.MathUtils.clamp(h.v / H, 0, 1));
-      },
-    });
-    for (const piece of part.pieces) {
-      piece.reveal.setActive(false);
-      if (reverse) piece.mesh.visible = false;
-      else piece.holo.visible = false;
-    }
+  function flyOut(part, sourceWorld) {
+    const source = part.group.worldToLocal(sourceWorld.clone());
+    const k = THREE.MathUtils.clamp(camera.position.distanceTo(controls.target) / 18, 0.6, 2.2);
+    const order = [...part.arrival].reverse(); // top-down
+    const step = Math.min(T.stagger, T.outStaggerMax / Math.max(1, order.length - 1));
+    return Promise.all(
+      order.map((piece, i) => {
+        const mesh = piece.mesh;
+        const start = mesh.position.clone();
+        const end = source.clone().add(rnd3(0.8 * k));
+        const mid = start
+          .clone()
+          .lerp(end, 0.5)
+          .add(new THREE.Vector3(rnd(-0.4, 0.4) * k, rnd(0.7, 1.4) * k, rnd(-0.4, 0.4) * k));
+        const curve = new THREE.QuadraticBezierCurve3(start, mid, end);
+        const travel = curve.getTangent(0.5).normalize();
+        const roll = (Math.random() < 0.5 ? -1 : 1) * rnd(0.5, 1.1);
+        const prog = { t: 0 };
+        return run(prog, {
+          t: 1,
+          duration: D(T.flyOut),
+          delay: D(i * step),
+          ease: "inQuart",
+          onUpdate: () => {
+            const t = prog.t;
+            curve.getPoint(t, mesh.position);
+            turnedQuat(piece, smooth(t / 0.3), travel, roll, mesh.quaternion); // unscrew first, then leave
+          },
+          onComplete: () => {
+            mesh.visible = false;
+            mesh.position.copy(piece.rest.position);
+            mesh.quaternion.copy(piece.rest.quaternion);
+          },
+        });
+      }),
+    );
   }
 
   function lock(part) {
@@ -221,54 +413,18 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     state.busy++;
     part.busy = true;
     hideGhostNow(part);
-    onChange();
+    changed();
     sfx.play("whoosh");
     reframe(1, part.slotY + part.height);
-    const source = sourcePoint(part);
-    part.holoFly.setOpacity(1);
-    await flyIn(part, source);
-    if (gen !== state.gen) return false;
-    await crystallize(part, source);
+    await flyIn(part, sourcePoint(part));
     if (gen !== state.gen) return false;
     part.built = true;
     part.busy = false;
     state.busy--;
     lock(part);
     reframe();
-    onChange();
+    changed();
     return true;
-  }
-
-  // ---------- remove (reverse) ----------
-  function flyOut(part, sourceWorld) {
-    const source = part.group.worldToLocal(sourceWorld.clone());
-    const n = part.pieces.length;
-    const stag = n > 8 ? 30 : 55;
-    return Promise.all(
-      [...part.pieces].reverse().map((piece, i) => {
-        const start = piece.rest.position.clone();
-        const end = source.clone().add(rnd3(1.5));
-        const mid = start.clone().lerp(end, 0.5).add(new THREE.Vector3(rnd(-1, 1), rnd(1.5, 3), rnd(-1, 1)));
-        const curve = new THREE.QuadraticBezierCurve3(start, mid, end);
-        const spinAxis = rnd3(1).normalize();
-        const spinAngle = (Math.random() < 0.5 ? -1 : 1) * rnd(1, 2.5);
-        const holo = piece.holo;
-        const prog = { t: 0 };
-        return run(prog, {
-          t: 1,
-          duration: D(560),
-          delay: D(i * stag),
-          ease: "inQuart",
-          onUpdate: () => {
-            curve.getPoint(prog.t, holo.position);
-            holo.quaternion.copy(piece.rest.quaternion).premultiply(tmpQ.setFromAxisAngle(spinAxis, prog.t * spinAngle));
-          },
-          onComplete: () => {
-            holo.visible = false;
-          },
-        });
-      }),
-    );
   }
 
   async function remove(part) {
@@ -276,55 +432,82 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     const gen = state.gen;
     state.busy++;
     part.busy = true;
-    onChange();
-    const source = sourcePoint(part);
-    part.holoFly.setOpacity(0);
-    await crystallize(part, source, { reverse: true });
+    if (highlighted.has(part)) clearHighlight(part);
+    changed();
+    sfx.play("whoosh", { rate: 0.8 });
+    await flyOut(part, sourcePoint(part));
     if (gen !== state.gen) return false;
     part.built = false;
-    sfx.play("whoosh", { rate: 0.8 });
-    await flyOut(part, source);
-    if (gen !== state.gen) return false;
     part.busy = false;
     state.busy--;
     reframe();
-    onChange();
+    changed();
     return true;
   }
 
   // ---------- explode / assemble ----------
+  // Axial layout of the exploded view, bottom to top in build order: each part is lifted so that its exploded
+  // extent clears everything below it by EXPLODE_GAP_M. The fairing encloses the payload, so it keeps the
+  // payload's lift and only its halves move out.
+  const explodedY = (piece) => piece.axis + piece.explode.dir.y * piece.explode.dist;
+  function explodeLayout(built) {
+    const lifts = new Map();
+    const gap = EXPLODE_GAP_M * scale;
+    let top = 0;
+    let prev = null;
+    for (const part of built) {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const piece of part.pieces) {
+        lo = Math.min(lo, piece.bottomY + explodedY(piece));
+        hi = Math.max(hi, piece.topY + explodedY(piece));
+      }
+      let lift;
+      const payload = part.kind === "fairing" ? built.find((p) => p.kind === "payload") : null;
+      if (payload && lifts.has(payload)) lift = lifts.get(payload);
+      else if (!prev) lift = Math.max(0, -(part.slotY + lo)); // nothing below the pad
+      else lift = Math.max(lifts.get(prev), top + gap - (part.slotY + lo));
+      lifts.set(part, lift);
+      top = Math.max(top, part.slotY + lift + hi);
+      prev = part;
+    }
+    return { lifts, top };
+  }
+
   async function explode() {
     if (state.busy || state.exploded || topY() === 0) return false;
     const gen = state.gen;
     state.busy++;
     state.exploded = true;
-    onChange();
+    changed();
     sfx.play("explode");
     controls.autoRotate = true;
     controls.autoRotateSpeed = 0.9;
     const built = parts.filter((p) => p.built);
-    reframe(1.2, topY() + built.length * 0.85 + 1.5);
+    const { lifts, top } = explodeLayout(built);
+    reframe(1.12, top);
     const jobs = [];
     built.forEach((part, pi) => {
-      part.pieces.forEach((piece, i) => {
-        const target = piece.rest.position
-          .clone()
-          .addScaledVector(piece.explode.dir, piece.explode.dist * 1.15)
-          .add(tmpV.set(0, 0.35 + pi * 0.85, 0));
-        piece.q0 = piece.mesh.quaternion.clone();
-        piece.q1 = new THREE.Quaternion().setFromAxisAngle(rnd3(1).normalize(), rnd(0.12, 0.45)).multiply(piece.rest.quaternion);
-        const delay = D(pi * 90 + i * 24);
+      const lift = lifts.get(part);
+      const step = Math.min(24, 700 / Math.max(1, part.arrival.length));
+      for (const piece of part.arrival) {
+        const rot = new THREE.Quaternion().setFromAxisAngle(Y, piece.turn * 0.35);
+        const target = piece.rest.position.clone().addScaledVector(piece.explode.dir, piece.explode.dist).applyQuaternion(rot);
+        target.y += piece.axis + lift;
+        const q0 = piece.mesh.quaternion.clone();
+        const q1 = rot.multiply(piece.rest.quaternion);
+        const delay = D(pi * 90 + piece.rank * step);
         const k = { v: 0 };
         jobs.push(
           run(piece.mesh.position, { x: target.x, y: target.y, z: target.z, delay, ease: spring({ stiffness: 85, damping: 11 }) }),
-          run(k, { v: 1, duration: D(900), delay, ease: "outCubic", onUpdate: () => piece.mesh.quaternion.slerpQuaternions(piece.q0, piece.q1, k.v) }),
+          run(k, { v: 1, duration: D(900), delay, ease: "outCubic", onUpdate: () => piece.mesh.quaternion.slerpQuaternions(q0, q1, k.v) }),
         );
-      });
+      }
     });
     await Promise.all(jobs);
     if (gen !== state.gen) return false;
     state.busy--;
-    onChange();
+    changed();
     return true;
   }
 
@@ -332,22 +515,22 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     if (state.busy || !state.exploded) return false;
     const gen = state.gen;
     state.busy++;
-    onChange();
+    changed();
     sfx.play("assemble");
     const built = parts.filter((p) => p.built);
     const jobs = [];
-    const count = built.length;
     built.forEach((part, pi) => {
-      part.pieces.forEach((piece, i) => {
-        const delay = D((count - 1 - pi) * 70 + i * 18);
+      const step = Math.min(18, 500 / Math.max(1, part.arrival.length));
+      for (const piece of part.arrival) {
+        const delay = D(pi * 70 + piece.rank * step); // bottom-up
         const k = { v: 0 };
-        piece.q0 = piece.mesh.quaternion.clone();
+        const q0 = piece.mesh.quaternion.clone();
         const r = piece.rest.position;
         jobs.push(
           run(piece.mesh.position, { x: r.x, y: r.y, z: r.z, delay, ease: spring({ stiffness: 130, damping: 12 }) }),
-          run(k, { v: 1, duration: D(700), delay, ease: "inOutCubic", onUpdate: () => piece.mesh.quaternion.slerpQuaternions(piece.q0, piece.rest.quaternion, k.v) }),
+          run(k, { v: 1, duration: D(700), delay, ease: "inOutCubic", onUpdate: () => piece.mesh.quaternion.slerpQuaternions(q0, piece.rest.quaternion, k.v) }),
         );
-      });
+      }
     });
     await Promise.all(jobs);
     if (gen !== state.gen) return false;
@@ -357,22 +540,167 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     sfx.play("clunk", { gain: 0.7 });
     state.shake = 0.6;
     reframe();
-    onChange();
+    changed();
     return true;
   }
 
   const toggleExplode = () => (state.exploded ? assemble() : explode());
 
-  // ---------- build all / reset ----------
-  async function buildAll() {
-    if (state.busy || state.exploded) return;
-    const gen = state.gen;
-    for (const part of parts) {
-      if (part.built) continue;
-      const ok = await build(part);
-      if (!ok || gen !== state.gen) return;
-      await wait(D(160));
+  // ---------- swap / restack ----------
+  // Shape identity: a part whose record, count, size and geometry are unchanged is kept (and only restacked).
+  const shapeKey = (p) => JSON.stringify([p.kind, p.record?.id ?? null, p.count, +p.height.toFixed(5), +p.radius.toFixed(5), p.geom ?? null]);
+  const RUNTIME = new Set(["group", "pieces", "built", "busy", "ghost", "holoGhost", "ghostFade", "ghostActive", "ghostAnim", "hl", "hlAnim", "arrival"]);
+  const specFields = (spec) => Object.fromEntries(Object.entries(spec).filter(([k]) => !RUNTIME.has(k)));
+
+  function moveGroup(part, y, { duration, ease = "inOutCubic" }) {
+    const g = { y: part.group.position.y };
+    return run(g, {
+      y,
+      duration,
+      ease,
+      onUpdate: () => {
+        part.group.position.y = g.y;
+      },
+    });
+  }
+
+  // restack(manifest): animate every part's group to its spec's slotY (matched by id).
+  function restack(manifest, { duration = D(T.descend) } = {}) {
+    const jobs = [];
+    for (const spec of manifest) {
+      const part = parts.find((p) => p.id === spec.id);
+      if (!part) continue;
+      part.slotY = spec.slotY;
+      part.ghost.position.y = spec.slotY;
+      if (Math.abs(part.group.position.y - spec.slotY) > 1e-6) jobs.push(moveGroup(part, spec.slotY, { duration }));
     }
+    return Promise.all(jobs);
+  }
+
+  // The option animation for a whole new manifest: one changed slot plus whatever it drags along. Kept parts
+  // (same shape) are restacked; changed ones are replaced (old unscrews out, new flies in at its new slot).
+  // Resolves to { parts, replaced: Map(oldPart -> newPart) }, or false if it could not run / was cancelled.
+  async function applyManifest(specs) {
+    if (state.busy || state.exploded || !makePart) return false;
+    const gen = state.gen;
+    state.busy++;
+    const wasComplete = parts.length > 0 && parts.every((p) => p.built);
+    const oldById = new Map(parts.map((p) => [p.id, p]));
+    const next = [];
+    const incoming = []; // new parts to fly in
+    const outgoing = []; // built old parts to fly out
+    const kept = [];
+    const replaced = new Map();
+    for (const spec of specs) {
+      const old = oldById.get(spec.id);
+      if (old && (old === spec || shapeKey(old) === shapeKey(spec))) {
+        oldById.delete(spec.id);
+        const y = old.group.position.y;
+        Object.assign(old, specFields(spec));
+        old.group.position.y = y; // restack moves it
+        kept.push(old);
+        next.push(old);
+        continue;
+      }
+      const part = makePart(spec);
+      part.built = false;
+      part.busy = false;
+      setupPart(part);
+      if (old) {
+        oldById.delete(spec.id);
+        replaced.set(old, part);
+        if (old.built) outgoing.push(old);
+        else retirePart(old);
+      }
+      if (old ? old.built : wasComplete) {
+        part.busy = true;
+        incoming.push(part);
+      }
+      next.push(part);
+    }
+    for (const old of oldById.values()) {
+      if (old.built) outgoing.push(old);
+      else retirePart(old);
+    }
+    for (const old of outgoing) {
+      old.busy = true;
+      leaving.add(old);
+      if (highlighted.has(old)) clearHighlight(old);
+    }
+    parts = next;
+    changed();
+
+    // Parts above the lowest change lift out of the way, then settle on their new slots.
+    const changedY = Math.min(Infinity, ...incoming.map((p) => p.slotY), ...outgoing.map((p) => p.slotY));
+    const above = kept.filter((p) => p.built && p.slotY >= changedY - 1e-6);
+    const clear = SWAP_CLEAR_M * scale + Math.max(0, ...incoming.map((p) => p.height * 0.15));
+    const liftY = (p) => Math.max(p.group.position.y, p.slotY) + clear;
+    reframe(1, Math.max(topY(), ...above.map((p) => liftY(p) + p.height)));
+    const t0 = performance.now();
+    const at = (ms) => wait(Math.max(0, D(ms) - (performance.now() - t0)));
+    const lifting = Promise.all(above.map((p) => moveGroup(p, liftY(p), { duration: D(T.lift) })));
+    if (above.length) sfx.play("whoosh", { rate: 1.2, gain: 0.6 });
+
+    await at(T.outAt);
+    if (gen !== state.gen) return false;
+    if (outgoing.length) sfx.play("whoosh", { rate: 0.8 });
+    const departing = Promise.all(outgoing.map((p) => flyOut(p, sourcePoint(p))));
+
+    await at(T.inAt);
+    if (gen !== state.gen) return false;
+    if (incoming.length) sfx.play("whoosh");
+    const arriving = incoming.map(async (p) => {
+      await flyIn(p, sourcePoint(p), { cap: T.swapInStaggerMax });
+      if (gen !== state.gen) return;
+      p.built = true;
+      p.busy = false;
+      lock(p);
+    });
+    await Promise.all([lifting, departing, ...arriving]);
+    if (gen !== state.gen) return false;
+    for (const old of outgoing) retirePart(old);
+
+    await restack(specs, { duration: D(T.descend) });
+    if (gen !== state.gen) return false;
+    if (above.length) {
+      sfx.play("clunk", { gain: 0.8 });
+      state.shake = 0.7;
+    }
+    state.busy--;
+    reframe();
+    changed();
+    return { parts, replaced };
+  }
+
+  // swap(part, newSpec): one slot changes and nothing else moves (applyManifest when sizes shift).
+  const swap = (part, newSpec) => applyManifest(parts.map((p) => (p === part ? newSpec : p)));
+
+  // ---------- build all / build up to / reset ----------
+  async function buildUpTo(target) {
+    if (state.busy || state.exploded || target.built) return false;
+    const gen = state.gen;
+    state.auto = true;
+    try {
+      for (const part of parts.slice(0, index(target) + 1)) {
+        if (part.built) continue;
+        const ok = await build(part);
+        if (!ok || gen !== state.gen) return false;
+        if (part !== target) await wait(D(140));
+      }
+    } finally {
+      if (gen === state.gen) {
+        state.auto = false;
+        changed();
+      }
+    }
+    return true;
+  }
+
+  async function buildAll() {
+    if (state.busy || state.exploded || !parts.length) return;
+    const gen = state.gen;
+    const ok = await buildUpTo(parts[parts.length - 1]);
+    if (!ok || gen !== state.gen) return;
     controls.autoRotate = true;
     controls.autoRotateSpeed = 1.1;
     setTimeout(() => {
@@ -380,59 +708,68 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     }, 6500);
   }
 
-  function reset() {
+  // Back to the empty pad (camera untouched).
+  function clear() {
     state.gen++;
     cancelAll();
-    swarm.stop();
     controls.autoRotate = false;
     state.busy = 0;
     state.exploded = false;
+    state.auto = false;
     state.shake = 0;
+    for (const part of [...highlighted]) clearHighlight(part);
+    for (const part of [...leaving]) retirePart(part); // still flying out of an interrupted swap
     for (const part of parts) {
       part.built = false;
       part.busy = false;
       hideGhostNow(part);
-      part.holoFly.setOpacity(1);
+      part.group.position.y = part.slotY;
       for (const piece of part.pieces) {
-        piece.reveal.setActive(false);
         piece.mesh.visible = false;
-        piece.holo.visible = false;
         piece.mesh.position.copy(piece.rest.position);
         piece.mesh.quaternion.copy(piece.rest.quaternion);
       }
     }
+    ghostPart = null;
+  }
+
+  function reset() {
+    clear();
     home();
-    onChange();
+    changed();
+  }
+
+  // Preset switch: cancel everything, dispose the old stack, set up the new one.
+  function rebuild(next) {
+    clear();
+    for (const part of parts) retirePart(part);
+    parts = next;
+    for (const part of parts) setupPart(part);
+    if (warmRenderer) prewarm(warmRenderer);
+    home();
+    changed();
   }
 
   // One-time shader warm-up so the first build has no compile hitch.
   function prewarm(renderer) {
+    warmRenderer = renderer;
     for (const part of parts) {
       part.ghost.visible = true;
-      for (const piece of part.pieces) {
-        piece.mesh.visible = true;
-        piece.holo.visible = true;
-        piece.reveal.setActive(true);
-      }
+      for (const piece of part.pieces) piece.mesh.visible = true;
     }
     renderer.compile(scene, camera);
     for (const part of parts) {
-      part.ghost.visible = false;
-      for (const piece of part.pieces) {
-        piece.reveal.setActive(false);
-        piece.mesh.visible = false;
-        piece.holo.visible = false;
-      }
+      part.ghost.visible = part.ghostActive || part.ghostFade.v > 0;
+      for (const piece of part.pieces) piece.mesh.visible = part.built;
     }
   }
 
   function update(dt, t) {
     for (const part of parts) {
-      part.holoFly.update(t);
       part.holoGhost.update(t);
       if (part.ghost.visible) part.ghost.position.y = part.slotY + Math.sin(t * 2.6) * 0.05;
     }
-    swarm.update(dt);
+    if (highlighted.size) updateHighlights(t);
     flash.update(dt);
     if (state.shake > 0.002) {
       state.shake *= Math.exp(-dt * 8);
@@ -442,5 +779,35 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     }
   }
 
-  return { state, canBuild, isTopBuilt, topY, setGhost, build, remove, explode, assemble, toggleExplode, buildAll, reset, prewarm, update, home };
+  // The always-on ghost starts with the first part.
+  syncGhost();
+
+  return {
+    state,
+    get parts() {
+      return parts;
+    },
+    canBuild,
+    isTopBuilt,
+    topY,
+    setGhost,
+    ghostPart: () => ghostPart,
+    highlight,
+    build,
+    buildUpTo,
+    remove,
+    explode,
+    assemble,
+    toggleExplode,
+    swap,
+    applyManifest,
+    restack,
+    buildAll,
+    reset,
+    rebuild,
+    setBounds,
+    prewarm,
+    update,
+    home,
+  };
 }

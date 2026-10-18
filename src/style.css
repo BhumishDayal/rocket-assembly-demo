@@ -8,6 +8,7 @@
   --holo: #5cc8ff;
   --select: #ffb020;
   --go: #2ee6b6;
+  --nogo: #ff6a3d;
   --font: "Inter", "SF Pro Text", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 }
@@ -69,119 +70,242 @@ kbd {
   color: var(--text);
 }
 
-/* Parts column */
-.parts {
+/* Detail card: one selected part. Same surface as the bar; slides in at the left, bottom sheet on phones. */
+.detail {
   position: fixed;
   left: 32px;
   top: 50%;
-  transform: translateY(-50%);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  width: 232px;
-}
-
-.card {
-  display: grid;
-  grid-template-columns: 34px 1fr auto;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--hairline);
-  border-radius: 12px;
+  width: 312px;
+  max-height: calc(100vh - 240px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 16px 16px 14px;
+  border: 1px solid rgba(255, 176, 32, 0.32);
+  border-radius: 14px;
   background: var(--surface);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   color: var(--text);
-  text-align: left;
-  cursor: pointer;
-  font: inherit;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translate(-18px, -50%);
   transition:
-    transform 180ms cubic-bezier(0.2, 0.7, 0.2, 1),
-    border-color 180ms,
-    background 180ms,
-    opacity 180ms;
+    opacity 200ms ease,
+    transform 280ms cubic-bezier(0.2, 0.7, 0.2, 1),
+    visibility 0s linear 280ms;
 }
 
-.card:hover,
-.card:focus-visible {
-  transform: translateX(4px);
-  border-color: rgba(92, 200, 255, 0.55);
-  background: var(--surface-2);
-  outline: none;
+.detail.open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translate(0, -50%);
+  transition:
+    opacity 200ms ease,
+    transform 280ms cubic-bezier(0.2, 0.7, 0.2, 1),
+    visibility 0s;
 }
 
-.card:active {
-  transform: translateX(4px) scale(0.985);
+.detail .eyebrow {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 550;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-2);
 }
 
-.card .icon {
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
+.detail h2 {
+  margin: 4px 0 0;
+  font-size: 16px;
+  font-weight: 650;
+  line-height: 1.2;
+  letter-spacing: -0.005em;
+}
+
+.detail .sub {
+  margin: 3px 0 0;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.detail dl {
   display: grid;
-  place-items: center;
-  background: rgba(92, 200, 255, 0.08);
-  color: var(--holo);
+  gap: 6px;
+  margin: 12px 0 0;
 }
 
-.card .icon svg {
-  width: 20px;
-  height: 20px;
-  stroke: currentColor;
-  fill: none;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+.detail dl > div {
+  display: grid;
+  grid-template-columns: 104px 1fr;
+  gap: 10px;
+  font-size: 12.5px;
+  line-height: 1.35;
 }
 
-.card .name {
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 1.15;
+.detail dt {
+  color: var(--text-2);
 }
 
-.card .sub {
-  display: block;
+.detail dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.detail .tag {
+  display: inline-block;
+  margin-left: 2px;
+  padding: 0 5px;
+  border: 1px solid var(--hairline);
+  border-radius: 5px;
+  font-size: 10px;
+  line-height: 15px;
+  color: var(--text-2);
+  white-space: nowrap;
+  vertical-align: 1px;
+}
+
+.detail .bad {
+  color: var(--nogo);
+}
+
+.detail .nw {
+  white-space: nowrap;
+}
+
+.detail .stage {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hairline);
+  font-size: 12.5px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+
+.detail .stage p {
+  margin: 0;
+}
+
+.detail .warn {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  color: var(--nogo);
+  font-size: 12px;
+}
+
+.detail .note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+.detail .src {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin: 12px 0 0;
   font-size: 11.5px;
   color: var(--text-2);
-  margin-top: 2px;
-  font-weight: 450;
 }
 
-.card .key {
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--text-2);
-  border: 1px solid var(--hairline);
-  border-radius: 6px;
-  padding: 2px 6px;
+.detail .src a {
+  color: var(--holo);
+  text-decoration: none;
 }
 
-.card.building {
-  border-color: rgba(92, 200, 255, 0.9);
-  box-shadow: 0 0 0 1px rgba(92, 200, 255, 0.35), 0 0 28px rgba(92, 200, 255, 0.18);
+.detail .src a:hover,
+.detail .src a:focus-visible {
+  text-decoration: underline;
 }
 
-.card.built .icon {
-  background: rgba(46, 230, 182, 0.12);
-  color: var(--go);
+/* Options: the card's one control; expands the slot's alternatives in place. */
+.detail .opts {
+  margin-top: 12px;
 }
 
-.card.built .key {
-  color: var(--go);
-  border-color: rgba(46, 230, 182, 0.4);
+.detail .opt-toggle {
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  background: rgba(92, 200, 255, 0.12);
+  border: 1px solid rgba(92, 200, 255, 0.32);
+  border-radius: 9px;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: background 160ms, transform 160ms, opacity 160ms;
 }
 
-.card.locked {
-  opacity: 0.42;
+.detail .opt-toggle:hover {
+  background: rgba(92, 200, 255, 0.22);
+}
+
+.detail .opt-toggle:active {
+  transform: scale(0.97);
+}
+
+.detail .opts.open .opt-toggle {
+  background: rgba(255, 176, 32, 0.16);
+  border-color: rgba(255, 176, 32, 0.45);
+}
+
+.detail .opt-toggle:disabled,
+.detail .opt:disabled {
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
-.card.locked:hover {
-  transform: none;
-  border-color: var(--hairline);
-  background: var(--surface);
+.detail .opt-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 4px 0 0;
+  max-height: 232px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-top: 1px solid var(--hairline);
+}
+
+.detail .opt {
+  display: grid;
+  gap: 1px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 140ms;
+}
+
+.detail .opt:hover:not(:disabled),
+.detail .opt:focus-visible {
+  background: rgba(255, 255, 255, 0.06);
+  outline: none;
+}
+
+.detail .opt[aria-current="true"] {
+  cursor: default;
+  background: rgba(255, 176, 32, 0.08);
+}
+
+.detail .opt-name {
+  font-size: 12.5px;
+  font-weight: 550;
+}
+
+.detail .opt[aria-current="true"] .opt-name {
+  color: var(--select);
+}
+
+.detail .opt-meta {
+  font-size: 11.5px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
 }
 
 /* Bottom bar */
@@ -260,6 +384,14 @@ kbd {
   font-weight: 600;
 }
 
+.hud .go {
+  color: var(--go);
+}
+
+.hud .nogo {
+  color: var(--nogo);
+}
+
 @media (max-width: 760px) {
   .brand {
     top: 16px;
@@ -275,23 +407,17 @@ kbd {
   .hud {
     display: none;
   }
-  .parts {
+  .detail {
     left: 12px;
     right: 12px;
     top: auto;
     bottom: 84px;
-    transform: none;
     width: auto;
-    flex-direction: row;
-    overflow-x: auto;
-    padding-bottom: 4px;
+    max-height: 46vh;
+    transform: translateY(18px);
   }
-  .card {
-    min-width: 150px;
-    grid-template-columns: 28px 1fr;
-  }
-  .card .key {
-    display: none;
+  .detail.open {
+    transform: none;
   }
   .bar {
     bottom: 16px;
@@ -303,7 +429,8 @@ kbd {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .card,
+  .detail,
+  .detail.open,
   .bar button {
     transition: none;
   }
