@@ -79,8 +79,6 @@ export function createLanding({ scene, camera, controls, root, stars, canvas, gr
   const bodyU = planet.object3d.getObjectByName("planet-body")?.material.uniforms ?? {};
   const atmoU = planet.object3d.getObjectByName("planet-atmosphere")?.material.uniforms ?? {};
   const fades = [bodyU.uSunColor, bodyU.uRim, bodyU.uHaze, atmoU.uGain].filter(Boolean).map((u) => ({ u, v0: u.value.clone?.() ?? u.value }));
-  // Lengths in the shaders (scattering radius and scale height, bump relief) follow the globe's scale.
-  const lengths = [bodyU.uRadius, atmoU.uR, atmoU.uH].filter(Boolean).map((u) => ({ u, v0: u.value }));
   const sun = new THREE.Vector3();
   const clouds = createCloudLayer({ altitude_u: G + 22, radius_u: 70 }); // the camera passes it near p 0.45
   scene.add(clouds.object3d);
@@ -149,8 +147,7 @@ export function createLanding({ scene, camera, controls, root, stars, canvas, gr
     // The globe: pole just under the ground, radius growing as the camera comes down.
     const R = Math.exp(path.logR(p));
     planet.object3d.visible = p < 0.86;
-    planet.object3d.scale.setScalar(R / R0);
-    for (const { u, v0 } of lengths) u.value = (v0 * R) / R0;
+    planet.setScale(R / R0); // the shader lengths (scattering, relief) follow
     planet.object3d.position.set(0, G - 0.05 - R, 0);
     planet.setSunDir(sun.copy(view.sun).lerp(DUSK_SUN, smooth(0.22, 0.42, p)).normalize()); // dusk sweeps over the pole
     const k = 1 - smooth(0.3, 0.55, p); // dark before the pad shows (p 0.45)

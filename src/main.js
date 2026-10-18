@@ -5,6 +5,7 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { GTAOPass } from "three/addons/postprocessing/GTAOPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { BokehPass } from "three/addons/postprocessing/BokehPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import * as catalogModule from "./data/catalog.js";
 import { catalog, presetIds, getPreset, presetToBuild, applyOption } from "./data/catalog.js";
@@ -16,7 +17,7 @@ import { createSilhouette } from "./silhouette.js";
 import { createAnchors } from "./anchors.js";
 import { animate, spring } from "animejs";
 import { SCALE, buildManifest, sceneBounds } from "./layout.js";
-import { createMaterials, createPart, createPad, createStars, setShellOpacity, LOOK } from "./parts.js";
+import { createMaterials, createPart, createPad, createStars, setShellOpacity, setPropLook, LOOK } from "./parts.js";
 import { createChoreographer } from "./choreo.js";
 import { createSfx } from "./fx/sfx.js";
 import { createSelector } from "./ui/select.js";
@@ -147,6 +148,42 @@ function placeShadow(dt, snap) {
   key.position.copy(key.target.position).addScaledVector(KEY_DIR, s.dist);
 }
 
+// Contact shadow: a soft dark blob on the deck under the stack, where the key light's shadow map is too coarse to
+// ground the base. Shown while the bottom part is built; in flight it stays on the pad and fades as the rocket
+// climbs off it (updateContact). Writes no depth, so GTAO and the DoF depth skip it.
+function createContactShadow(radius) {
+  const c = document.createElement("canvas");
+  c.width = c.height = 128;
+  const g = c.getContext("2d");
+  const grd = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  grd.addColorStop(0, "rgba(0,0,0,0.9)");
+  grd.addColorStop(0.4, "rgba(0,0,0,0.5)");
+  grd.addColorStop(1, "rgba(0,0,0,0)");
+  g.fillStyle = grd;
+  g.fillRect(0, 0, 128, 128);
+  const mat = new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false, opacity: 0, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2 * radius, 2 * radius).rotateX(-Math.PI / 2), mat);
+  mesh.name = "contact-shadow";
+  mesh.position.y = 0.002;
+  mesh.renderOrder = 1;
+  mesh.raycast = () => {};
+  return mesh;
+}
+const tmpA = new THREE.Vector3();
+const tmpB = new THREE.Vector3();
+function updateContact(dt) {
+  const c = pad?.contact;
+  if (!c) return;
+  const base = parts[0];
+  let goal = base?.built ? 0.6 : 0;
+  if (goal && choreo.state.launch) {
+    const rise = base.group.getWorldPosition(tmpA).y - pad.group.getWorldPosition(tmpB).y - base.slotY;
+    goal *= 1 - THREE.MathUtils.smoothstep(rise, 0, 2.5 * pad.baseRadius_u);
+  }
+  c.material.opacity += (goal - c.material.opacity) * (1 - Math.exp(-dt / 0.12));
+  c.visible = c.material.opacity > 0.003;
+}
+
 // Everything tuned to the stack size: fog, key-light shadow box, orbit range, pad. The light keeps its
 // direction; only its box follows the preset.
 function applyBounds(b) {
@@ -164,6 +201,8 @@ function applyBounds(b) {
     // so it drops away with it in flight.
     pad.ground = createGroundMap({ y_u: -pad.layout.plinthH - 0.01 });
     pad.group.add(pad.ground.object3d);
+    pad.contact = createContactShadow(b.baseRadius_u * 2.4);
+    pad.group.add(pad.contact);
     root.add(pad.group);
   }
   // Anchors are sized from the stack height too, so they follow every preset/option change. They hang on the
@@ -183,9 +222,9 @@ const choreo = createChoreographer({ parts, scene, root, camera, controls, sfx, 
 
 // ---------- post ----------
 // GTAO skips what writes no depth (holograms, flashes, the pad ring, x-ray shells), so they never darken the
-// stack. It runs at half resolution (the AO is soft anyway) and is a luxury: off while anything animates and
-// for the whole launch (countdown to the held final frame: no AO popping on mid-flight), off on stacks over
-// 230 pieces, and off for the session if frames average over 22 ms (see frame()).
+// stack. It runs at half resolution (the AO is soft anyway) and is on whenever the scene is at rest: off only
+// while something animates (build, swap, explode, scrub, the landing dive) and for the whole launch (countdown to
+// the held final frame: no AO popping on mid-flight). The frame-time guard (see luxuryBudget) can drop it.
 class SolidGTAOPass extends GTAOPass {
   setSize(width, height) {
     super.setSize(Math.max(1, Math.round(width / 2)), Math.max(1, Math.round(height / 2)));
@@ -201,8 +240,31 @@ class SolidGTAOPass extends GTAOPass {
     });
   }
 }
+// Depth of field (design rounds 13 (7), 15 (3)): mild, only where it reads, on a focused part at rest and on the
+// vehicle in flight. three's BokehPass with its depth at half resolution, skipping what writes no depth (glows,
+// holograms, x-ray shells) and the background (the sky stays "far"). The pass is off whenever its aperture has
+// eased to 0 (updateDof); the frame-time guard drops it before GTAO.
+class SoftBokehPass extends BokehPass {
+  setSize(width, height) {
+    super.setSize(width, height);
+    this._renderTargetDepth.setSize(Math.max(1, Math.round(width / 2)), Math.max(1, Math.round(height / 2)));
+  }
+  render(renderer, writeBuffer, readBuffer, deltaTime, maskActive) {
+    const hidden = [];
+    this.scene.traverseVisible((o) => {
+      if (o.material && !Array.isArray(o.material) && o.material.depthWrite === false) hidden.push(o);
+    });
+    for (const o of hidden) o.visible = false;
+    const background = this.scene.background;
+    this.scene.background = null;
+    super.render(renderer, writeBuffer, readBuffer, deltaTime, maskActive);
+    this.scene.background = background;
+    for (const o of hidden) o.visible = true;
+  }
+}
 let composer = null;
 let gtao = null;
+let dof = null;
 if (!lite) {
   composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
@@ -212,6 +274,9 @@ if (!lite) {
   gtao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 6, rings: 2, samples: 16 });
   gtao.blendIntensity = 0.55; // dark shells need little AO
   composer.addPass(gtao);
+  dof = new SoftBokehPass(scene, camera, { focus: 10, aperture: 0, maxblur: 0.004 });
+  dof.enabled = false;
+  composer.addPass(dof);
   composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.36, 0.55, 0.8)); // peach edges glow a touch
   composer.addPass(new OutputPass());
 }
@@ -445,6 +510,7 @@ function switchPreset(step, { built = true } = {}) {
   parts = current.manifest.map(makePart);
   applyBounds(current.bounds);
   choreo.setBounds(current.bounds);
+  setPropLook(pad.group, "painted");
   selector.setParts(parts);
   choreo.rebuild(parts);
   if (built) choreo.appearBuilt();
@@ -458,6 +524,7 @@ function switchPreset(step, { built = true } = {}) {
 function reset() {
   if (current.modified) switchPreset(0, { built: false });
   else choreo.reset();
+  setPropLook(pad.group, "painted"); // new parts arrive painted; the pad and anchors match them
 }
 
 // ---------- launch ----------
@@ -1009,7 +1076,7 @@ addEventListener("keydown", (e) => {
   else if (k === "l") launch();
   else if (k === "c") toggleCompare();
   else if (k === "s") saveCard();
-  else if (k === "x") choreo.toggleLookAll();
+  else if (k === "x") setPropLook(pad.group, choreo.toggleLookAll() === "clear" ? "xray" : "painted"); // pad and anchors follow the build
   else if (k === "p") runStory();
   else if (k === "[") switchPreset(-1);
   else if (k === "]") switchPreset(1);
@@ -1077,23 +1144,50 @@ if (landingMode) startLanding();
 else choreo.home();
 syncUi();
 
-// GTAO budget: frame times are averaged over 2 s windows while it is on; one slow window drops it for the
-// session. The first window after load is skipped (shader compiles and uploads land there).
-const GTAO_MAX_PIECES = 230;
-const perf = { gtaoOk: true, sum: 0, n: 0, windows: 0 };
-const pieceCount = () => parts.reduce((n, p) => n + p.pieces.length, 0);
-function gtaoBudget(rawDt) {
+// Luxury budget (GTAO, DoF): frame times are averaged over 2 s windows while either is on; a slow window drops
+// the DoF for the session if it was on, else GTAO. The first window after load is skipped (shader compiles and
+// uploads land there).
+const perf = { gtaoOk: true, dofOk: true, sum: 0, n: 0, windows: 0, dofSeen: false };
+const animating = () => {
+  const s = choreo.state;
+  return s.busy > 0 || s.auto || s.scrubbing || Boolean(s.launch) || landingOn();
+};
+function luxuryBudget(rawDt) {
   if (!gtao) return;
-  gtao.enabled = perf.gtaoOk && choreo.state.busy === 0 && !choreo.state.launch && !landingOn() && pieceCount() <= GTAO_MAX_PIECES;
-  if (!gtao.enabled) {
+  gtao.enabled = perf.gtaoOk && !animating();
+  if (!gtao.enabled && !dof?.enabled) {
     perf.sum = perf.n = 0;
+    perf.dofSeen = false;
     return;
   }
   perf.sum += rawDt;
   perf.n++;
+  perf.dofSeen ||= Boolean(dof?.enabled);
   if (perf.sum < 2) return;
-  if (perf.windows++ > 0 && perf.sum / perf.n > 0.022) perf.gtaoOk = false;
+  if (perf.windows++ > 0 && perf.sum / perf.n > 0.022) {
+    if (perf.dofSeen) perf.dofOk = false;
+    else perf.gtaoOk = false;
+  }
   perf.sum = perf.n = 0;
+  perf.dofSeen = false;
+}
+// DoF: in on a part focus at rest (the card open) and in flight on the vehicle; out everywhere else. Focus at the
+// orbit target; the aperture puts the full (small) blur at twice the focus distance.
+let dofK = 0;
+function updateDof(dt) {
+  if (!dof) return;
+  const s = choreo.state;
+  const flying = s.launch === "flying" || Boolean(s.ending);
+  const focused = choreo.framing().mode === "focus" && !s.launch && !animating();
+  const want = perf.dofOk && !landingOn() && (flying || focused);
+  dofK += ((want ? 1 : 0) - dofK) * (1 - Math.exp(-dt / 0.15));
+  dof.enabled = dofK > 0.01;
+  if (!dof.enabled) return;
+  const d = camera.position.distanceTo(controls.target);
+  const maxblur = flying ? 0.0025 : 0.004;
+  dof.uniforms.focus.value = d;
+  dof.uniforms.maxblur.value = maxblur;
+  dof.uniforms.aperture.value = (dofK * 0.8 * maxblur) / Math.max(0.5, d);
 }
 
 const band = { near: null, far: null }; // fog band widths, eased
@@ -1107,7 +1201,7 @@ function frame() {
   const rawDt = clock.getDelta();
   const dt = Math.min(rawDt, 0.05);
   const t = clock.elapsedTime;
-  gtaoBudget(rawDt);
+  luxuryBudget(rawDt);
   choreo.update(dt, t);
   landing?.update(dt, t);
   if (!landingOn()) controls.update(); // its polar/distance clamps would bend the dive's path
@@ -1128,6 +1222,8 @@ function frame() {
   scene.fog.near = Math.max(0.1, THREE.MathUtils.lerp(dist - band.near, dist * 0.5, open));
   scene.fog.far = THREE.MathUtils.lerp(dist + band.far, dist * 8, open);
   placeShadow(dt, black);
+  updateContact(dt);
+  updateDof(dt);
   if (cutEl.style.opacity !== String(choreo.state.cut)) cutEl.style.opacity = String(choreo.state.cut);
   if (pad?.ringMat) pad.ringMat.opacity = 0.55 + 0.3 * (0.5 + 0.5 * Math.sin(t * 1.6));
   twin?.sil?.update(camera);

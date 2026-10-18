@@ -80,10 +80,17 @@ for (const c of cases) {
   expect(looked.every((o) => linesOf(o).every((e) => Math.abs(e.material.opacity - e.userData.base0 * (o.userData.paintLineK ?? lineK)) < 1e-9 && o.userData.paintLineK <= lineK)), `${c.id}: painted prop lines`);
   const figure = a.human.getObjectByName("anchor-human-lines");
   expect(a.human.material.visible && figure && !figure.visible, `${c.id}: painted person should be a silhouette`);
+  const markings = pad.group.getObjectByName("pad-markings");
+  const holo = pad.group.getObjectByName("pad-holo-rings");
+  const grid = pad.group.children.find((o) => o.isLineSegments && o.userData.lookOpacity);
+  const groundM = pad.group.getObjectByName("pad-ground");
+  expect(markings?.visible && markings.receiveShadow && !markings.castShadow && !holo.visible, `${c.id}: painted pad should show markings, not the holo rings`);
+  expect(grid && Math.abs(grid.material.opacity - 0.08) < 1e-9 && groundM.material === groundM.userData.looks?.painted, `${c.id}: painted apron and faint grid`);
   const nPaint = draws(...roots);
   for (const root of roots) setPropLook(root, "xray");
   expect(looked.every((o) => o.material === o.userData.looks.xray && linesOf(o).every((e) => Math.abs(e.material.opacity - e.userData.base0) < 1e-9)), `${c.id}: x-ray props`);
   expect(!a.human.material.visible && figure.visible, `${c.id}: x-ray person should be the line figure`);
+  expect(holo.visible && !markings.visible && Math.abs(grid.material.opacity - 0.55) < 1e-9 && groundM.material === groundM.userData.looks.xray, `${c.id}: x-ray pad should show the holo rings, dark ground, 0.55 grid`);
   expect(draws(...roots) === nPaint, `${c.id}: draws ${nPaint} painted vs ${draws(...roots)} x-ray`);
   for (const root of roots) setPropLook(root, "painted");
   expect(looked.every((o) => o.material === o.userData.looks.painted) && !figure.visible, `${c.id}: back to painted`);

@@ -1407,21 +1407,9 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     tmpQ.setFromAxisAngle(Y, (performance.now() - b.t0) * 5e-5); // 0.05 rad/s
     b.planet.object3d.quaternion.copy(camera.quaternion).multiply(backdrop.q).multiply(tmpQ);
   }
-  // Scale a planet as a whole: the mesh, and the lengths its shaders use (UI4's photoreal scattering radius and
-  // scale height, bump relief), which otherwise stay at the built radius.
-  function scalePlanet(planet, s) {
-    planet.object3d.scale.setScalar(s);
-    planet.lengths ??= [];
-    if (!planet.lengths.length) {
-      planet.object3d.traverse((o) => {
-        for (const k of ["uRadius", "uR", "uH"]) {
-          const u = o.material?.uniforms?.[k];
-          if (u && typeof u.value === "number") planet.lengths.push({ u, v0: u.value });
-        }
-      });
-    }
-    for (const { u, v0 } of planet.lengths) u.value = v0 * s;
-  }
+  // Scale a planet as a whole (UI4's setScale keeps its shader lengths, scattering radius and scale height and
+  // bump relief, in step with the mesh).
+  const scalePlanet = (planet, s) => planet.setScale(s);
   function setBackdrop(planet, ms) {
     planet.object3d.visible = true;
     scalePlanet(planet, Math.max(2, E.r * 4.5) / planet.R);

@@ -1786,7 +1786,32 @@ function propTextures() {
     const n = 0.6 * vnoise(u, v * 0.25, 32, 81) + 0.4 * vnoise(u, v, 8, 82);
     return [0.5, 0.82 + 0.36 * (n - 0.5), 1];
   });
-  propTex = { concrete, grain };
+  // Pad paint wear: off-white with dirt (colour) and chips where the deck shows through (alpha in G).
+  const wear = dataTexture(
+    256,
+    256,
+    (u, v) => {
+      const k = 0.92 - 0.16 * Math.max(0, fbm(u, v, 6, 91, 4) - 0.45) - 0.05 * vnoise(u, v, 64, 92);
+      return [k, k * 0.99, k * 0.96];
+    },
+    { srgb: true },
+  );
+  const wearAlpha = dataTexture(256, 256, (u, v) => {
+    const chip = fbm(u, v, 16, 93, 3) * 0.7 + vnoise(u, v, 96, 94) * 0.3;
+    const a = chip > 0.66 ? 0 : 1;
+    return [a, a, a];
+  });
+  // Apron: dark asphalt / concrete, large soft stains over a fine grain (colour, sRGB).
+  const apron = dataTexture(
+    512,
+    512,
+    (u, v) => {
+      const k = 0.8 + 0.28 * (fbm(u, v, 4, 101, 4) - 0.5) + 0.1 * (vnoise(u, v, 256, 102) - 0.5);
+      return [k, k, k * 1.02];
+    },
+    { srgb: true },
+  );
+  propTex = { concrete, grain, wear, wearAlpha, apron };
   return propTex;
 }
 // A texture clone with its own repeat (shares the pixels).
@@ -1835,6 +1860,9 @@ function propPaintMaterials() {
     galv: std({ color: 0x5b5f64, metalness: 0.65, roughness: 0.5, roughnessMap: t.grain }),
     galvShaded: std({ color: 0x5b5f64, vertexColors: true, metalness: 0.65, roughness: 0.5, roughnessMap: t.grain }),
     person: std({ color: 0x16181c, roughness: 0.85 }),
+    // Pad markings: matte white paint, worn (chips cut out by alpha test), drawn over the deck.
+    marking: std({ color: 0xe9e7e1, roughness: 0.88, map: t.wear, alphaMap: t.wearAlpha, alphaTest: 0.5, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
+    apron: std({ color: 0x2c2d30, roughness: 0.96, map: t.apron }),
   };
   return propPaint;
 }
@@ -1860,8 +1888,9 @@ export function paintProp(mesh, key, { repeat = null, scorch = null, lineK = PRO
   return painted;
 }
 // Switches every prop under root (pad, anchors) between "painted" (default) and "xray": material twins,
-// edge lines (0.15 vs 0.35 level), and line-art that exists only in one look (userData.lookOnly). Props follow
-// the builder: x-ray only while the whole build is in the clear look.
+// edge lines (0.15 vs 0.35 level), objects that exist only in one look (userData.lookOnly: the holo rings vs
+// the pad markings, the person's line figure) and per-look opacities (userData.lookOpacity: the polar grid).
+// Props follow the builder: x-ray only while the whole build is in the clear look.
 export function setPropLook(root, look = "painted") {
   const paint = look !== "xray";
   root.traverse((o) => {
@@ -1875,6 +1904,8 @@ export function setPropLook(root, look = "painted") {
       }
     }
     if (o.userData.lookOnly) o.visible = o.userData.lookOnly === (paint ? "painted" : "xray");
+    const op = o.userData.lookOpacity;
+    if (op && o.material) o.material.opacity = paint ? op.painted : op.xray;
   });
 }
 // Disposes both looks of every mesh under root (geometry and the material in use are the caller's).
@@ -1886,7 +1917,7 @@ export function disposeLooks(root) {
 
 // Launch pad as a structure, painted by default (concrete deck and plinth, scorched trench, dark steel mount,
 // clamps and rails; see paintProp / setPropLook), x-ray in the clear look (dark see-through deck and plinth,
-// opaque steel inside, peach edges):
+// opaque steel inside, peach edges, the blue holo rings):
 // a raised hardstand with a deck of 8 plates (expansion joints between them) around an opening over the flame
 // trench; the trench as a recessed channel with side and back walls and a deflector wedge under the engines,
 // exiting through the plinth wall; the launch-mount ring with struts; four hold-down clamps with bolt rings;
@@ -1999,27 +2030,62 @@ export function createPad({ baseRadius_u = 1, cameraAzimuth = 0.58 } = {}) {
   for (let x = r1 + 0.15; x < r2; x += 0.3) rails.push(box(0.05, 0.012, gauge + 0.15, x, -P + 0.006, 0));
   add(merge(rails), mats.steelDark, { ry: railPhi - Math.PI / 2, name: "pad-rails", paint: { key: "galv" } });
 
-  // Holo rings on the deck (main pulses ringMat), ground and grid at the foot of the hardstand.
+  // Holo rings on the deck (main pulses ringMat), x-ray look; one mesh for both rings.
   const ringMat = new THREE.MeshBasicMaterial({ color: COLORS.holo, transparent: true, opacity: 0.85 });
-  const ring1 = new THREE.Mesh(new THREE.TorusGeometry(padR * 0.8, 0.022, 8, 160), ringMat);
-  ring1.rotation.x = Math.PI / 2;
-  ring1.position.y = 0.012;
-  const ring2 = new THREE.Mesh(new THREE.TorusGeometry(b * 1.45 + 0.1 * b, 0.014, 8, 120), ringMat);
-  ring2.rotation.x = Math.PI / 2;
-  ring2.position.y = 0.012;
-  g.add(ring1, ring2);
+  const ringO = padR * 0.8;
+  const ringI = b * 1.45 + 0.1 * b;
+  const rings = new THREE.Mesh(merge([new THREE.TorusGeometry(ringO, 0.022, 8, 160), new THREE.TorusGeometry(ringI, 0.014, 8, 120)]).rotateX(Math.PI / 2).translate(0, 0.012, 0), ringMat);
+  rings.name = "pad-holo-rings";
+  rings.raycast = () => {};
+  g.add(rings);
+  // Painted look: the same circles as worn white deck paint (a wide outer circle, a thin inner ring) and a
+  // T-shaped position mark outboard of each hold-down clamp; flat on the deck, receiving shadows.
+  if (XRAY) {
+    rings.userData.lookOnly = "xray";
+    rings.visible = false;
+    const wO = 0.3 * S;
+    const wI = 0.1 * S;
+    const marks = [new THREE.RingGeometry(ringO - wO / 2, ringO + wO / 2, 160), new THREE.RingGeometry(ringI - wI / 2, ringI + wI / 2, 120)];
+    for (let k = 0; k < 4; k++) {
+      const a = (k * TAU) / 4; // the clamps' layout azimuths
+      const ra = mountR * 1.7;
+      const rb = Math.min(mountR * 2.3, ringO - wO);
+      const stem = new THREE.PlaneGeometry(rb - ra, wO * 0.8).translate((ra + rb) / 2, 0, 0);
+      const bar = new THREE.PlaneGeometry(wO * 0.8, (rb - ra) * 0.6).translate(rb, 0, 0);
+      marks.push(stem.rotateZ(a), bar.rotateZ(a));
+    }
+    const mg = merge(marks.map((m) => (m.deleteAttribute("uv"), m))).rotateX(-Math.PI / 2);
+    // Planar UVs in units, so the wear texture is continuous across circles and marks (one tile per 4 m).
+    const mp = mg.attributes.position;
+    const muv = new Float32Array(mp.count * 2);
+    for (let i = 0; i < mp.count; i++) muv.set([mp.getX(i) / (4 * S), mp.getZ(i) / (4 * S)], i * 2);
+    mg.setAttribute("uv", new THREE.BufferAttribute(muv, 2));
+    const markings = new THREE.Mesh(mg.translate(0, 0.004, 0), cloneMat(propPaintMaterials().marking));
+    markings.name = "pad-markings";
+    markings.userData.lookOnly = "painted";
+    markings.receiveShadow = true;
+    markings.raycast = () => {};
+    g.add(markings);
+  }
 
-  const ground = new THREE.Mesh(new THREE.CircleGeometry(40, 64), new THREE.MeshStandardMaterial({ color: 0x0c0e14, metalness: 0.2, roughness: 0.95 }));
+  // Ground at the foot of the hardstand: dark in x-ray; painted, an asphalt / concrete apron (stains on an
+  // 80 m tile) so the pad stands on something; fog still fades it out.
+  const groundR = 40;
+  const ground = new THREE.Mesh(new THREE.CircleGeometry(groundR, 64), new THREE.MeshStandardMaterial({ color: 0x0c0e14, metalness: 0.2, roughness: 0.95 }));
   ground.rotation.x = -Math.PI / 2;
   ground.position.y = -P;
   ground.receiveShadow = true;
   ground.raycast = () => {};
+  ground.name = "pad-ground";
+  paintProp(ground, "apron", { repeat: [(2 * groundR) / (80 * S)] }); // disc UVs span its diameter
   g.add(ground);
 
+  // Polar grid: 0.55 in x-ray, a faint 0.08 over the painted apron.
   const grid = new THREE.PolarGridHelper(Math.max(14, padR * 3), 16, 8, 96, 0x2a3140, 0x1a1f2a);
   grid.position.y = -P + 0.01;
   grid.material.transparent = true;
-  grid.material.opacity = 0.55;
+  grid.userData.lookOpacity = { painted: 0.08, xray: 0.55 };
+  grid.material.opacity = XRAY ? 0.08 : 0.55;
   g.add(grid);
 
   return { group: g, ringMat, layout: L };
