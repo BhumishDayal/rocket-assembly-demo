@@ -8,11 +8,14 @@
 //   sanity   no NaN in any geometry, instance matrix or point set (also after update(t) and at every RSS angle);
 //            nothing pickable; fog on every material; shadows only from the FSS (+ beams, arms, RSS), the water
 //            tower and the buildings; nothing of the complex inside the pad plinth; arms stop at the vehicle; the RSS
-//            clears the vehicle, the deck and the FSS at every angle 0–120°; lightning towers stand off the
+//            clears the vehicle, the deck and the FSS at every angle 0–120°; nothing but the arms over the deck in
+//            the flight path (crane jib parked away); lightning towers stand off the
 //            hardstand and clear of the director's low pad-camera ray.
 //   looks    painted by default, setPropLook / setLook switch to x-ray and back (material twins, line levels).
 //   pad      added under the pad group it hides the pad's ground disc + polar grid and sinks the ground map under
 //            the apron; setVisible(false) / dispose() restore them.
+//   lights   night floodlights by default, dimmed by a lightingSun above the horizon; 2 SpotLights (no shadows)
+//            unless spotLights: false.
 // Run: node scripts/check-complex.mjs   (no deps; exits 1 on any failure)
 import { registerHooks } from "node:module";
 
@@ -203,6 +206,18 @@ for (const c of cases) {
   }
   expect(cx.setRssAngle(-5) === 0 && cx.setRssAngle(500) === 120 && cx.rssAngle === 120, `${c.id}: setRssAngle clamps to 0–120`);
   cx.setRssAngle(0);
+  // the flight path (and a landing back on the pad) is clear: nothing but the arms above the deck within the
+  // widest vehicle radius + 1 m, with the RSS parked
+  const pathR = Math.max(c.baseRadius_u, ...(c.manifest ?? []).map((s) => s.radius)) + 0.25;
+  let inPath = null;
+  cx.object3d.traverse((o) => {
+    if (inPath || !(o.isMesh || o.isLine || o.isPoints) || cx.arms.some((a) => a.mesh === o || a.mesh === o.parent)) return;
+    if (o.name === "complex-light-beams") return; // additive light volumes, not solid
+    eachVertex(o, (p) => {
+      if (!inPath && p.y > 0.05 && Math.hypot(p.x, p.z) < pathR) inPath = `${o.name || o.parent?.name} at (${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)})`;
+    });
+  });
+  expect(!inPath, `${c.id}: in the flight path: ${inPath}`);
   // lightning towers: off the hardstand, clear of the director's pad camera (choreo.js padCamPose)
   const phiT = Math.atan2(cx.tower.position.x, cx.tower.position.z);
   const opts = [phiT - 1.15, phiT + 1.15];
@@ -250,6 +265,19 @@ const apronW = (cx) => {
 };
 expect(near(rise(s2), 2 * rise(a)) && near(apronW(s2), 2 * apronW(a), 0.02), `metric sizes do not scale with \`scale\` (rise ${rise(a).toFixed(3)} → ${rise(s2).toFixed(3)})`);
 for (const cx of [a, b2, s2]) cx.dispose();
+
+// lightingSun: night by default; a sun above the horizon dims the floodlights; a light (position − target) works.
+// spotLights: two warm SpotLights by default, none on request.
+const glow = (cx) => cx.object3d.getObjectByName("complex-glow-core").material.opacity;
+const night = createLaunchComplex(base);
+const day = createLaunchComplex({ ...base, lightingSun: new THREE.Vector3(0.3, 1, 0.2) });
+const sunLight = new THREE.DirectionalLight();
+sunLight.position.set(1, -0.5, 0); // below the horizon
+const viaLight = createLaunchComplex({ ...base, lightingSun: sunLight });
+const noSpots = createLaunchComplex({ ...base, spotLights: false });
+expect(glow(day) < glow(night) && glow(viaLight) === glow(night), "lightingSun: a day sun should dim the floodlights, a night light should not");
+expect(night.lights.length === 2 && night.lights.every((l) => l.isSpotLight && !l.castShadow) && noSpots.lights.length === 0, "spot lights: two (no shadows) by default, none with spotLights: false");
+for (const cx of [night, day, viaLight, noSpots]) cx.dispose();
 
 // Timing (informative; the first call also builds the shared textures).
 const tm = cases[0];

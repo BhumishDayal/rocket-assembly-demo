@@ -6,11 +6,12 @@
     /scripts/complex-harness.html?view=wide      the whole complex from high up
     /scripts/complex-harness.html?view=pad       the director's low pad camera
     /scripts/complex-harness.html?view=top       plan view (layout debugging)
-  Params: build (preset id, default falcon-9), look (painted | xray), spots (1 | 0: the two SpotLights), complex (0: leave the
-  complex out, a baseline for __perf), hide (comma-separated object names to hide, perf bisection), rss (deg,
-  0 parked … 120 mated), gtao (1 | 0), lite (1: no post), az / el / dist (override the camera), t (seconds for
-  the beacons), dpr (pixel ratio; 2 stresses the GPU for __perf comparisons). Scene set-up mirrors src/main.js: renderer, exposure, key / fill / hemisphere lights, room
-  environment, key-light shadow box from the stack, stars, GTAO + bloom; the pad from createPad, the stack from
+  Params: build (preset id, default falcon-9), look (painted | xray), spots (1 | 0: the two SpotLights),
+  complex (0: leave the complex out, a baseline for __perf), hide (comma-separated object names to hide, perf
+  bisection), rss (deg, 0 parked … 120 mated), gtao (1 | 0), lite (1: no post), az / el / dist (override the
+  camera), t (seconds for the beacons), dpr (pixel ratio; 2+ stresses the GPU for __perf comparisons).
+  Scene set-up mirrors src/main.js: renderer, exposure, key / fill / hemisphere lights, room environment,
+  key-light shadow box from the stack, stars, half-res GTAO + bloom; the pad from createPad, the stack from
   createPart (painted), the line-art ground map, and the complex added under the pad group. The fog band is
   complex.fogRange(dist) (main.js's builder band would hide the complex; see the module header).
   window.__ready is set after ~45 frames; window.__perf(frames) resolves to { ms, fps, calls, triangles }.

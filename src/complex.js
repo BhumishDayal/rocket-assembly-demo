@@ -1,61 +1,72 @@
 // Launch complex around the pad (Kennedy LC-39 style, generic: no logos, no text). Supersedes anchors.js
 // visually and keeps its API shape so the integrator can swap one for the other.
 //
-//   createLaunchComplex({ baseRadius_u, stackHeight_u, scale, manifest, lightingSun, cameraAzimuth?, spotLights?, pad? })
-//     -> { object3d, setVisible(bool), update(t), setLook("painted" | "xray"), setRssAngle(deg),
-//          tower, arms, person, human, masts, waterTower, rss, towerFrame, towerHeight_u, lamps, cableTray, trench,
-//          hardstand, apron, lights, groundY_u, hardstandY_u, radius_u, fogRange(cameraDistance), adoptPad(pad),
-//          dispose() }
+//   createLaunchComplex({ baseRadius_u, stackHeight_u, scale = SCALE, manifest, lightingSun,
+//                         cameraAzimuth = 0.58, spotLights = true, pad = null })
+//     -> { object3d, setVisible(bool), update(t), setLook("painted" | "xray"), setRssAngle(deg), dispose(),
+//          tower, arms, person (= human), masts, waterTower, rss, towerFrame, towerHeight_u, lamps, lights,
+//          cableTray, trench, hardstand, apron, groundY_u, hardstandY_u, radius_u, height_u, rssAngle, rssMaxDeg,
+//          rssInfo, fogRange(cameraDistance), adoptPad(padOrGroup) }
+//   Same arguments as createAnchors (scale: units per metre; manifest: layout.js PartSpecs for the arm heights and
+//   the vehicle's radius; lightingSun: Vector3 toward the sun or a light (position − target), default night).
 //
 // What it builds (1 scene unit = 4 m at SCALE 0.25; m() below turns metres into units):
-//   (1) fixed service structure (FSS, `tower`): square red-oxide lattice, 1.15 × the stack height, 10-14 levels of
-//       crossbeams (one InstancedMesh) with grating floors, 9 columns, X-bracing, a clad elevator shaft, stairs,
-//       vertical propellant lines and a hammerhead crane with its antenna on top. It stands on the hardstand at the
-//       anchors.js azimuth family (left of the home view) with its local +X pointing away from the rocket, origin at
-//       deck level, like anchors.js. Umbilical `arms` = one per stage joint (interstage middle) and the payload
+//   (1) fixed service structure (FSS, `tower`, a Group): square red-oxide lattice, 1.15 × the stack height, 10–14
+//       levels of crossbeams (one InstancedMesh) with grating floors, 9 columns, X/K bracing, a clad elevator shaft,
+//       stairs, propellant lines up its outer face and a hammerhead crane (jib parked pointing away from the
+//       rocket: nothing over the flight path) with an antenna on top. It stands on the
+//       hardstand left of the home view and 24° behind (anchors.js stood 20° behind), local +x pointing away from
+//       the rocket, origin at deck level. Umbilical `arms` = one per stage joint (interstage middle) and the payload
 //       adapter, each { mesh, y_u, reach_u, partId } with the mesh origin on its hinge at the tower face, so the
-//       director swings them with mesh.rotation.y (as with anchors.js).
-//   (2) rotating service structure (RSS, `rss`, a Group child of `tower`): hinged at the FSS base on the side away
-//       from the camera; setRssAngle(deg), 0 = parked (default, behind the FSS) … 120 = mated against the vehicle
-//       (its inner face then clears the widest part over its span). Clear of the arms' ±70° swing when parked.
-//   (3) water tower (sound suppression) 1.5 × the FSS height from the pad axis, its roof at 0.85 × the FSS height,
-//       with a down pipe along the apron, up the hardstand and into the pad's plinth wall.
-//   (4) four lightning towers at the hardstand corners, tops at 1.3 × the stack height, with sagging catenary wires
-//       between their tops and down to ground anchors (LineSegments).
-//   (5) the hardstand: a raised concrete platform (top at y = −plinthH, the pad's own ground level, so the
-//       existing createPad deck stays at y = 0 with its padRadius) rising 13 m above the apron, grass slopes, a
-//       crawlerway ramp leaving behind the pad (gravel lanes, grass median, the pad's rails continued down it).
+//       director swings them with mesh.rotation.y as before.
+//   (2) rotating service structure (RSS, `rss`, a Group child of `tower`, hinged just outboard of the FSS's back
+//       corner): setRssAngle(deg) 0 = parked (default; behind the FSS from the home view) … 120 = mated (its open
+//       side then passes the widest part over its span with a 1 m gap). A solver widens the hinge offset until the
+//       body clears the FSS at every angle, the arms' swing when parked and the arms at rest when mated; its support
+//       column stays off the pad deck (rssInfo reports the result).
+//   (3) water tower (sound suppression) 1.5 × the FSS height from the pad axis (never on the hardstand for very
+//       short stacks), roof at 0.85 × the FSS height, with a down pipe along the apron, up the hardstand slope,
+//       up the plinth wall and onto the deck edge.
+//   (4) four lightning towers near the hardstand corners, tops at 1.3 × the stack height, with sagging catenary
+//       wires between the tops and down to ground anchors (LineSegments). Kept clear of the director's low pad
+//       camera ray (choreo.js padCamPose: tower azimuth ± 1.15 rad).
+//   (5) the hardstand: a raised concrete platform whose top is the pad's own ground level (y = −plinthH), so the
+//       createPad deck stays at y = 0 with its padRadius; 13 m above the apron, grass slopes, a crawlerway ramp
+//       leaving behind the pad (gravel lanes, grass median, the pad's rails continued down it).
 //   (6) the flame trench extended from the pad's plinth exit: a channel cut through the hardstand down to grade,
-//       flared wing walls, an exit deflector, scorch on the channel, the hardstand edge and a fan on the apron.
+//       flared wing walls, an exit deflector; scorch on the channel, along the hardstand edge and fanning out on
+//       the apron (shader).
 //   (7) propellant farm: two horizontal tanks and two spheres behind an earth berm, a pipe rack (instanced bents)
 //       to the hardstand and up to the FSS.
-//   (8) floodlight banks on the lightning towers and the FSS (instanced lamp heads with lit faces, glow sprites as
-//       Points, faint additive beams), red obstruction beacons that blink, and up to 2 warm SpotLights (spotLights:
-//       true; no shadows). Night by default; a lightingSun above the horizon dims them.
+//   (8) floodlight banks on the lightning towers and the FSS (instanced lamp heads with lit lenses, glow sprites as
+//       Points, faint additive beams), blinking red obstruction beacons, and 2 warm SpotLights (no shadows;
+//       spotLights: false for none). A lightingSun above the horizon dims all of it.
 //   (9) perimeter fence (instanced posts + wire lines), light poles (instanced), service buildings (boxes with roof
-//       lines, lit windows: an integration hangar at the foot of the ramp, a pad terminal room, a pump house, a
-//       guard house, farm shelters).
-//  (10) the apron: a 1.5 km plane with a faint concrete texture, macro stains, darkening away from the pad and
-//       warm light pools under the floodlights (one shader hook shared by the ground pieces), fog on.
+//       lines, lit windows): an integration hangar at the foot of the ramp, a pad terminal room, a generator shed,
+//       a pump house, a guard house, a farm shelter.
+//  (10) the apron: a 1.5 km plane with a faint concrete texture, macro stains, darkening away from the pad (night:
+//       only the pad is lit) and warm light pools under the floodlights, fog on. The structures share the same
+//       night falloff (shader hooks on the painted materials).
 //   Plus the 1.8 m person on the deck (as anchors.js) for scale.
 //
-// Looks: painted PBR by default (vertex-coloured steel and cladding, textured concrete/gravel, faint peach edge
-// lines: 0.15 on solid structures, 0.07 on dense lattices) and the x-ray look (dark steel, dark ground, peach lines
-// at 0.35) through mesh.userData.looks twins, so parts.js setPropLook(root, look) switches it like the pad;
-// setLook(look) does that plus the lights. Same draw count in both looks.
-// Draws: ~40 (Falcon 9, 2 arms; ≤ 110 for every preset, see scripts/check-complex.mjs). Shadows: only the FSS (+
-// beams, arms, RSS), the water tower and the buildings cast; the ground pieces receive. Nothing is pickable
-// (raycast no-op, userData.nonPickable = true). Every material has fog on.
+// Looks: painted PBR by default (vertex-coloured steel and cladding, textured concrete / gravel, faint peach edge
+// lines at 0.15 on solid structures and 0.07 on dense lattices) and the x-ray look (dark steel, dark ground, peach
+// lines at 0.35, lattices 0.18) through mesh.userData.looks twins, so parts.js setPropLook(root, look) switches it
+// like the pad; setLook(look) does that and dims the lights. Same draw count in both looks.
+// Budget: 34 draws (Falcon 9, 2 arms) to 36 (Saturn V, 3 arms), ≤ 110 for every preset; rebuild ~3 ms (node).
+// Shadows: only the FSS (+ crossbeams, arms, RSS), the water tower and the buildings cast; the hardstand, trench
+// and roads receive (the apron does not: it is matte Lambert for fill cost). Nothing is pickable (raycast no-op,
+// userData.nonPickable = true). Every material has fog on. See scripts/check-complex.mjs and complex-harness.html.
 //
 // Integration notes (main.js is not touched here):
 //   - Add object3d under the pad group (as anchors.js). On "added" to a parent named "pad" the complex adopts it:
 //     it hides the pad's own ground disc ("pad-ground") and polar grid (they would float above the lowered apron
-//     and z-fight with the hardstand top) and lowers an "fx-ground-map" sibling to just under the apron. dispose()
-//     and setVisible(false) restore them. adoptPad(padOrGroup) does the same explicitly.
-//   - The builder's fog band (main.js: dist ± a few stack radii) hides everything past the pad; fogRange(dist)
-//     returns a band that shows the complex ({ near, far }, scene units).
-//   - The FSS is a fixed structure: drive the arms (mesh.rotation.y) but not tower.rotation.z (the anchors.js
-//     strongback lean would tip the whole FSS).
+//     and z-fight with the hardstand top) and sinks an "fx-ground-map" sibling under the apron. dispose() and
+//     setVisible(false) restore them; adoptPad(padOrGroup) does the same explicitly.
+//   - The builder's fog band (main.js: dist − 0.6 R … dist + 6 R, R = stack radius) blacks out everything a few
+//     units past the rocket; fogRange(dist) returns a band that shows the complex ({ near, far }, scene units).
+//   - The FSS is fixed: drive the arms (mesh.rotation.y), not tower.rotation.z (the anchors.js strongback lean
+//     would tip the whole FSS). tower.visible = false hides the FSS, arms and RSS; setVisible(false) hides all.
 // Sizes are visual proportions (named constants below) or real-world orders of magnitude for a generic pad; none
 // is shown on screen as a fact.
 import * as THREE from "three";
@@ -78,7 +89,6 @@ const RAMP_GRADE = 0.075; // crawlerway ramp
 const APRON_M = 1500;
 const RSS_SPAN = [0.45, 0.92]; // RSS body, share of the stack height
 const RSS_MAX_DEG = 120;
-const ARM_SWING_DEG = 70; // the director's arm swing (choreo.js), kept clear of the parked RSS
 
 const TAU = Math.PI * 2;
 const DEG = Math.PI / 180;
@@ -890,8 +900,8 @@ export function createLaunchComplex({
   const arms0 = armSpecs(manifest, sc);
   const maxReach = Math.max(m(6), ...arms0.map((a) => Math.max(0.05, dT - hw - a.r - 0.03)));
   // Hinge just outboard of the FSS's back corner (local +x out, +z away from the home camera), so the parked
-  // RSS hides behind the FSS from the home view; the gap grows until the body clears the FSS at every angle, the arms' ±70° swing
-  // when parked and the arms at rest when mated.
+  // RSS hides behind the FSS from the home view; the gap grows until the body clears the FSS at every angle,
+  // the arms' swing discs (any yaw, covers the director's ±70°) when parked and the arms at rest when mated.
   let gapR = m(1.5);
   const hinge = { x: hw + 0.7 * hwR, z: 0 };
   const armH = Math.max(m(2.6), 0.024 * tH);
@@ -933,15 +943,15 @@ export function createLaunchComplex({
   };
   const armsInSpan = arms0.filter((a) => a.y + armH > yR0 && a.y - armH < yR1);
   const rssClear = () => {
-    const pad = m(1);
+    const margin = m(1);
     for (let k = 0; k <= 12; k++) {
       const th = rss.thM + ((rss.thP - rss.thM) * k) / 12;
       for (const [x, z] of bodyPts(th)) {
-        if (Math.abs(x) < hw + pad && Math.abs(z) < hw + pad) return false; // into the FSS
-        if (k === 0) for (const a of armsInSpan) if (x < -hw && x > -dT + a.r && Math.abs(z) < armW / 2 + pad) return false; // mated: over an arm
+        if (Math.abs(x) < hw + margin && Math.abs(z) < hw + margin) return false; // into the FSS
+        if (k === 0) for (const a of armsInSpan) if (x < -hw && x > -dT + a.r && Math.abs(z) < armW / 2 + margin) return false; // mated: over an arm
       }
     }
-    for (const [x, z] of bodyPts(rss.thP)) if (Math.hypot(x + hw, z) < maxReach + pad) return false; // parked: in an arm's swing
+    for (const [x, z] of bodyPts(rss.thP)) if (Math.hypot(x + hw, z) < maxReach + margin) return false; // parked: in an arm's swing
     return true;
   };
   solveRss();
@@ -1056,7 +1066,7 @@ export function createLaunchComplex({
   const WT = [dW * Math.cos(wAng), dW * Math.sin(wAng)];
   const farmHalfX = m(46);
   const farmHalfZ = m(34);
-  const farm = [-(xL + HS + m(84) + farmHalfX * 0), -(zB + HS + m(14))]; // berm (outer slope ~10 m) clear of the back-left tower
+  const farm = [-(xL + HS + m(84)), -(zB + HS + m(14))]; // its berm (outer slope ~10 m) stays clear of the back-left tower
   const hangar = { x: rampHalf + m(34) + m(24), z: -(zB + rampLen + m(30)), w: m(48), d: m(84), h: m(26) };
 
   // Ground uniforms shared by every ground material of this complex.
@@ -1164,7 +1174,7 @@ export function createLaunchComplex({
     const k3 = v3(xE + kL, groundY + kH, -kw);
     quadUp(tr, k0, k3, k2, k1, C.saddle);
     tr.loop([k0, k1, k2, k3]);
-    tr.quad(v3(xE + kL, groundY, -kw), v3(xE + kL, groundY, kw), k2, k3, C.trench); // back face
+    tr.quad(v3(xE + kL, groundY, kw), v3(xE + kL, groundY, -kw), k3, k2, C.trench); // back face (+x)
     tr.tri(v3(xE, groundY, kw), v3(xE + kL, groundY, kw), k2, C.trench); // cheeks
     tr.tri(v3(xE + kL, groundY, -kw), v3(xE, groundY, -kw), k3, C.trench);
   }
@@ -1307,26 +1317,28 @@ export function createLaunchComplex({
   // Propellant / pneumatic lines up the outer face to the top arm level.
   const topArmY = Math.max(lvY(2), ...arms0.map((a) => a.y));
   for (const [i, z] of [-hw * 0.55, -hw * 0.38, -hw * 0.22].entries()) fssB.cyl(v3(hw + cw, topY, z), v3(hw + cw, topArmY, z), m(0.28 - i * 0.05), m(0.28 - i * 0.05), 8, C.pipe, { caps: false });
-  // Hammerhead crane: slewing deck, mast, jib over the rocket, counter-jib, counterweight, cab, hook.
+  // Hammerhead crane: slewing deck, mast, main jib parked pointing away from the rocket (nothing over the flight
+  // path, launch or a landing back on the pad), short counter-jib with its counterweight, cab, hook.
   const cBase = tH;
   fssB.aabb(0, cBase + m(0.5), 0, wF * 0.7, m(1), wF * 0.7, C.deck);
   const mastH = m(10);
   fssB.aabb(0, cBase + m(1) + mastH / 2, 0, m(3), mastH, m(3), C.crane);
   const jibY = cBase + m(1) + mastH;
-  const jibL = dT + m(6);
+  const jibL = m(30);
   const jibB = m(1.6);
-  for (const z of [-jibB / 2, jibB / 2]) fssB.strut(v3(m(1.5), jibY + jibB, z), v3(-jibL, jibY + jibB * 0.7, z), m(0.35), m(0.35), C.crane);
-  fssB.strut(v3(m(1.5), jibY, 0), v3(-jibL, jibY + jibB * 0.15, 0), m(0.4), m(0.4), C.crane);
+  const jib0 = -m(1.5);
+  for (const z of [-jibB / 2, jibB / 2]) fssB.strut(v3(jib0, jibY + jibB, z), v3(jibL, jibY + jibB * 0.7, z), m(0.35), m(0.35), C.crane);
+  fssB.strut(v3(jib0, jibY, 0), v3(jibL, jibY + jibB * 0.15, 0), m(0.4), m(0.4), C.crane);
   for (let i = 0; i < 10; i++) {
-    const xa = m(1.5) - ((jibL + m(1.5)) * i) / 10;
-    const xb = m(1.5) - ((jibL + m(1.5)) * (i + 1)) / 10;
+    const xa = jib0 + ((jibL - jib0) * i) / 10;
+    const xb = jib0 + ((jibL - jib0) * (i + 1)) / 10;
     for (const z of [-jibB / 2, jibB / 2]) fssB.strut(v3(xa, jibY + jibB * (1 - 0.3 * (i / 10)), z), v3(xb, jibY + jibB * 0.08, z * 0.2), m(0.18), m(0.18), C.crane, null, false);
   }
-  const cjL = 0.38 * jibL;
-  fssB.aabb(cjL / 2, jibY + jibB / 2, 0, cjL, jibB * 0.8, jibB, C.crane);
-  fssB.aabb(cjL - m(2.5), jibY - m(1), 0, m(5), m(4), jibB * 1.6, C.counterweight);
+  const cjL = m(8); // toward the rocket, ending well clear of its axis
+  fssB.aabb(-cjL / 2, jibY + jibB / 2, 0, cjL, jibB * 0.8, jibB, C.crane);
+  fssB.aabb(-cjL + m(2), jibY - m(1), 0, m(4), m(4), jibB * 1.6, C.counterweight);
   fssB.aabb(m(2.6), jibY - m(1.2), m(1.4), m(2.2), m(2.2), m(2), C.crane);
-  const hookX = -jibL * 0.82;
+  const hookX = jibL * 0.72;
   fssB.strut(v3(hookX, jibY, 0), v3(hookX, jibY - m(14), 0), m(0.08), m(0.08), C.deck, v3(1, 0, 0), false);
   fssB.aabb(hookX, jibY - m(14.8), 0, m(1), m(1.6), m(0.8), C.counterweight);
   // Antenna mast on the crane mast (beacon on top).
@@ -1541,9 +1553,11 @@ export function createLaunchComplex({
     if (pointInPoly(foot.x, foot.z, footPoly)) break;
   }
   const topEdge = foot.clone().addScaledVector(dirToPad, HS + m(1)).setY(topY + pipeR + m(0.2));
-  const enterR = padR + m(0.2);
+  const enterR = padR + pipeR * 1.25 + m(0.15); // the riser stands just off the plinth wall
   const end = dirToPad.clone().multiplyScalar(-enterR).setY(topY + pipeR + m(0.2));
-  const pipePts = [start, foot, topEdge, end];
+  const riser = end.clone().setY(pipeR + m(0.1)); // up the plinth wall to the deck
+  const header = dirToPad.clone().multiplyScalar(-(padR - m(2.5))).setY(pipeR + m(0.1)); // onto the deck edge
+  const pipePts = [start, foot, topEdge, end, riser, header];
   for (let i = 0; i < pipePts.length - 1; i++) wB.cyl(pipePts[i], pipePts[i + 1], pipeR, pipeR, 12, C.waterPipe, { caps: false, lines: true });
   for (const p of pipePts.slice(1, -1)) wB.sphere(p, pipeR * 1.18, C.waterPipe, 12, 8);
   // pipe saddles every ~12 m on the apron run
@@ -2006,7 +2020,7 @@ export function createLaunchComplex({
   site.add(beamsLit);
   // Beacons: red obstruction lights on the tower tops, the FSS antenna, the crane jib tip and the water tower.
   const [antX, antZ] = towerToSite(0, 0);
-  const [jibX, jibZ] = towerToSite(-jibL, 0);
+  const [jibX, jibZ] = towerToSite(jibL, 0);
   const beaconPts = [...mastTops.map((p) => p.clone().add(v3(0, m(0.6), 0))), v3(antX, antTop + m(0.5), antZ), v3(jibX, jibY + jibB + m(0.4), jibZ), v3(wc.x, wTop + m(0.6), wc.z)];
   const beaconGeo = new THREE.BufferGeometry().setFromPoints(beaconPts);
   beaconGeo.setAttribute("color", new THREE.Float32BufferAttribute(new Float32Array(beaconPts.length * 3).fill(1), 3));
@@ -2183,8 +2197,6 @@ function quadUp(B, a, b, c, d, color, lines = false) {
 }
 // Quad tA, tB (top edge) → gB, gA (ground edge) facing away from the hardstand.
 function quadOut(B, tA, tB, gB, gA, color) {
-  const ux = tB.x - tA.x;
-  const uz = tB.z - tA.z;
   const ox = (gA.x + gB.x) / 2 - (tA.x + tB.x) / 2;
   const oz = (gA.z + gB.z) / 2 - (tA.z + tB.z) / 2;
   // normal of (tA → gA → gB → tB) = (gA − tA) × (tB − tA); we want it along the outward offset
@@ -2198,8 +2210,6 @@ function quadOut(B, tA, tB, gB, gA, color) {
     const nz = (b.x - a.x) * (d.y - a.y) - (b.y - a.y) * (d.x - a.x);
     return nx * ox + nz * oz;
   };
-  void ux;
-  void uz;
   const q = n(q1) > 0 ? q1 : q2;
   return B.quad(q[0], q[1], q[2], q[3], color);
 }
