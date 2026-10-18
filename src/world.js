@@ -7,7 +7,16 @@
 //     layer, same direction), setViewer({ body, pos_km, quaternion | camera, frame? }), setDestination(body,
 //     pos_km_fromEarth), landingSite(body), skyAt(body, alt_km), surfaceColourAt(body, lat, lon), isOceanAt(lat,
 //     lon), atmosphereLimb(body), createLocalGround({ body, pos_km, size_km }), cloudDeck(body, alt_km),
-//     update(), render(renderer), createPass(), dispose() }
+//     attach(body, fx) (far-layer effects riding with a body, e.g. launchfx's aurora), update(),
+//     render(renderer), createPass(), dispose(),
+//     // UI 2's flight.js frame (Earth-centred, z = Earth's axis, x toward longitude 0, Earth's rotation ignored):
+//     fromECI(v_km) / toECI(v_km) (Vector3 or [x, y, z] → Vector3 in the other frame), eciFrame (Quaternion:
+//     ECI axes → world axes; pass it as setViewer's frame if the near layer is built in ECI axes),
+//     setBodyECI(body, eci_km) (e.g. the moving Moon: f.bodyPosAt("moon", t) or sample.dest_eci_km),
+//     setViewerECI({ eci_km, camera | quaternion, frame }), setSunDir(v), sunForSite(body, pos_km, elevation_deg),
+//     // cost: setResolutionScale(s) (the bodies at s × the output resolution, bilinear; default 0.5 when
+//     // devicePixelRatio ≥ 1.5, else 1), setEnabled(on) (off: only a clear to clearColor), stats { scale,
+//     // width, height, cpuMs, gpuMs (EXT_disjoint_timer_query_webgl2, else null), passes, skipped } }
 //
 // Frame: 1 unit = 10 km (KM_PER_UNIT), Earth-centred, axes = the launch site's frame at the Cape (28.5° N,
 // 80.6° W): +x east, +y up, +z south there (the near layer's pad frame, so both layers share orientation).
@@ -40,6 +49,11 @@ const CAPE = { lat: 28.5, lon: -80.6 };
 const STAR_R = 2e6; // units
 const NIGHT_SUN_ELEVATION_DEG = -24; // round 17: the sun well below the Cape's horizon at launch (visual)
 const CLOUD_ALT_KM = 5; // Earth's cloud shell (visual)
+// Render layers of the far scene: stars and sun, the ray-traced bodies (may go to a reduced-resolution target),
+// attached effects (drawn over the bodies at full resolution).
+const LAYER_SKY = 0;
+const LAYER_BODIES = 1;
+const LAYER_FX = 2;
 
 // ---------- frames ----------
 
@@ -290,8 +304,8 @@ function createBody(name) {
     blendEquation: THREE.AddEquation,
     blendSrc: THREE.OneFactor,
     blendDst: THREE.SrcAlphaFactor, // result = colour + background × transmittance
-    blendSrcAlpha: THREE.ZeroFactor, // and keep the target's alpha (opaque)
-    blendDstAlpha: THREE.OneFactor,
+    blendSrcAlpha: THREE.ZeroFactor, // full resolution: keep the target's alpha (opaque); offscreen the alpha
+    blendDstAlpha: THREE.OneFactor, //   multiplies (dst × transmittance) for the composite, see draw()
     fog: false,
   });
   // proxy shell a little outside the atmosphere top
@@ -382,7 +396,10 @@ export function createWorld({ renderer = null } = {}) {
   scene.name = "far";
   const camera = new THREE.PerspectiveCamera(50, 1, 0.001, STAR_R * 4);
   const bodies = { earth: createBody("earth"), moon: createBody("moon"), mars: createBody("mars") };
-  for (const b of Object.values(bodies)) scene.add(b.mesh);
+  for (const b of Object.values(bodies)) {
+    b.mesh.layers.set(LAYER_BODIES);
+    scene.add(b.mesh);
+  }
   const stars = createStarField();
   const sun = createSun();
   scene.add(stars, sun.sprite);
@@ -444,6 +461,31 @@ export function createWorld({ renderer = null } = {}) {
     return { up, east, south, frame, lat: ll.lat, lon: ll.lon };
   }
 
+  // UI 2's flight.js frame → world: ECI (z = Earth's axis, x = longitude 0, rotation ignored) is Earth's body-
+  // fixed frame at launch, so world = earthToBodyᵀ · eci.
+  const eciToWorld = earthM.clone().transpose();
+  const vec = (v) => (Array.isArray(v) ? new THREE.Vector3(...v) : v.clone());
+  const fromECI = (v) => vec(v).applyMatrix3(eciToWorld);
+  const toECI = (v) => vec(v).applyMatrix3(earthM);
+  const eciFrame = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().setFromMatrix3(eciToWorld));
+  const setBodyECI = (name, eci_km) => setDestination(name, fromECI(eci_km));
+  // The world's sun (one for all bodies): set it, or get the direction nearest the current one that stands at
+  // elevation_deg over a site (body-relative km, world axes) — e.g. ease to sunForSite("moon", landingPos,
+  // lightingFor("moon").sunElevation_deg) during the coast so the actual landing site gets UI 2's light.
+  function setSunDir(v) {
+    if (!v || vec(v).lengthSq() < 1e-12) return;
+    sunDir.copy(vec(v).normalize());
+    sunLight.position.copy(sunDir).multiplyScalar(100);
+  }
+  function sunForSite(name, pos_km, elevation_deg = lightingFor(name).sunElevation_deg) {
+    const up = vec(pos_km).normalize();
+    const el = elevation_deg * DEG;
+    let t = sunDir.clone().addScaledVector(up, -sunDir.dot(up)); // the current sun's horizontal direction there
+    if (t.lengthSq() < 1e-9) t = new THREE.Vector3(1, 0, 0).addScaledVector(up, -up.x);
+    t.normalize();
+    return up.multiplyScalar(Math.sin(el)).addScaledVector(t, Math.cos(el)).normalize();
+  }
+
   // Viewer: body + position (km from that body's centre, world axes) + the near camera's orientation. frame:
   // the near layer's axes → world axes (identity on the Earth pad; a landing site's frame on the Moon or Mars
   // when the near layer is built y-up there).
@@ -457,6 +499,10 @@ export function createWorld({ renderer = null } = {}) {
       camera.fov = near.fov;
       camera.aspect = near.aspect;
     } else if (quaternion) viewer.quaternion.copy(quaternion);
+  }
+  // The viewer from an Earth-centred ECI position (flight.js pos_eci_km).
+  function setViewerECI({ eci_km, ...rest } = {}) {
+    setViewer({ ...rest, body: "earth", pos_km: fromECI(eci_km) });
   }
   const geo = new THREE.Vector3();
   const rel = new THREE.Vector3();
@@ -493,18 +539,156 @@ export function createWorld({ renderer = null } = {}) {
       return [b, D];
     });
     order.sort((a, b) => b[1] - a[1]).forEach(([b], i) => (b.mesh.renderOrder = i)); // far → near
+    for (const { o, b } of attached) {
+      o.position.copy(b.mesh.position);
+      o.quaternion.setFromRotationMatrix(new THREE.Matrix4().setFromMatrix3(b.toBody.clone().transpose())); // body → world
+    }
     stars.position.set(0, 0, 0);
     sun.sprite.position.copy(sunDir).multiplyScalar(sun.dist);
     const sky = skyAt(viewer.body, Math.max(0, viewer.pos_km.length() - bodies[viewer.body].radius_km));
     stars.material.opacity = sky.stars;
   }
-  function render(r = renderer) {
+  // Far-layer effects that ride with a body in its body-fixed axes (z = north, units), e.g. launchfx's aurora;
+  // effects that flag userData.occluded get the body's ray constants, so what is behind the planet is hidden.
+  const attached = [];
+  const OCC = { uOccDir: "uDir", uOccDist: "uDist", uOccDCC: "uDCC", uOccR: "uR", uOccNear: "uNearMode" };
+  function attach(name, fx) {
+    const b = bodies[name];
+    const o = fx?.object3d ?? fx;
+    if (!b || !o) return;
+    scene.add(o);
+    o.traverse((m) => m.layers.set(LAYER_FX));
+    if (o.userData.occluded)
+      o.traverse((m) => {
+        const u = m.material?.uniforms;
+        if (u) for (const [k, src] of Object.entries(OCC)) if (u[k]) u[k] = b.uniforms[src];
+      });
+    attached.push({ o, b });
+  }
+  // ---- drawing: resolution scale, on/off, cost ----
+  // The ray-traced bodies are the cost (atmosphere marching per pixel). At scale s < 1 they render into an
+  // s × output half-float target (premultiplied colour + transmittance in alpha) composited bilinearly under the
+  // stars-and-sun pass at full resolution; attached effects (aurora) draw over at full resolution.
+  // setEnabled(false): nothing but a clear to clearColor (builder at home, no flight).
+  let resScale = typeof window !== "undefined" && (window.devicePixelRatio ?? 1) >= 1.5 ? 0.5 : 1;
+  let enabled = true;
+  const clearColor = new THREE.Color(0x000000);
+  const stats = { scale: resScale, width: 0, height: 0, cpuMs: 0, gpuMs: null, passes: 0, skipped: false };
+  let rt = null;
+  const quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  const quadMat = new THREE.ShaderMaterial({
+    uniforms: { uTex: { value: null } },
+    vertexShader: /* glsl */ `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+    fragmentShader: /* glsl */ `
+      uniform sampler2D uTex;
+      varying vec2 vUv;
+      void main() {
+        gl_FragColor = texture2D(uTex, vUv);   // colour (premultiplied) + transmittance
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }`,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    blending: THREE.CustomBlending,
+    blendEquation: THREE.AddEquation,
+    blendSrc: THREE.OneFactor,
+    blendDst: THREE.SrcAlphaFactor,
+    blendSrcAlpha: THREE.ZeroFactor,
+    blendDstAlpha: THREE.OneFactor,
+  });
+  const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), quadMat);
+  quad.frustumCulled = false;
+  const quadScene = new THREE.Scene();
+  quadScene.add(quad);
+  const size = new THREE.Vector2();
+  let timer = null;
+  function setResolutionScale(s = 1) {
+    resScale = THREE.MathUtils.clamp(+s || 1, 0.25, 1);
+    stats.scale = resScale;
+  }
+  function setEnabled(on = true) {
+    enabled = !!on;
+  }
+  const setBodyAlpha = (offscreen) => {
+    for (const b of Object.values(bodies)) b.mesh.material.blendDstAlpha = offscreen ? THREE.SrcAlphaFactor : THREE.OneFactor;
+  };
+  // GPU time where EXT_disjoint_timer_query_webgl2 exists (one query in flight; result a frame or two later)
+  function gpuTimer(r) {
+    const gl = r.getContext?.();
+    const ext = gl?.getExtension?.("EXT_disjoint_timer_query_webgl2");
+    if (!ext) return null;
+    timer ??= { ext, gl, q: null };
+    if (timer.q && gl.getQueryParameter(timer.q, gl.QUERY_RESULT_AVAILABLE)) {
+      if (!gl.getParameter(ext.GPU_DISJOINT_EXT)) {
+        const ms = gl.getQueryParameter(timer.q, gl.QUERY_RESULT) / 1e6;
+        stats.gpuMs = stats.gpuMs === null ? ms : stats.gpuMs * 0.9 + ms * 0.1;
+      }
+      gl.deleteQuery(timer.q);
+      timer.q = null;
+    }
+    if (timer.q) return null;
+    timer.q = gl.createQuery();
+    gl.beginQuery(ext.TIME_ELAPSED_EXT, timer.q);
+    return () => gl.endQuery(ext.TIME_ELAPSED_EXT);
+  }
+  function draw(r, target) {
+    const t0 = typeof performance !== "undefined" ? performance.now() : 0;
+    r.setRenderTarget(target);
+    r.setClearColor(clearColor, 1);
+    r.clear();
+    stats.skipped = !enabled;
+    if (!enabled) {
+      stats.passes = 0;
+      return;
+    }
     update();
+    const end = gpuTimer(r);
+    if (target) size.set(target.width, target.height);
+    else r.getDrawingBufferSize(size);
+    let draws = 0;
+    if (resScale < 0.999) {
+      const w = Math.max(1, Math.round(size.x * resScale));
+      const h = Math.max(1, Math.round(size.y * resScale));
+      if (!rt || rt.width !== w || rt.height !== h) {
+        rt?.dispose();
+        rt = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: false });
+        quadMat.uniforms.uTex.value = rt.texture;
+      }
+      stats.width = w;
+      stats.height = h;
+      // bodies → the small target (clear: no colour, full transmittance)
+      setBodyAlpha(true);
+      r.setRenderTarget(rt);
+      r.setClearColor(0x000000, 1);
+      r.clear();
+      camera.layers.set(LAYER_BODIES);
+      r.render(scene, camera);
+      setBodyAlpha(false);
+      // stars and sun at full resolution, then the bodies over them, then attached effects
+      r.setRenderTarget(target);
+      camera.layers.set(LAYER_SKY);
+      r.render(scene, camera);
+      r.render(quadScene, quadCam);
+      camera.layers.set(LAYER_FX);
+      r.render(scene, camera);
+      draws = 4;
+    } else {
+      stats.width = size.x;
+      stats.height = size.y;
+      camera.layers.enableAll();
+      r.render(scene, camera);
+      draws = 1;
+    }
+    camera.layers.enableAll();
+    end?.();
+    stats.passes = draws;
+    stats.cpuMs = (typeof performance !== "undefined" ? performance.now() : 0) - t0;
+  }
+  function render(r = renderer) {
     const ac = r.autoClear;
     r.autoClear = false;
-    r.setClearColor(0x000000, 1);
-    r.clear();
-    r.render(scene, camera);
+    draw(r, null);
     r.clearDepth();
     r.autoClear = ac;
   }
@@ -520,11 +704,10 @@ export function createWorld({ renderer = null } = {}) {
       setSize() {},
       dispose() {},
       render(r, writeBuffer, readBuffer) {
-        update();
-        r.setRenderTarget(pass.renderToScreen ? null : readBuffer);
-        r.setClearColor(0x000000, 1);
-        r.clear();
-        r.render(scene, camera);
+        const ac = r.autoClear;
+        r.autoClear = false;
+        draw(r, pass.renderToScreen ? null : readBuffer);
+        r.autoClear = ac;
       },
     };
     return pass;
@@ -629,6 +812,9 @@ export function createWorld({ renderer = null } = {}) {
       o.material?.dispose();
     });
     sun.tex.dispose();
+    rt?.dispose();
+    quad.geometry.dispose();
+    quadMat.dispose();
   }
-  return { scene, camera, bodies, sunDir, sunLight, setViewer, setDestination, landingSite, skyAt, surfaceColourAt, isOceanAt, atmosphereLimb, createLocalGround, cloudDeck, update, render, createPass, dispose };
+  return { scene, camera, bodies, sunDir, sunLight, stats, setResolutionScale, setEnabled, clearColor, setViewer, setViewerECI, setDestination, setBodyECI, fromECI, toECI, eciFrame, setSunDir, sunForSite, landingSite, skyAt, surfaceColourAt, isOceanAt, atmosphereLimb, createLocalGround, cloudDeck, attach, update, render, createPass, dispose };
 }

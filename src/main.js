@@ -27,6 +27,7 @@ import { createScrub } from "./ui/scrub.js";
 import { ensureShell } from "./ui/shell.js";
 import { createLanding } from "./ui/landing.js";
 import { createGroundMap } from "./fx/launchfx.js";
+import { createWorld } from "./world.js";
 import * as f from "./ui/format.js";
 
 const query = new URLSearchParams(location.search);
@@ -219,7 +220,15 @@ const materials = createMaterials();
 const makePart = (spec) => createPart(spec, materials);
 let parts = current.manifest.map(makePart);
 const sfx = createSfx();
-const choreo = createChoreographer({ parts, scene, root, camera, controls, sfx, onChange: syncUi, scale: SCALE, bounds: current.bounds, makePart });
+// The far layer (UI4's world.js, rounds 16–17): the Earth, Moon, Mars, stars and sun in scaled space, drawn first
+// with the near scene (vehicle, pad, effects) on top, its depth cleared. The far camera follows the near camera
+// from the near origin's place on the Earth (the pad, rising with the vehicle in flight; choreo.nearOriginKm).
+// Off during the landing dive, which draws its own planet and sky.
+const world = createWorld({ renderer });
+const BG = scene.background;
+const PAD_KM = new THREE.Vector3(0, world.bodies.earth.radius_km, 0);
+const viewerKm = new THREE.Vector3();
+const choreo = createChoreographer({ parts, scene, root, camera, controls, sfx, onChange: syncUi, scale: SCALE, bounds: current.bounds, makePart, world });
 
 // ---------- post ----------
 // GTAO skips what writes no depth (holograms, flashes, the pad ring, x-ray shells), so they never darken the
@@ -266,9 +275,13 @@ class SoftBokehPass extends BokehPass {
 let composer = null;
 let gtao = null;
 let dof = null;
+let worldPass = null;
+let nearPass = null;
 if (!lite) {
   composer = new EffectComposer(renderer);
-  composer.addPass(new RenderPass(scene, camera));
+  composer.addPass((worldPass = world.createPass()));
+  composer.addPass((nearPass = new RenderPass(scene, camera)));
+  nearPass.clearDepth = true;
   const pr = renderer.getPixelRatio();
   gtao = new SolidGTAOPass(scene, camera, innerWidth * pr, innerHeight * pr);
   gtao.updateGtaoMaterial({ radius: 0.6, distanceExponent: 1.5, thickness: 1.2, scale: 1, samples: 16 });
@@ -1265,6 +1278,7 @@ addEventListener(
     if (e.ctrlKey || e.deltaY >= 0 || e.target !== canvas || !canLeaveBuilder()) return;
     e.preventDefault();
     e.stopPropagation(); // OrbitControls would zoom in
+    scene.background = BG; // the landing paints its own sky (the world layer is off while it runs)
     landing.resume();
     landing.feed(landing.wheelPx(e));
   },
@@ -1285,7 +1299,11 @@ choreo.prewarm(renderer);
 const loaded = THREE.DefaultLoadingManager.onLoad;
 THREE.DefaultLoadingManager.onLoad = () => {
   loaded?.();
-  choreo.uploadWarmTextures();
+  const worldMaps = [];
+  world.scene.traverse((o) => {
+    for (const u of Object.values(o.material?.uniforms ?? {})) if (u.value?.isTexture) worldMaps.push(u.value);
+  });
+  choreo.uploadWarmTextures(worldMaps); // spread over frames, one texture each
 };
 const landingMode = !["build", "story", "skip", "demo"].some((k) => query.has(k));
 if (landingMode) startLanding();
@@ -1354,6 +1372,11 @@ function frame() {
   const dt = Math.min(rawDt, 0.05);
   const t = clock.elapsedTime;
   luxuryBudget(rawDt);
+  const worldOn = !landingOn();
+  scene.background = worldOn ? null : BG;
+  stars.visible = !worldOn; // the world draws its own
+  if (worldPass) worldPass.enabled = worldOn;
+  if (nearPass) nearPass.clear = !worldOn;
   choreo.update(dt, t);
   landing?.update(dt, t);
   if (!landingOn()) controls.update(); // its polar/distance clamps would bend the dive's path
@@ -1394,8 +1417,17 @@ function frame() {
   if (pad?.ringMat) pad.ringMat.opacity = 0.55 + 0.3 * (0.5 + 0.5 * Math.sin(t * 1.6));
   twin?.sil?.update(camera);
   anchors?.update(t);
+  if (worldOn) {
+    viewerKm.copy(PAD_KM).add(choreo.nearOriginKm()).addScaledVector(camera.position, 1 / (1000 * SCALE));
+    world.setViewer({ body: "earth", pos_km: viewerKm, camera });
+  }
   if (composer) composer.render();
-  else renderer.render(scene, camera);
+  else {
+    if (worldOn) world.render(renderer);
+    renderer.autoClear = !worldOn;
+    renderer.render(scene, camera);
+    renderer.autoClear = true;
+  }
   requestAnimationFrame(frame);
 }
 frame();

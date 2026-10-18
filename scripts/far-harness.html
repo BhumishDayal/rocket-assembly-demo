@@ -8,7 +8,9 @@
     /scripts/far-harness.html?view=alt&km=2000    2 000 km up looking down: the whole Earth (wide lens)
     /scripts/far-harness.html?view=moon     on the Moon's landing site: local terrain aligned to the far Moon
     /scripts/far-harness.html?view=mars     the same on Mars
-  Params: km (alt view), pitch / yaw (degrees, camera), fov.
+    /scripts/far-harness.html?view=aurora   400 km up over 50° N, looking north: the auroral oval (storm 1)
+    /scripts/far-harness.html?view=pad&lightning=1   a distant strike behind the pad, frozen near its first stroke
+  Params: km (alt view), pitch / yaw (degrees, camera), fov, res (world.setResolutionScale).
   window.__ready is set after ~45 frames once every texture has loaded.
 -->
 <html>
@@ -29,6 +31,7 @@
       import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
       import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
       import { createWorld } from "../src/world.js";
+      import { createAurora, createLightning } from "../src/fx/launchfx.js";
       import { createMaterials, createPart, createPad, deployables, applyDeploy, setShellOpacity } from "../src/parts.js";
       import { enableShadowCasting } from "../src/planet.js";
       import { buildManifest, sceneBounds } from "../src/layout.js";
@@ -50,6 +53,7 @@
       near.background = null;
       const camera = new THREE.PerspectiveCamera(+(q.get("fov") ?? 50), innerWidth / innerHeight, 0.05, 20000);
       const world = createWorld({ renderer });
+      if (q.get("res")) world.setResolutionScale(+q.get("res"));
       const R = world.bodies.earth.radius_km;
       const U = 250; // near units per km
       const deg = Math.PI / 180;
@@ -58,7 +62,25 @@
       let originKm = new THREE.Vector3(0, R, 0); // near origin, body-relative km
       let frame = new THREE.Quaternion();
 
-      if (view === "pad") {
+      const fxUpdates = [];
+      let lightning = null;
+      if (view === "aurora") {
+        // 400 km above 50° N 80° W, looking north and a little down at the oval
+        const toWorld = world.bodies.earth.toBody.clone().transpose();
+        const ll = (lat, lon) => new THREE.Vector3(Math.cos(lat * deg) * Math.cos(lon * deg), Math.cos(lat * deg) * Math.sin(lon * deg), Math.sin(lat * deg)).applyMatrix3(toWorld).normalize();
+        const up = ll(50, -80);
+        const northPole = new THREE.Vector3(0, 0, 1).applyMatrix3(toWorld);
+        const north = northPole.clone().addScaledVector(up, -northPole.dot(up)).normalize();
+        originKm = up.clone().multiplyScalar(R + 400);
+        const f = north.clone().multiplyScalar(Math.cos(-12 * deg)).addScaledVector(up, Math.sin(-12 * deg));
+        camera.quaternion.setFromRotationMatrix(new THREE.Matrix4().lookAt(new THREE.Vector3(), f, up));
+        camera.fov = 70;
+        camera.position.set(0, 0, 0);
+        const aurora = createAurora();
+        world.attach("earth", aurora);
+        aurora.setIntensity(+(q.get("storm") ?? 1));
+        fxUpdates.push((dt) => aurora.update(dt));
+      } else if (view === "pad") {
         // the pad and a built Falcon 9 at night: dim moonlight-like fill so the forms read
         const manifest = buildManifest(presetToBuild(getPreset("falcon-9")), catalog);
         const b = sceneBounds(manifest);
@@ -76,6 +98,10 @@
         near.add(key);
         camera.position.set(14, 1.2, 26);
         aim(+(q.get("pitch") ?? 6), +(q.get("yaw") ?? 18));
+        if (q.get("lightning") === "1") {
+          lightning = createLightning({ ground_u: -0.6 });
+          near.add(lightning.object3d);
+        }
       } else if (view === "alt") {
         const km = +(q.get("km") ?? 100);
         originKm = new THREE.Vector3(0, R + km, 0);
@@ -122,12 +148,18 @@
       composer.addPass(new OutputPass());
       let frameN = 0;
       function tick() {
+        // lightning: strike at frame 43, then freeze its state so the shot catches the first stroke
+        if (lightning) {
+          if (frameN === 43) lightning.fire({ azimuth: +(q.get("az") ?? 335), distance_km: +(q.get("km") ?? 9), seed: 7 });
+          lightning.update(frameN < 45 ? 1 / 60 : 0);
+        }
+        for (const u of fxUpdates) u(1 / 60);
         // the viewer: the near camera's position, in km, from the near origin (rotated into world axes)
         const posKm = originKm.clone().add(camera.position.clone().divideScalar(U).applyQuaternion(frame));
         world.setViewer({ body: viewerBody, pos_km: posKm, camera, frame });
         composer.render();
         if (!loading && ++frameN === 45) {
-          document.title = `ready ${view}`;
+          document.title = `ready ${view} · far ${world.stats.width}×${world.stats.height} ${world.stats.cpuMs.toFixed(2)} ms cpu${world.stats.gpuMs !== null ? ` ${world.stats.gpuMs.toFixed(2)} ms gpu` : ""}`;
           window.__ready = true;
         }
         requestAnimationFrame(tick);

@@ -636,3 +636,21 @@ is the deliverable.
   propellant farm behind a berm with pipe racks, perimeter fence, service buildings, 1.5 km apron), painted PBR
   with x-ray twins, ≤ 110 draws, same API shape as createAnchors plus rss/waterTower/setLook. Owner: complex
   coding agent; UI 3 swaps it in.
+
+> **Rule update (team, 2026-10-18):** the app's TS physics and our port now use TWR_OK = 1.15 and
+> DRY_MASS_MIN_FRACTION = 0.03 (the evidence from rounds 2–4 was accepted). Earlier mentions of "4 %" and "1.2"
+> in this document describe the rules as they were when those rounds were written.
+
+### Round 19 — failures must FLY (user, ~02:30): "if it's short on Δv it should fall, like real physics"
+The flight follows the physics outcome of the build, not the mission script:
+1. TWR < 1: hold-down, engines run, nothing lifts (exists). 1.0–1.15: slow, visible climb.
+2. Short of orbital velocity before propellant depletion: ballistic arc, re-entry heating, impact in the sea/ground
+   with an impact burst; "LOST · fell back at T+…". No parking orbit.
+3. Reaches LEO but short for the mission (the usual Grok case): the departure burn stops when the propellant
+   runs out (plume cuts, "PROPELLANT DEPLETED"); the resulting orbit is propagated from the achieved velocity
+   (vis-viva): apogee below the target → the craft coasts out, the Moon stays far, Earth pulls it back; GTO short →
+   a lower ellipse ("apogee 25 000 km of 35 786"); Mars short → falls short of Mars and drifts. Lines quote the
+   shortfall in m/s and km. Labelled est.
+4. Everything the user can request through Grok (assembly:apply builds) goes through the same path.
+Owners: UI 2 flight.js branches (partial burn, vis-viva propagation, re-entry/impact samples); UI4 createImpact()
+in launchfx (sea splash column / ground fireball + debris) and a re-entry break-up glow; UI 3 director shows them.

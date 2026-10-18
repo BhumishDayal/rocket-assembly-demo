@@ -1,6 +1,8 @@
 // Check for src/fx/launchfx.js (+ the planet.js shadow decal): every effect at full and half intensity over its
 // timeline has no NaN, shows and hides on its documented schedule, casts no shadows, and everything active at
-// once stays within 25 draws. Shaders are compiled by the browser harness (scripts/fx-harness.html), not here.
+// once stays within 25 draws. Weather (round 18): wind drift on the vents, steam, deluge mist and cold-gas puffs,
+// the plume lean, the aurora (2 draws, intensity) and the lightning strike (3 draws, ~1.2 s).
+// Shaders are compiled by the browser harnesses (scripts/fx-harness.html, scripts/far-harness.html), not here.
 // Run: node scripts/check-launchfx.mjs   (no deps; exits 1 on any failure)
 import { registerHooks } from "node:module";
 
@@ -156,6 +158,51 @@ for (const k of [1, 0.5]) {
   expect(mp.count > 200 && Array.from(mp.array).every(Number.isFinite), `${L} ground map lines`);
   expect(map.object3d.children[0].material.fog, `${L} ground map should use fog`);
   all.push(map);
+
+  // Weather: wind drift (12 m/s from the west → +x), plume lean, aurora, lightning.
+  const wind = new THREE.Vector3(12, 0, -3);
+  const wv = FX.createVents(ports, { scale_u: 0.4 });
+  wv.update(0.1, { intensity: k, wind_ms: wind });
+  expect(wv.object3d.children[0].material.uniforms.uWind.value.distanceTo(wind.clone().multiplyScalar(SCALE)) < 1e-9, `${L} vents wind`);
+  const ws = FX.createSteamCloud({ layout });
+  ws.update(0.1, { t: 5, glow: k, intensity: k, wind_ms: [12, 0, -3] });
+  expect(ws.object3d.children[0].material.uniforms.uWind.value.x > 0, `${L} steam wind`);
+  const wd = FX.createDeluge({ layout });
+  wd.update(0.1, { t: 4, intensity: k, wind_ms: wind });
+  const du = wd.object3d.children[0].material.uniforms;
+  expect(du.uWindOff.value.x > 0 && du.uWindOff.value.length() <= layout.padR * 0.8 + 1e-9 && du.uMist.value > 0, `${L} deluge mist downwind`);
+  const wp = FX.createColdGasPuffs({ scale_u: 0.3 });
+  wp.update(0.1, { wind_ms: wind });
+  expect(wp.object3d.children[0].material.uniforms.uWind.value.x > 0, `${L} puffs wind`);
+  for (const fx of [wv, ws, wd, wp]) fx.dispose();
+  const plumeParent = new THREE.Group();
+  const plumeObj = new THREE.Group();
+  plumeParent.add(plumeObj);
+  const lean = FX.plumeLean(plumeObj, wind, 0);
+  const tail = new THREE.Vector3(0, -1, 0).applyQuaternion(plumeObj.quaternion);
+  expect(lean > 0 && lean <= (10 * Math.PI) / 180 + 1e-9 && tail.x > 0, `${L} plume leans downwind (${((lean * 180) / Math.PI).toFixed(1)}°)`);
+  expect(FX.plumeLean(plumeObj, wind, 6000) === 0 && plumeObj.quaternion.angleTo(new THREE.Quaternion()) < 1e-9, `${L} no lean by 6 km`);
+  const aurora = FX.createAurora();
+  expect(!aurora.object3d.visible, `${L} aurora starts hidden`);
+  aurora.setIntensity(k);
+  aurora.update(0.5);
+  expect(aurora.object3d.visible && draws(aurora.object3d) === 2, `${L} aurora: 2 draws when on`);
+  aurora.setIntensity(0);
+  expect(!aurora.object3d.visible, `${L} aurora hides at 0`);
+  aurora.setIntensity(k);
+  const bolt = FX.createLightning();
+  expect(!bolt.object3d.visible, `${L} lightning starts hidden`);
+  bolt.fire({ azimuth: 70, distance_km: 9, seed: 5 });
+  bolt.update(0.02);
+  const bg = bolt.object3d.getObjectByName("fx-lightning-bolt").geometry.attributes.position;
+  expect(bolt.active() && draws(bolt.object3d) === 3 && bg.count > 50 && Array.from(bg.array).every(Number.isFinite), `${L} lightning strike`);
+  const at = bolt.object3d.getObjectByName("fx-lightning-glow").position;
+  expect(Math.abs(Math.hypot(at.x, at.z) - 9 * 1000 * SCALE) < 1e-6 && at.x > 0 && at.z < 0, `${L} strike at 70° (ENE), 9 km`);
+  bolt.update(1.3);
+  expect(!bolt.active() && !bolt.object3d.visible, `${L} lightning over by 1.2 s`);
+  bolt.fire({ azimuth: 70, distance_km: 9 });
+  bolt.update(0.02);
+  all.push(aurora, bolt);
 
   const decal = createShadowDecal({ radius_u: 0.6 });
   const sun = new THREE.Vector3(-0.5, 0.7, 0.3).normalize();

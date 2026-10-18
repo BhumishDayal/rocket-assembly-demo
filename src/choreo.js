@@ -66,7 +66,7 @@ const T = {
   descend: 500,
 };
 
-export function createChoreographer({ parts, scene, root, camera, controls, sfx, onChange, scale = 0.25, bounds: initialBounds = null, makePart = null }) {
+export function createChoreographer({ parts, scene, root, camera, controls, sfx, onChange, scale = 0.25, bounds: initialBounds = null, makePart = null, world = null }) {
   const flash = createBoltFlash();
   scene.add(flash.object3d);
 
@@ -1423,16 +1423,20 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   const skyF = new THREE.Color();
   const SUN_DOWN = new THREE.Vector3(0, -1, 0); // the dome's sun glow stays out of sight
   function updateSky(dt, alt_m, body = "earth") {
-    if (!L?.sky) return;
+    if (!L) return;
     L.skyW = Math.min(1, L.skyW + dt / 2);
+    // The sky itself is the world's far layer; the near fog takes its haze so distant near things sink into it.
     const haze = body === "moon" ? 0 : 1 - THREE.MathUtils.smoothstep(Math.max(0, alt_m), 0, 30000);
-    skyZ.copy(L.bg0);
-    skyH.copy(L.bg0).lerp(NIGHT_HAZE, haze * L.skyW);
-    L.sky.set({ zenith: skyZ, horizon: skyH }, SUN_DOWN);
-    L.sky.update(camera);
+    if (world) skyF.copy(world.skyAt(body, Math.max(0, alt_m) / 1000).haze ?? skyF.set(0, 0, 0));
+    else skyF.copy(L.bg0).lerp(NIGHT_HAZE, 0.5 * haze);
     const dist = camera.position.distanceTo(controls.target);
     const below = L.pad ? Math.max(0, -L.pad.position.y) : 0;
-    state.sky = { w: L.skyW, horizon: skyF.copy(L.bg0).lerp(NIGHT_HAZE, 0.5 * haze), stars: 1, near: dist + 5, far: dist + 300 + below * 1.5 };
+    state.sky = { w: L.skyW, horizon: skyF, stars: 1, near: dist + 5, far: dist + 300 + below * 1.5 };
+  }
+  // Where the near origin is above the pad (km, world axes): it rides up with the vehicle (the pad drops away).
+  const originKm = new THREE.Vector3();
+  function nearOriginKm() {
+    return originKm.set(0, L?.pad ? Math.max(0, -L.pad.position.y) / (1000 * scale) : 0, 0);
   }
   // The sky's altitude after the ascent: the booster's on its way down, the destination's on a landing, else orbit.
   function endingSky() {
@@ -1645,15 +1649,9 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       L.fx.halo = createCondensationHalo({ radius_u: capPart.radius, length_u: capPart.radius * 5 });
       capPart.group.add(L.fx.halo.object3d);
     }
-    // Sky and the Earth for the climb (updateSky; the Earth rises in from ~55 km and carries on into the ending).
-    L.sky = createSkyDome({ radius_u: 3000 });
-    scene.add(L.sky.object3d);
+    // The sky and the Earth below are the world's far layer; the near fog follows its haze (updateSky).
     L.skyW = 0;
-    L.bg0 = scene.background?.isColor ? scene.background.clone() : new THREE.Color(0x0b0d12);
-    L.earth = createPlanet({ kind: "earth", radius_u: PLANET_R.earth });
-    L.earth.R = PLANET_R.earth;
-    L.earth.object3d.visible = false;
-    scene.add(L.earth.object3d);
+    L.bg0 = new THREE.Color(0x0b0d12);
     // The chase camera starts on the pad shot (eased in from the builder's view over 1.8 s); the vehicle pitches
     // over in the plane across that view, so the climb's side view needs no swing round.
     camAnim?.cancel();
@@ -2504,11 +2502,20 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     return () => (warmFx.visible = false);
   }
   // Their textures (UI4's planet maps) arrive after the warm-up; main calls this when loading finishes.
-  function uploadWarmTextures() {
-    if (!warmRenderer || !warmFx) return;
-    warmFx.traverse((o) => {
-      for (const m of [].concat(o.material ?? [])) for (const u of Object.values(m.uniforms ?? {})) if (u.value?.isTexture) warmRenderer.initTexture(u.value);
+  // One texture per frame (update): a 2k map uploads in a few ms; all at once they make a visible freeze.
+  const uploadQueue = new Set();
+  function uploadWarmTextures(extra = []) {
+    if (!warmRenderer) return;
+    warmFx?.traverse((o) => {
+      for (const m of [].concat(o.material ?? [])) for (const u of Object.values(m.uniforms ?? {})) if (u.value?.isTexture) uploadQueue.add(u.value);
     });
+    for (const t of extra) uploadQueue.add(t);
+  }
+  function uploadNext() {
+    const t = uploadQueue.values().next().value;
+    if (!t) return;
+    uploadQueue.delete(t);
+    if (t.image) warmRenderer.initTexture(t);
   }
   const warmTarget = new THREE.WebGLRenderTarget(4, 4);
   function prewarm(renderer) {
@@ -2543,6 +2550,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   }
 
   function update(dt, t) {
+    if (uploadQueue.size) uploadNext();
     for (const part of parts) {
       part.holoGhost.update(t);
       if (part.ghost.visible) part.ghost.position.y = part.slotY + Math.sin(t * 2.6) * 0.05;
@@ -2610,6 +2618,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     setBounds,
     prewarm,
     uploadWarmTextures,
+    nearOriginKm,
     update,
     postUpdate,
     landingView,

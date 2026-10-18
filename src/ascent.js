@@ -66,8 +66,9 @@ import { G0, TWR_LOW_WARNING, evaluateBuild } from "./physics.js";
 // Pad abort: a build whose verdict has a blocking warning is not flown (outcome "blocked", reason = the first
 // blocking warning, no samples or events). In physics.js every warning blocks except TWR_LOW_WARNING.
 // FLIGHT_EXEMPT lists blocking warnings that are app rules rather than physics, which a real vehicle breaks and
-// the simulation can still fly honestly: the 4 % dry-mass rule, which the real Falcon 9 second stage (3.2 %)
-// fails. Remove it to ground those builds too. opts.ignoreVerdict flies any build regardless.
+// the simulation can still fly honestly: the dry-mass floor (now 3 %; at 4 % the real Falcon 9 second stage,
+// 3.23 %, failed it; every tank in tanks.json passes 3 %, the lightest being that one). Remove it to ground those
+// builds too. opts.ignoreVerdict flies any build regardless.
 const NON_BLOCKING = new Set([TWR_LOW_WARNING]);
 const FLIGHT_EXEMPT = [/^tank dry mass below \d+(\.\d+)? percent of propellant$/];
 

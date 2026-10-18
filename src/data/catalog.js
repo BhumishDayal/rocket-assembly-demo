@@ -14,10 +14,14 @@ import presets from "./presets.json";
 import gcat from "./gcat-rockets.json";
 import { evaluateBuild, isVacuumOnly, rocketDistance, sanitizeEngineCount } from "../physics.js";
 
+// Base + extra payloads, one record per id: the team's payloads.json now carries apollo-csm-lm too, so a refresh
+// must not list it twice. The base (team) record wins.
+const payloads = [...basePayloads, ...extraPayloads.filter((x) => !basePayloads.some((p) => p.id === x.id))];
+
 export const catalog = {
   engines,
   tanks,
-  payloads: [...basePayloads, ...extraPayloads],
+  payloads,
   missions,
   referenceRockets,
   visuals,

@@ -103,6 +103,67 @@ for (const b of ["moon", "mars", "earth"]) {
   expect(finite(c.r, c.g, c.b), `${b} albedo`);
   g.dispose();
 }
+// flight.js frame: the Cape (28.5 N, 80.6 W) in ECI maps to world +y; the Earth's axis to world north; the
+// Moon placed from ECI; a site sun at the requested elevation.
+const cos = Math.cos, sin = Math.sin, rad = Math.PI / 180;
+const capeECI = [cos(28.5 * rad) * cos(-80.6 * rad), cos(28.5 * rad) * sin(-80.6 * rad), sin(28.5 * rad)].map((x) => x * 6371);
+const cw = w.fromECI(capeECI);
+expect(Math.abs(cw.x) < 1e-6 && Math.abs(cw.y - 6371) < 1e-6 && Math.abs(cw.z) < 1e-6, `Cape from ECI → ${cw.toArray()}`);
+expect(w.toECI(cw).distanceTo(new THREE.Vector3(...capeECI)) < 1e-6, "toECI inverts fromECI");
+const axis = w.fromECI([0, 0, 1]);
+expect(Math.abs(axis.y - sin(28.5 * rad)) < 1e-9 && axis.z < 0 && Math.abs(axis.x) < 1e-9, "Earth's axis tilts north (−z) by the latitude");
+expect(new THREE.Vector3(0, 0, 1).applyQuaternion(w.eciFrame).distanceTo(axis) < 1e-9, "eciFrame rotates ECI axes into world axes");
+w.setBodyECI("moon", [384400, 0, 0]);
+expect(moon.center_km.distanceTo(w.fromECI([384400, 0, 0])) < 1e-6, "setBodyECI");
+w.setViewerECI({ eci_km: capeECI.map((x) => x * (6371.002 / 6371)), quaternion: new THREE.Quaternion() });
+w.update();
+const want2m = 2 * earth.R * 0.0002 + 0.0002 ** 2; // 2 m up: D² − R² in units²
+expect(earth.uniforms.uNearMode.value === 1 && Math.abs(earth.uniforms.uDCC.value.x - want2m) < 1e-3 * want2m, `viewer from ECI on the pad (${earth.uniforms.uDCC.value.x} want ${want2m})`);
+const site = new THREE.Vector3(1, 2, -0.5).normalize().multiplyScalar(moon.radius_km);
+const sd = w.sunForSite("moon", site, 12);
+expect(Math.abs(Math.asin(sd.dot(site.clone().normalize())) / rad - 12) < 1e-6 && Math.abs(sd.length() - 1) < 1e-9, "sunForSite elevation");
+w.setSunDir(sd);
+expect(w.sunDir.distanceTo(sd) < 1e-12 && w.sunLight.position.clone().normalize().distanceTo(sd) < 1e-9, "setSunDir");
+
+// Cost controls: a stub renderer records the passes. Scale 1: one pass; scale 0.5: the bodies into a half-size
+// target, then sky, composite and effects; disabled: only the clear.
+{
+  const calls = [];
+  const stub = {
+    autoClear: true,
+    getDrawingBufferSize: (v) => v.set(800, 600),
+    setRenderTarget: (t) => calls.push(["target", t ? `${t.width}x${t.height}` : "screen"]),
+    setClearColor: () => {},
+    clear: () => calls.push(["clear"]),
+    clearDepth: () => {},
+    render: (sc, cam) => calls.push(["render", sc === w.scene ? cam.layers.mask : "quad"]),
+    getContext: () => null,
+  };
+  w.setResolutionScale(1);
+  calls.length = 0;
+  w.render(stub);
+  expect(calls.filter((c) => c[0] === "render").length === 1 && w.stats.passes === 1 && w.stats.width === 800, `scale 1: ${JSON.stringify(calls)}`);
+  w.setResolutionScale(0.5);
+  calls.length = 0;
+  w.render(stub);
+  const renders = calls.filter((c) => c[0] === "render").map((c) => c[1]);
+  expect(calls.some((c) => c[0] === "target" && c[1] === "400x300") && w.stats.width === 400 && w.stats.height === 300 && w.stats.scale === 0.5, `scale 0.5 target: ${JSON.stringify(calls)}`);
+  expect(JSON.stringify(renders) === JSON.stringify([1 << 1, 1 << 0, "quad", 1 << 2]), `scale 0.5 order bodies → sky → composite → fx: ${JSON.stringify(renders)}`);
+  expect(Object.values(w.bodies).every((b) => b.mesh.material.blendDstAlpha === THREE.OneFactor), "bodies back to opaque alpha after the offscreen pass");
+  w.setResolutionScale(0.1);
+  expect(w.stats.scale === 0.25, "scale clamps to 0.25");
+  w.setEnabled(false);
+  calls.length = 0;
+  w.render(stub);
+  expect(!calls.some((c) => c[0] === "render") && calls.some((c) => c[0] === "clear") && w.stats.skipped && w.stats.passes === 0, "disabled: only a clear");
+  w.setEnabled(true);
+  w.setResolutionScale(1);
+  const pass = w.createPass();
+  calls.length = 0;
+  pass.render(stub, null, { width: 640, height: 480 });
+  expect(calls.some((c) => c[0] === "target" && c[1] === "640x480") && stub.autoClear === true, "pass renders into the read buffer and restores autoClear");
+}
+
 const deck = w.cloudDeck("earth", 5);
 expect(deck && deck.object3d && w.cloudDeck("moon") === null, "cloud deck");
 w.dispose();

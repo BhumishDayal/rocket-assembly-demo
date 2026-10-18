@@ -1,0 +1,117 @@
+{
+  "created": "2026-10-18T05:37:16.938Z",
+  "size": [
+    1600,
+    900
+  ],
+  "fps": 60,
+  "seed": 1,
+  "chrome": "Chrome/155.0.8059.80",
+  "angle": "metal",
+  "frames": {
+    "landing": {
+      "t": 3.5,
+      "hud": "Empty pad · blueprint: Falcon 9 Block 5"
+    },
+    "falcon-9-home": {
+      "t": 11.6,
+      "hud": "Falcon 9 Block 5 · 67.9 m est. · 549.9 t · Δv 12 429 / 11 900 m/s · TWR 1.41 · GO"
+    },
+    "falcon-9-card": {
+      "t": 14.683,
+      "hud": "Falcon 9 Block 5 · 67.9 m est. · 549.9 t · Δv 12 429 / 11 900 m/s · TWR 1.41 · GO",
+      "card": "Falcon 9 Block 5 first-stage tank"
+    },
+    "falcon-9-options": {
+      "t": 15.483,
+      "hud": "Falcon 9 Block 5 · 67.9 m est. · 549.9 t · Δv 12 429 / 11 900 m/s · TWR 1.41 · GO",
+      "card": "Falcon 9 Block 5 first-stage tank"
+    },
+    "falcon-9-exploded": {
+      "t": 24.483,
+      "hud": "Falcon 9 Block 5 · 67.9 m est. · 549.9 t · Δv 12 429 / 11 900 m/s · TWR 1.41 · GO"
+    },
+    "falcon-9-compare": {
+      "t": 30.85,
+      "hud": "Falcon 9 Block 5 · 67.9 m est. vs Falcon 9 (FT5) · 68.4 m · 630 launches, 1 failure (2018–2026) · GCAT (J. McDowell, planet4589.org/space/gcat), CC BY 4.0"
+    },
+    "falcon-9-launch-00": {
+      "t": 33.867,
+      "hud": "Falcon 9 Block 5 · T−10"
+    },
+    "falcon-9-launch-04": {
+      "t": 37.85,
+      "hud": "Falcon 9 Block 5 · T−7"
+    },
+    "falcon-9-launch-08": {
+      "t": 41.85,
+      "hud": "Falcon 9 Block 5 · T−3 · ENGINE START"
+    },
+    "falcon-9-launch-12": {
+      "t": 45.85,
+      "hud": "T+00:01 · 0.0 km · 8 m/s · 1.4 g · est."
+    },
+    "falcon-9-launch-16": {
+      "t": 49.85,
+      "hud": "T+00:05 · 0.1 km · 25 m/s · 1.5 g · est."
+    },
+    "falcon-9-launch-20": {
+      "t": 53.85,
+      "hud": "T+01:10 · 13.6 km · 457 m/s · 1.8 g · MAX-Q · est."
+    },
+    "falcon-9-launch-30": {
+      "t": 63.85,
+      "hud": "In geostationary transfer orbit · est."
+    },
+    "saturn-v-home": {
+      "t": 14.067,
+      "hud": "Saturn V (Apollo 11, AS-506) · 112.5 m est. · 2 919.7 t · Δv 12 638 / 12 600 m/s · TWR 1.18 · GO"
+    },
+    "saturn-v-card": {
+      "t": 17.15,
+      "hud": "Saturn V (Apollo 11, AS-506) · 112.5 m est. · 2 919.7 t · Δv 12 638 / 12 600 m/s · TWR 1.18 · GO",
+      "card": "Saturn V S-II tank (AS-506 actuals)"
+    },
+    "saturn-v-options": {
+      "t": 17.95,
+      "hud": "Saturn V (Apollo 11, AS-506) · 112.5 m est. · 2 919.7 t · Δv 12 638 / 12 600 m/s · TWR 1.18 · GO",
+      "card": "Saturn V S-II tank (AS-506 actuals)"
+    },
+    "saturn-v-exploded": {
+      "t": 26.95,
+      "hud": "Saturn V (Apollo 11, AS-506) · 112.5 m est. · 2 919.7 t · Δv 12 638 / 12 600 m/s · TWR 1.18 · GO"
+    },
+    "saturn-v-compare": {
+      "t": 33.317,
+      "hud": "Saturn V (Apollo 11, AS-506) · 112.5 m est. vs Saturn V · 110.6 m · 2 launches, 0 failures (1967–1968) · GCAT (J. McDowell, planet4589.org/space/gcat), CC BY 4.0"
+    },
+    "saturn-v-launch-00": {
+      "t": 36.333,
+      "hud": "Saturn V (Apollo 11, AS-506) · T−10"
+    },
+    "saturn-v-launch-04": {
+      "t": 40.317,
+      "hud": "Saturn V (Apollo 11, AS-506) · T−7"
+    },
+    "saturn-v-launch-08": {
+      "t": 44.317,
+      "hud": "Saturn V (Apollo 11, AS-506) · T−3 · ENGINE START"
+    },
+    "saturn-v-launch-12": {
+      "t": 48.317,
+      "hud": "T+00:02 · 0.0 km · 5 m/s · 1.2 g · est."
+    },
+    "saturn-v-launch-16": {
+      "t": 52.317,
+      "hud": "T+00:07 · 0.1 km · 16 m/s · 1.2 g · est."
+    },
+    "saturn-v-launch-20": {
+      "t": 56.317,
+      "hud": "T+00:44 · 2.6 km · 143 m/s · 1.5 g · TOWER CLEARED · est."
+    },
+    "saturn-v-launch-30": {
+      "t": 66.317,
+      "hud": "T+10:23 · 200.1 km · 7 479 m/s · 0.7 g · est."
+    }
+  }
+}

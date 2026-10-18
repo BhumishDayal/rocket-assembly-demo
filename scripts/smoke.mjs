@@ -8,7 +8,8 @@
 // the page mid-run. Without --serve, a reload during the run is reported and fails it.
 // Time budgets: each step's user-visible action must finish within its budget (seconds), and the page must
 // render smoothly again afterwards (a 600 ms run of frames, none slower than --jank-ms=100), or the step fails.
-// Defaults: load 20, build 90, card 10, swap 5, esc 1.5, explode 6, card2 20, assemble 6, next 8, reset 15.
+// Defaults: load 20, landing 8, build 90, card 10, swap 5, esc 1.5, explode 6, card2 20, assemble 6, next 8,
+// reset 15.
 // Override: --budget=swap:8,explode:10 (--build-timeout=N is the same as --budget=build:N).
 // --angle=metal|swiftshader|gl|default picks Chrome's GL backend (default: metal on macOS); swiftshader is a
 // CPU renderer, useful to tell a GPU-driver problem from app cost.
@@ -19,6 +20,8 @@
 //
 // Flow (one summary line per step; screenshots <outPrefix>-<step>.png; report <outPrefix>-report.json):
 //   load      HUD shows the preset's name
+//   landing   only when the URL has none of ?build / ?story / ?skip / ?demo: the landing page shows its button,
+//             Enter enters, and the UI is back once the camera has come down (SKIP otherwise)
 //   build     click "Build all", HUD reaches GO / NO-GO (verdict line) within --build-timeout seconds
 //   card      click a part of the stack (found by hover: pointer cursor), the card opens and its title is a part name from the dataset
 //   options   if the card has Options: open them, pick the second alternative (the next one if the second is
@@ -27,8 +30,9 @@
 //   explode   click "Explode", the button flips to "Assemble"
 //   card2     click a piece of the exploded stack, the card opens again
 //   assemble  click "Assemble", the button flips back to "Explode"
-//   next      "]" switches to the next preset (HUD shows its name, URL has ?build=<id>)
-//   reset     build part 1 with key "1", then "R": HUD is back to "Empty pad"
+//   next      "]" switches to the next preset, which appears BUILT: HUD shows its name and a GO / NO-GO
+//             verdict, URL has ?build=<id>
+//   reset     "R": HUD is "Empty pad · blueprint: <name>"; then key "1" builds part 1 from the empty pad
 // Console warnings/errors, uncaught exceptions and failed loads are collected; exceptions and console errors
 // fail the run, warnings are only reported. A 404 for /favicon.ico is ignored (the page declares none).
 import { spawn } from "node:child_process";
@@ -51,7 +55,7 @@ if (!serve && !target) {
 const prefix = resolve(prefixArg);
 mkdirSync(dirname(prefix), { recursive: true });
 const [W, H] = (flags.size ?? "1600x900").split("x").map(Number);
-const BUDGET = { load: 20, build: 90, card: 10, swap: 5, esc: 1.5, explode: 6, card2: 20, assemble: 6, next: 8, reset: 15 };
+const BUDGET = { load: 20, landing: 8, build: 90, card: 10, swap: 5, esc: 1.5, explode: 6, card2: 20, assemble: 6, next: 8, reset: 15 };
 if (flags["build-timeout"]) BUDGET.build = Number(flags["build-timeout"]);
 for (const kv of (flags.budget ?? "").split(",").filter(Boolean)) {
   const [k, v] = kv.split(":");
@@ -351,6 +355,7 @@ async function clickEl(selector) {
 }
 const KEYS = {
   Escape: { code: "Escape", keyCode: 27 },
+  Enter: { code: "Enter", keyCode: 13, text: "\r" },
   " ": { code: "Space", keyCode: 32 },
   "]": { code: "BracketRight", keyCode: 221 },
   "[": { code: "BracketLeft", keyCode: 219 },
@@ -358,7 +363,7 @@ const KEYS = {
 async function press(key) {
   const k = KEYS[key] ?? { code: /^\d$/.test(key) ? `Digit${key}` : `Key${key.toUpperCase()}`, keyCode: key.toUpperCase().charCodeAt(0) };
   const base = { key, code: k.code, windowsVirtualKeyCode: k.keyCode, nativeVirtualKeyCode: k.keyCode };
-  await send("Input.dispatchKeyEvent", { type: "keyDown", ...base, text: key.length === 1 ? key : undefined });
+  await send("Input.dispatchKeyEvent", { type: "keyDown", ...base, text: k.text ?? (key.length === 1 ? key : undefined) });
   await send("Input.dispatchKeyEvent", { type: "keyUp", ...base });
   await keepVisible();
 }
@@ -442,8 +447,12 @@ async function step(name, fn, { needs = [] } = {}) {
     detail = (await fn()) ?? "";
     if ((await js("document.visibilityState")) !== "visible") fail("page is hidden (rAF stopped) at the end of the step");
   } catch (e) {
-    status = "FAIL";
+    status = e.skip ? "SKIP" : "FAIL";
     detail = e.message;
+    if (e.skip) {
+      results.push({ name, status, ms: Date.now() - t, detail });
+      return print(results.at(-1));
+    }
     if (!unresponsive) {
       try {
         detail += ` | hud="${await hud()}"`;
@@ -463,6 +472,9 @@ function print(r) {
 const fail = (msg) => {
   throw new Error(msg);
 };
+const skip = (msg) => {
+  throw Object.assign(new Error(msg), { skip: true });
+};
 
 await step("load", async () => {
   await send("Page.navigate", { url });
@@ -476,6 +488,26 @@ await step("load", async () => {
   await shot("load");
   return `HUD "${h}"`;
 });
+
+const params = new URL(url).searchParams;
+const landingExpected = !["build", "story", "skip", "demo"].some((k) => params.has(k));
+await step(
+  "landing",
+  async () => {
+    if (!landingExpected) skip("URL has ?build / ?story / ?skip / ?demo: no landing page");
+    const shown = await until(() => js(`!!document.querySelector(".landing .landing-go")`), 5000);
+    if (!shown) fail("landing page (.landing .landing-go) did not appear");
+    await shot("landing");
+    await press("Enter");
+    const start = Date.now();
+    const done = await until(() => js(`!document.querySelector(".landing") && !document.body.classList.contains("landing")`), ms("landing"), 200);
+    if (!done) fail(`still on the landing page ${BUDGET.landing}s after Enter`);
+    const took = withinBudget("landing", start, "entering from the landing page");
+    await mustBeSmooth("entering");
+    return `Enter entered in ${took}; HUD "${await hud()}"`;
+  },
+  { needs: ["load"] },
+);
 
 await step(
   "build",
@@ -618,9 +650,9 @@ await step(
     await press("]");
     const h = await until(async () => {
       const t = await hud();
-      return t.includes(want) ? t : null;
+      return t.includes(want) && VERDICT.test(t) ? t : null;
     }, ms("next"));
-    if (!h) fail(`HUD did not switch to "${want}" within ${BUDGET.next}s`);
+    if (!h) fail(`HUD did not show "${want}" built with a GO / NO-GO verdict within ${BUDGET.next}s (HUD "${await hud()}")`);
     const q = await js("location.search");
     const id = presetOrder[i % presetOrder.length];
     if (!new URLSearchParams(q).get("build")?.startsWith(id)) fail(`URL is "${q}", expected ?build=${id}`);
@@ -635,18 +667,22 @@ await step(
 await step(
   "reset",
   async () => {
-    await press("1");
-    const building = await until(async () => /\b1\/\d+\b/.test(await hud()), ms("reset"), 300);
-    if (!building) fail(`key "1" did not build part 1 within ${BUDGET.reset}s (HUD "${await hud()}")`);
+    const want = `Empty pad · blueprint: ${presetName(startIndex + 1)}`;
     await press("r");
     const h = await until(async () => {
       const t = await hud();
-      return /empty pad/i.test(t) ? t : null;
+      return t.includes(want) ? t : null;
     }, ms("reset"), 300);
-    if (!h) fail(`HUD never returned to "Empty pad" within ${BUDGET.reset}s after R`);
-    await sleep(800);
+    if (!h) fail(`HUD did not show "${want}" within ${BUDGET.reset}s after R (HUD "${await hud()}")`);
+    await sleep(600);
     await shot("reset");
-    return `HUD "${h}"`;
+    await press("1");
+    const building = await until(async () => {
+      const t = await hud();
+      return /\b1\/\d+\b/.test(t) ? t : null;
+    }, ms("reset"), 300);
+    if (!building) fail(`key "1" did not build part 1 from the empty pad within ${BUDGET.reset}s (HUD "${await hud()}")`);
+    return `R -> "${h}"; key 1 -> "${building}"`;
   },
   { needs: ["next"] },
 );
