@@ -28,6 +28,7 @@ import { ensureShell } from "./ui/shell.js";
 import { createLanding } from "./ui/landing.js";
 import { createGroundMap } from "./fx/launchfx.js";
 import { createWorld } from "./world.js";
+import { flightTimeline } from "./flight.js";
 import * as f from "./ui/format.js";
 
 const query = new URLSearchParams(location.search);
@@ -226,6 +227,7 @@ const sfx = createSfx();
 // Off during the landing dive, which draws its own planet and sky.
 const world = createWorld({ renderer });
 const BG = scene.background;
+world.clearColor.copy(BG); // what shows behind the builder while the far layer is off
 const PAD_KM = new THREE.Vector3(0, world.bodies.earth.radius_km, 0);
 const viewerKm = new THREE.Vector3();
 const choreo = createChoreographer({ parts, scene, root, camera, controls, sfx, onChange: syncUi, scale: SCALE, bounds: current.bounds, makePart, world });
@@ -765,6 +767,17 @@ function onTelemetry(tel) {
     ].join(" · ");
     return;
   }
+  if (tel.endState) {
+    // flight.js's end state (rounds 16–17): its sentence, green when it got there, warm red when it did not.
+    const st = tel.endState;
+    const ok = ["landed", "in-orbit-of", "orbit", "in-orbit", "escape"].includes(st.type);
+    const line = st.line ?? st.text ?? "";
+    const html = (st.missionLine ? `${f.esc(st.missionLine)} · ` : "") + `<strong class="${ok ? "go" : "nogo"}">${f.esc(line)}</strong>`;
+    telemetry.final = html;
+    report("launch", html);
+    hudText.innerHTML = html;
+    return;
+  }
   if (tel.ending) {
     const html = tel.final ? endingFinalHtml(tel.arrival, tel.booster) : endingLegHtml(tel.leg);
     if (tel.final) {
@@ -820,7 +833,9 @@ async function launch({ countdown, brief = false } = {}) {
   telemetry.final = null;
   selector.clear();
   const arrival = arrivalTimeline(current.build, catalog, sim.summary);
-  choreo.launch(sim, { pad: pad.group, clamps: pad.clamps, anchors, onTelemetry, arrival, countdown, brief });
+  // One timeline for the whole flight (UI 2's flight.js); the story runs it shorter.
+  const flight = brief ? null : flightTimeline(current.build, catalog, { ascent: sim }); // the story keeps its short ascent
+  choreo.launch(sim, { pad: pad.group, clamps: pad.clamps, anchors, onTelemetry, arrival, countdown, brief, timeline: !flight || flight.blocked || flight.kind !== "earth" ? null : flight }); // Moon/Mars: next push
 }
 
 // ---------- twin compare (design B8/C10) ----------
@@ -1372,11 +1387,14 @@ function frame() {
   const dt = Math.min(rawDt, 0.05);
   const t = clock.elapsedTime;
   luxuryBudget(rawDt);
-  const worldOn = !landingOn();
-  scene.background = worldOn ? null : BG;
+  // The far layer draws only in flight; at home it just clears to the builder's background (UI4's setEnabled),
+  // and the landing dive draws its own sky over a cleared near pass.
+  const worldOn = !landingOn() && Boolean(choreo.state.launch);
+  world.setEnabled(worldOn);
+  scene.background = landingOn() ? BG : null;
   stars.visible = !worldOn; // the world draws its own
-  if (worldPass) worldPass.enabled = worldOn;
-  if (nearPass) nearPass.clear = !worldOn;
+  if (worldPass) worldPass.enabled = !landingOn();
+  if (nearPass) nearPass.clear = landingOn();
   choreo.update(dt, t);
   landing?.update(dt, t);
   if (!landingOn()) controls.update(); // its polar/distance clamps would bend the dive's path
@@ -1418,8 +1436,12 @@ function frame() {
   twin?.sil?.update(camera);
   anchors?.update(t);
   if (worldOn) {
-    viewerKm.copy(PAD_KM).add(choreo.nearOriginKm()).addScaledVector(camera.position, 1 / (1000 * SCALE));
-    world.setViewer({ body: "earth", pos_km: viewerKm, camera });
+    const v = choreo.viewer();
+    if (v) world.setViewer({ body: "earth", pos_km: v.pos_km, camera, frame: v.frame });
+    else {
+      viewerKm.copy(PAD_KM).add(choreo.nearOriginKm()).addScaledVector(camera.position, 1 / (1000 * SCALE));
+      world.setViewer({ body: "earth", pos_km: viewerKm, camera });
+    }
   }
   if (composer) composer.render();
   else {

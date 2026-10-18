@@ -123,7 +123,7 @@
         const manifest = buildManifest(presetToBuild(getPreset("delta-iv-m")), catalog);
         const part = createPart(manifest.find((s) => s.kind === "payload"), createMaterials());
         setShellOpacity(part, 0.92);
-        for (const p of part.pieces) if (/:(0|1)$/.test(p.mesh.name)) p.mesh.visible = false;
+        for (const p of part.pieces) if (p.mesh.userData.adapter) p.mesh.visible = false;
         for (const d of deployables(part)) applyDeploy(d, 1);
         part.group.position.y = 0; // createPart puts it at its slot on the stack
         part.group.updateMatrixWorld(true);

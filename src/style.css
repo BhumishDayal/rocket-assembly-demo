@@ -569,6 +569,7 @@ body.landing .detail {
 
 /* HUD */
 .hud {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7); /* readable over the day side of the Earth in flight */
   position: fixed;
   right: 32px;
   top: 32px;

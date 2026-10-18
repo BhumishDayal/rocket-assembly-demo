@@ -74,7 +74,7 @@
         const manifest = buildManifest(presetToBuild(getPreset("delta-iv-m")), catalog);
         const spec = manifest.find((s) => s.kind === "payload");
         const part = createPart(spec, createMaterials());
-        for (const p of part.pieces) if (/:(0|1)$/.test(p.mesh.name)) p.mesh.visible = false; // adapter cone + clamp band
+        for (const p of part.pieces) if (p.mesh.userData.adapter) p.mesh.visible = false; // adapter cone + clamp band
         let minY = Infinity;
         for (const p of deployables(part)) {
           const d = p.deploy;

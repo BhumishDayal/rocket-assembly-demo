@@ -59,7 +59,7 @@
         const spec = manifest.find((s) => s.kind === "payload");
         const part = createPart(spec, createMaterials());
         setShellOpacity(part, 0.92);
-        for (const p of part.pieces) if (/:(0|1)$/.test(p.mesh.name)) p.mesh.visible = false; // adapter cone + clamp band
+        for (const p of part.pieces) if (p.mesh.userData.adapter) p.mesh.visible = false; // adapter cone + clamp band
         const lm = q.get("lm") === "1" ? landerOf(part) : null;
         if (lm) {
           // only the landable sub-part (Apollo LM), legs out, feet on the ground

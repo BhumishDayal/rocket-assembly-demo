@@ -116,6 +116,53 @@ for (const preset of catalog.presets) {
 }
 expect(sooty > 0, "no soot anywhere");
 
+// Rivets (instanced detail): on a sooty / frosty skin they share the skin's hook and uniforms; none sits on the
+// roll pattern's black areas. Adapter pieces are tagged (exactly the first two built, :0 and :1).
+{
+  const S = 0.25;
+  const rollBlack = (u, v) => {
+    const sector = Math.floor(u * 8);
+    return (v < 0.3 && sector % 2 === 0) || (v > 0.93 && sector % 2 === 1);
+  };
+  let shared = 0;
+  let checkedRoll = 0;
+  for (const preset of catalog.presets) {
+    const mats = createMaterials();
+    for (const spec of buildManifest(presetToBuild(preset), catalog)) {
+      const part = createPart(spec, mats);
+      const id = `${preset.id}/${spec.id}`;
+      for (const p of part.pieces) {
+        const host = p.mesh.userData.looks?.painted;
+        for (const d of (p.mesh.userData.details ?? []).filter((x) => x.userData.detail === "rivet")) {
+          const m = d.userData.looks?.painted ?? d.material;
+          if (host?.userData.soot) {
+            const eq = (x, y) => (!x && !y) || (x && y && x.value.equals(y.value));
+            expect(eq(m.soot, host.soot) && eq(m.frost, host.frost) && m.customProgramCacheKey() === host.customProgramCacheKey(), `${id}: ${p.mesh.name} rivets do not share the skin's soot/frost`);
+            shared++;
+          }
+          const roll = (spec.kind === "tank" || spec.kind === "interstage") && spec.geom.finish === "white-black-roll" && !spec.geom.enclosed;
+          if (roll) {
+            const H = spec.geom.H_m;
+            const a = d.instanceMatrix.array;
+            for (let i = 0; i < d.count; i++) {
+              const [x, y, z] = [a[i * 16 + 12] / S, a[i * 16 + 13] / S, a[i * 16 + 14] / S];
+              const q = Math.PI / 2;
+              const phi = ((Math.atan2(x, z) % q) + q) % q;
+              if (rollBlack(phi / (2 * Math.PI), y / H)) failures.push(`${id}: rivet on a black roll sector at y ${y.toFixed(2)} m`);
+            }
+            checkedRoll += d.count;
+          }
+        }
+      }
+      if (spec.kind === "payload") {
+        const tagged = part.pieces.filter((p) => p.mesh.userData.adapter).map((p) => p.mesh.name.split(":").pop()).sort();
+        expect(JSON.stringify(tagged) === JSON.stringify(["0", "1"]), `${id}: adapter tags on ${tagged}`);
+      }
+    }
+  }
+  expect(shared > 0 && checkedRoll > 0, `rivet checks ran (${shared} sooty/frosty rivet sets, ${checkedRoll} roll rivets)`);
+}
+
 // Sourced nozzle extension (F-1): the bell splits where its radius is extension.startRadiusFraction × the exit
 // radius; the extension piece is the band below, without cooling tubes (flat uv.x).
 {

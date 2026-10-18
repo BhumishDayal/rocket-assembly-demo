@@ -130,6 +130,13 @@ function dataTexture(w, h, fill, { srgb = false, channel = 0, tile_m = 0 } = {})
   return t;
 }
 
+// The roll pattern's black areas on normalized shell UVs (u around, v along): alternating eighths on the lower
+// part and a counter-phased band at the top. Shared by the textures and the rivet layout (no rivets on black).
+const rollBlack = (u, v) => {
+  const sector = Math.floor(u * 8);
+  return (v < 0.3 && sector % 2 === 0) || (v > 0.93 && sector % 2 === 1);
+};
+
 let TEX = null;
 function textures() {
   if (TEX) return TEX;
@@ -214,19 +221,11 @@ function textures() {
     roll: dataTexture(
       W,
       512,
-      (u, v) => {
-        const sector = Math.floor(u * 8);
-        const black = (v < 0.3 && sector % 2 === 0) || (v > 0.93 && sector % 2 === 1);
-        return black ? [0.06, 0.06, 0.065] : [0.92, 0.92, 0.9];
-      },
+      (u, v) => (rollBlack(u, v) ? [0.06, 0.06, 0.065] : [0.92, 0.92, 0.9]),
       { srgb: true },
     ),
     // Alpha for the roll pattern on x-ray shells: black bands opaque, the rest at the shell opacity (G channel).
-    rollAlpha: dataTexture(W, 512, (u, v) => {
-      const sector = Math.floor(u * 8);
-      const black = (v < 0.3 && sector % 2 === 0) || (v > 0.93 && sector % 2 === 1);
-      return black ? [1, 1, 1] : [SHELL_OPACITY, SHELL_OPACITY, SHELL_OPACITY];
-    }),
+    rollAlpha: dataTexture(W, 512, (u, v) => (rollBlack(u, v) ? [1, 1, 1] : [SHELL_OPACITY, SHELL_OPACITY, SHELL_OPACITY])),
     // Sprayed foam: mottled orange-brown (colour, sRGB); its red channel doubles as the bump. 3 m tile on uv1.
     foam: dataTexture(
       W,
@@ -388,6 +387,8 @@ export function createMaterials() {
 // Frost (same hook): a matte blue-white layer over cryogenic tank skin above an edge at mesh-local y, the edge
 // wavering with 3D noise and drifting slowly in time; patchy inside. material.frost = { value: Vector4(edgeY,
 // waver, amount, softness) } (amount 0 = none). The time uniform is shared and set before each frosted draw.
+// Instanced detail on a shell (its rivets) takes the same hook with its host's uniforms (see createPart), so the
+// rivets soot and frost with the skin they sit on.
 const frostTime = { value: 0 };
 const tickFrost = () => (frostTime.value = (typeof performance !== "undefined" ? performance.now() : Date.now()) / 1000);
 function sootHook(shader) {
@@ -396,7 +397,16 @@ function sootHook(shader) {
   shader.uniforms.uFrostT = frostTime;
   shader.vertexShader = shader.vertexShader
     .replace("#include <common>", "#include <common>\nvarying vec2 vSoot;\nvarying vec3 vSootP;")
-    .replace("#include <begin_vertex>", "#include <begin_vertex>\nvSoot = vec2(position.y, atan(position.x, position.z));\nvSootP = position;");
+    .replace(
+      "#include <begin_vertex>",
+      `#include <begin_vertex>
+      vec3 sootP = position;
+      #ifdef USE_INSTANCING
+        sootP = (instanceMatrix * vec4(position, 1.0)).xyz; // instanced detail: in its host piece's frame
+      #endif
+      vSoot = vec2(sootP.y, atan(sootP.x, sootP.z));
+      vSootP = sootP;`,
+    );
   shader.fragmentShader = shader.fragmentShader
     .replace(
       "#include <common>",
@@ -439,7 +449,7 @@ function sootHook(shader) {
       #endif`,
     );
 }
-const sootKey = () => "paint-soot-frost-v3";
+const sootKey = () => "paint-soot-frost-v4";
 
 // Bell glow: an emissive ramp on the nozzle while it fires, orange at the lip to dull red at the throat, the
 // inside (back faces) brightest. Chained after any hook the material already has (the x-ray shell's rim).
@@ -1020,6 +1030,16 @@ function rivetTint(mesh) {
   return (c.getHSL({}).l > 0.35 ? c.multiplyScalar(0.8) : c.multiplyScalar(1.7).addScalar(0.04)).getHex();
 }
 const rivetsOn = (finish) => finish !== "orange-foam"; // sprayed foam shows no rivets
+// Drops rivets that would sit on the roll pattern's black areas (they take the white paint's tint). For quarter
+// shells whose UVs span u = phi / 2π over [0, π/2] and v = y / H; the rivets' piece-local azimuth folds into it.
+function offRoll(list, H) {
+  const q = Math.PI / 2;
+  return list.filter((m) => {
+    const [x, y, z] = [m.elements[12] / S, m.elements[13] / S, m.elements[14] / S];
+    const phi = ((Math.atan2(x, z) % q) + q) % q;
+    return !rollBlack(phi / TAU, y / H);
+  });
+}
 
 // ---------- engines ----------
 
@@ -1658,7 +1678,7 @@ function buildTank(spec, mats) {
     }
     const d0 = (0.02 * D) / R;
     list.push(...rivetArc(R, ya, d0, Math.PI / 2 - d0, pitch, rv), ...rivetArc(R, yb, d0, Math.PI / 2 - d0, pitch, rv));
-    rivets = instAttr(list);
+    rivets = instAttr(g.finish === "white-black-roll" && !g.enclosed ? offRoll(list, H) : list);
   }
   for (let q = 0; q < 4; q++) {
     const ry = (q * Math.PI) / 2;
@@ -1904,7 +1924,7 @@ function buildInterstage(spec, mats) {
     rl.push(...rivetRow(o.clone().multiplyScalar(rAt(ya)).setY(ya), o.clone().multiplyScalar(rAt(yb)).setY(yb), pitch, rv));
   }
   for (const y of [ya - 0.012 * D, yb + 0.012 * D]) rl.push(...rivetArc(rAt(y), y, 2 * dl, Math.PI / 2 - 2 * dl, pitch, rv));
-  const rivets = rivetsOn(g.finish) ? instAttr(rl) : null;
+  const rivets = rivetsOn(g.finish) ? instAttr(g.finish === "white-black-roll" ? offRoll(rl, H) : rl) : null;
   for (let q = 0; q < 4; q++) {
     const ry = (q * Math.PI) / 2;
     const pc = P(iqRibbed, mat, { ry, order: 1 + q * 0.02, dir: radialPhi(ry + Math.PI / 4), dist: shellDist, side: DS, kind: "shell", lineGeo: ribGeo, fineGeo: iq });
@@ -1946,7 +1966,9 @@ function buildInterstage(spec, mats) {
 
 // ---------- payloads ----------
 
-// Payload pieces are tagged in group "p": the main body is the core, small bits stack above or below it.
+// Payload pieces are tagged in group "p": the main body is the core, small bits stack above or below it. The
+// adapter section (attach fitting and clamp band, or the capsule's instrument ring and its equipment) carries
+// mesh.userData.adapter = true: hide by that tag when the payload flies or lands on its own.
 function adapterPieces(out, mats, g) {
   const Rt = g.stageD_m / 2;
   const Rp = g.D_m / 2;
@@ -1954,6 +1976,7 @@ function adapterPieces(out, mats, g) {
   if (g.archetype === "capsule") {
     // Instrument-unit style ring at the stage diameter (visual).
     out.push(piece(machinedRing(Rt * 0.94, Rt, h, 0), mats.trim, { order: 0, dir: DOWN, dist: 0.12, ax: ["p", -1, 9], sym: true, edges: true }));
+    out.at(-1).mesh.userData.adapter = true;
     return;
   }
   // Payload attach fitting (cone) + machined clamp band at the payload interface.
@@ -1963,6 +1986,7 @@ function adapterPieces(out, mats, g) {
   const cb = Math.max(0.015, 0.012 * rtop);
   const clampRing = machinedRing(rtop * 0.85, rtop * 1.05, h * 0.1, h * 0.9);
   out.push(piece(merge([clampRing.clone(), boltRing(rtop * 1.06, h * 0.95, 24, cb, cb, cb * 0.8)]), mats.machined, { order: 0.05, dir: DOWN, dist: 0.07, ax: ["p", -1, 8], sym: true, edges: true, lineGeo: clampRing }));
+  for (const p of out.slice(-2)) p.mesh.userData.adapter = true;
 }
 
 function buildPayload(spec, mats) {
@@ -2330,7 +2354,7 @@ function capsule(P, mats, g, y0) {
   const Rt = g.stageD_m / 2;
   const iu = [];
   for (let i = 0; i < 8; i++) iu.push(box(0.035 * Rt, 0.55 * y0, 0.16 * Rt, Rt * 0.9, 0.5 * y0, 0).rotateY((-(i + 0.5) * TAU) / 8));
-  P(projectUV(merge(iu)), mats.darkMetal, { order: 0.05, dir: DOWN, dist: 0.12, ax: [-1, 9] });
+  P(projectUV(merge(iu)), mats.darkMetal, { order: 0.05, dir: DOWN, dist: 0.12, ax: [-1, 9] }).mesh.userData.adapter = true;
   // Lander folded inside the adapter, below the SPS bell (only seen when the panels open).
   const rIn = (y) => lerp(Rb, Rs, y / slaH);
   const lmTop = Math.min(0.62 * slaH, slaH - spsH - 0.05 * slaH);
@@ -2719,6 +2743,28 @@ export function createPart(spec, mats) {
       const amount = m.roughness >= 0.8 ? 0.15 : 0.5; // matte sprayed foam (insulated) vs paint
       m.frost = { value: new THREE.Vector4(edge - p.mesh.position.y, 0.06 * spec.height, amount, 0.012 * spec.height + 0.02) };
       p.mesh.onBeforeRender = tickFrost;
+    }
+  }
+  // Rivets on a sooty / frosty skin take the skin's hook and uniforms, so they darken and frost with it. The
+  // part's rivet material is shared by its quarters (equal values); a rivet set whose host differs gets its own.
+  const same = (a, b) => (!a && !b) || (a && b && a.value.equals(b.value));
+  for (const p of pieces) {
+    const host = p.mesh.userData.looks?.painted;
+    if (!host?.userData.soot) continue;
+    for (const d of p.mesh.userData.details ?? []) {
+      if (d.userData.detail !== "rivet") continue;
+      let m = d.userData.looks?.painted ?? d.material;
+      if (m.soot && same(m.soot, host.soot) && same(m.frost, host.frost)) continue;
+      if (m.soot) {
+        m = m.clone();
+        if (d.userData.looks) d.userData.looks = { ...d.userData.looks, painted: m };
+        if (d.material !== d.userData.looks?.xray) d.material = m;
+      }
+      m.soot = host.soot;
+      m.frost = host.frost;
+      m.onBeforeCompile = sootHook;
+      m.customProgramCacheKey = sootKey;
+      if (host.frost) d.onBeforeRender = tickFrost;
     }
   }
   axisOffsets(pieces, clamp(0.035 * spec.height, 0.04, 0.3));
