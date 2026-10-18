@@ -92,6 +92,37 @@ export const tooManyEnginesWarning = (count, engine, tank, fit) =>
 
 export const isVacuumOnly = (engine) => engine.thrustSL_kN <= 0 || engine.ispSL_s <= 0;
 
+// The rules evaluateBuild applies, in words, built from the same constants, so the advisor can explain a
+// verdict without inventing its own physics. `when` marks a rule that only matters if a warning mentions it.
+// (Port of RULES / physicsRulesText in feasibility.ts, PR #30; named RULE_TEXT here because RULES above holds
+// the constants.)
+const RULE_TEXT = [
+  {
+    text: "Delta-v per stage = Isp x g0 x ln(start mass / end mass); stage 1 uses sea-level Isp, upper stages vacuum Isp; upper stages ride as dead weight while lower stages burn. Mission requirements already include gravity and drag losses.",
+  },
+  {
+    text: `Liftoff thrust-to-weight (stage 1 engines only) must be at least ${TWR_OK}; below ${TWR_BLOCKING} the rocket cannot leave the pad.`,
+  },
+  { text: "Engine and tank propellant must match: an engine can only burn what its tank holds.", when: ["propellant"] },
+  {
+    text: "Vacuum-only engines (no sea-level thrust) cannot be on stage 1, the bottom stage: their huge nozzles are built for space and fail in thick air. On upper stages they are the right choice.",
+    when: ["vacuum-only"],
+  },
+  {
+    text: `Engines that fit under a tank = floor(${ENGINE_FIT_FACTOR} x (tank diameter / engine diameter)^2), max ${MAX_ENGINE_COUNT}: nozzles must sit side by side under the tank base.`,
+    when: ["don't fit", "engine count"],
+  },
+  {
+    text: `Tank dry mass must be at least ${DRY_MASS_MIN_FRACTION * 100} % of its propellant: real tanks need walls and structure.`,
+    when: ["dry mass"],
+  },
+  { text: "Feasible = enough delta-v for the mission, TWR ok, and no blocking warnings." },
+];
+
+/** All rules, or with `warnings` only the core rules plus those a warning is about. */
+export const physicsRulesText = (warnings) =>
+  RULE_TEXT.filter((r) => !warnings || !r.when || r.when.some((k) => warnings.some((w) => w.includes(k)))).map((r) => r.text);
+
 // The per-stage blocking rules of evaluateBuild, in the TS order. Factored out (not changed) so stageDetails
 // can attach each warning to the stage it hit.
 const stageRuleWarnings = (stage, stageIndex, engine, tank) => {

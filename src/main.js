@@ -473,6 +473,8 @@ function syncUi() {
     if (telemetry.final) hudText.innerHTML = telemetry.final;
   } else if (twin ?? rival) hudText.innerHTML = (twin ?? rival).line;
   else if (!swapping) hudText.innerHTML = hudHtml();
+  announceProgress();
+  announceComplete();
   // A selected part that is being removed (or gone after reset) loses its card.
   const sel = selector.selected;
   if (sel && (!sel.built || (sel.busy && !swapping) || !parts.includes(sel))) selector.clear();
@@ -480,26 +482,78 @@ function syncUi() {
   selector.refresh();
 }
 
-// Options: swap one slot for another record. The stack animates (choreo.applyManifest: lift, unscrew,
-// fly in, settle), then physics, HUD and the open card switch to the new build.
-async function chooseOption(part, recordId) {
-  if (choreo.state.busy) return;
-  if (choreo.state.exploded && !(await choreo.assemble())) return;
-  const next = loadBuild(current.preset, applyOption(current.build, part.kind, part.stageIndex, recordId));
-  if (buildKey(next.build) === buildKey(current.build)) return;
+// ---------- app bridge (team PR #30, ported verbatim in behaviour) ----------
+// In the Next app the build also lives in the app's store (Grok reads it there). This screen announces every
+// build it shows ("assembly:build") and accepts builds from the app ("assembly:apply", e.g. Grok's Apply),
+// which animate exactly like Options. Standalone (Vite) nothing listens and nothing is sent.
+const announce = () => dispatchEvent(new CustomEvent("assembly:build", { detail: { build: current.build } }));
+// "assembly:complete": whether every part of the current build is on the stack (the app shows Render only then).
+// "assembly:progress": every part in build order and whether it is on the stack, sent whenever that changes,
+// so Grok can walk the user through the build one part at a time.
+let lastProgress = "";
+function announceProgress() {
+  const list = parts.map((p) => ({ id: p.id, kind: p.kind, stageIndex: p.stageIndex, recordId: p.record?.id ?? null, built: p.built }));
+  const key = JSON.stringify(list);
+  if (swapping || key === lastProgress) return;
+  lastProgress = key;
+  dispatchEvent(new CustomEvent("assembly:progress", { detail: { parts: list } }));
+}
+let lastComplete = null;
+function announceComplete() {
+  const complete = !swapping && isComplete();
+  if (complete === lastComplete) return;
+  lastComplete = complete;
+  dispatchEvent(new CustomEvent("assembly:complete", { detail: { complete } }));
+}
+
+// Animate the stack to `build` (choreo.applyManifest: lift, unscrew, fly in, settle), then physics, HUD and the
+// open card switch to it. Resolves to false if nothing changed or the swap was cancelled.
+async function swapTo(build) {
+  if (choreo.state.exploded && !(await choreo.assemble())) return false;
+  const next = loadBuild(current.preset, build);
+  if (buildKey(next.build) === buildKey(current.build)) return false;
   shown = { ...current, complete: isComplete() };
   current = next;
+  announce();
   swapping = true;
   applyBounds(next.bounds);
   choreo.setBounds(next.bounds);
   const res = await choreo.applyManifest(next.manifest);
   swapping = false;
   shown = null;
-  if (!res) return syncUi(); // cancelled (reset or preset switch mid-swap)
-  const swapped = choreo.parts.find((p) => p.id === part.id);
   syncUi();
+  return Boolean(res); // false: cancelled (reset or preset switch mid-swap)
+}
+
+// Options: swap one slot for another record.
+async function chooseOption(part, recordId) {
+  if (choreo.state.busy) return;
+  if (!(await swapTo(applyOption(current.build, part.kind, part.stageIndex, recordId)))) return;
+  const swapped = choreo.parts.find((p) => p.id === part.id);
   if (swapped?.built) selector.select(swapped);
 }
+
+// A build from the app waits until any running animation is done; only the latest one is applied.
+let pendingApply = null;
+function applyFromApp(build) {
+  pendingApply = build;
+  if (choreo.state.busy) return void setTimeout(() => pendingApply === build && applyFromApp(build), 250);
+  pendingApply = null;
+  // A finished rocket stays finished (e.g. Apply fix adds a stage); a rocket mid-build keeps its pace (guided build).
+  const wasComplete = isComplete();
+  void swapTo(build).then((ok) => ok && wasComplete && !isComplete() && choreo.buildAll());
+}
+addEventListener("assembly:apply", (e) => applyFromApp(e.detail.build));
+// Screen commands from the app (Grok's voice tools): the same actions as the buttons.
+addEventListener("assembly:command", (e) => {
+  const cmd = e.detail?.cmd;
+  if (cmd === "build_all") choreo.buildAll();
+  else if (cmd === "build_next") {
+    const next = parts.find((p) => !p.built);
+    if (next && choreo.canBuild(next)) choreo.build(next);
+  } else if (cmd === "explode") choreo.toggleExplode();
+  else if (cmd === "reset") reset();
+});
 
 // Switching rockets ([ ], the Rockets list) shows the new one built (one snap); reset and the story start empty.
 function switchPreset(step, { built = true } = {}) {
@@ -515,6 +569,7 @@ function switchPreset(step, { built = true } = {}) {
   choreo.rebuild(parts);
   if (built) choreo.appearBuilt();
   if (!rocketsEl.hidden) rocketsEl.innerHTML = rocketsHtml(rocketsMode);
+  announce();
   const q = new URLSearchParams(location.search);
   q.set("build", current.preset.id);
   history.replaceState(null, "", `${location.pathname}?${q}${location.hash}`);
@@ -1143,6 +1198,7 @@ const landingMode = !["build", "story", "skip", "demo"].some((k) => query.has(k)
 if (landingMode) startLanding();
 else choreo.home();
 syncUi();
+announce();
 
 // Luxury budget (GTAO, DoF): frame times are averaged over 2 s windows while either is on; a slow window drops
 // the DoF for the session if it was on, else GTAO. The first window after load is skipped (shader compiles and

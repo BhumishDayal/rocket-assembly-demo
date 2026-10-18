@@ -10,7 +10,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { evaluateBuild, maxEngineCount, rocketDistance, sanitizeEngineCount, stageDetails, stackMass_kg } from "../src/physics.js";
+import { evaluateBuild, maxEngineCount, physicsRulesText, rocketDistance, sanitizeEngineCount, stageDetails, stackMass_kg } from "../src/physics.js";
 
 const REL_TOL = 1e-6;
 const dataDir = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "data");
@@ -172,6 +172,59 @@ for (const k of catalog.tanks) {
   compare(`fit.${k.id}`, catalog.engines.map((e) => maxEngineCount(k.diameter_m, e.diameter_m)), FIT_GOLDEN[k.id]);
 }
 console.log(`edge builds: ${Object.keys(EDGE_BUILDS).length} checked`);
+
+// physicsRulesText (feasibility.ts, PR #30): the strings must match the TS exactly. Produced by running
+// SpaxeX origin/main @ 1cb93b8 src/lib/physics/feasibility.ts with `npx -y tsx` on: no argument, [], the dry-mass
+// warning, and a too-many-engines warning.
+const RULES_GOLDEN = {
+  "all": {
+    "warnings": null,
+    "text": [
+      "Delta-v per stage = Isp x g0 x ln(start mass / end mass); stage 1 uses sea-level Isp, upper stages vacuum Isp; upper stages ride as dead weight while lower stages burn. Mission requirements already include gravity and drag losses.",
+      "Liftoff thrust-to-weight (stage 1 engines only) must be at least 1.2; below 1 the rocket cannot leave the pad.",
+      "Engine and tank propellant must match: an engine can only burn what its tank holds.",
+      "Vacuum-only engines (no sea-level thrust) cannot be on stage 1, the bottom stage: their huge nozzles are built for space and fail in thick air. On upper stages they are the right choice.",
+      "Engines that fit under a tank = floor(0.62 x (tank diameter / engine diameter)^2), max 9: nozzles must sit side by side under the tank base.",
+      "Tank dry mass must be at least 4 % of its propellant: real tanks need walls and structure.",
+      "Feasible = enough delta-v for the mission, TWR ok, and no blocking warnings."
+    ]
+  },
+  "none": {
+    "warnings": [],
+    "text": [
+      "Delta-v per stage = Isp x g0 x ln(start mass / end mass); stage 1 uses sea-level Isp, upper stages vacuum Isp; upper stages ride as dead weight while lower stages burn. Mission requirements already include gravity and drag losses.",
+      "Liftoff thrust-to-weight (stage 1 engines only) must be at least 1.2; below 1 the rocket cannot leave the pad.",
+      "Feasible = enough delta-v for the mission, TWR ok, and no blocking warnings."
+    ]
+  },
+  "dryMass": {
+    "warnings": [
+      "tank dry mass below 4 percent of propellant"
+    ],
+    "text": [
+      "Delta-v per stage = Isp x g0 x ln(start mass / end mass); stage 1 uses sea-level Isp, upper stages vacuum Isp; upper stages ride as dead weight while lower stages burn. Mission requirements already include gravity and drag losses.",
+      "Liftoff thrust-to-weight (stage 1 engines only) must be at least 1.2; below 1 the rocket cannot leave the pad.",
+      "Engine and tank propellant must match: an engine can only burn what its tank holds.",
+      "Tank dry mass must be at least 4 % of its propellant: real tanks need walls and structure.",
+      "Feasible = enough delta-v for the mission, TWR ok, and no blocking warnings."
+    ]
+  },
+  "tooMany": {
+    "warnings": [
+      "9 RD-191 engines don't fit a 3.66 m wide Falcon 9 Block 5 first-stage tank: max 1"
+    ],
+    "text": [
+      "Delta-v per stage = Isp x g0 x ln(start mass / end mass); stage 1 uses sea-level Isp, upper stages vacuum Isp; upper stages ride as dead weight while lower stages burn. Mission requirements already include gravity and drag losses.",
+      "Liftoff thrust-to-weight (stage 1 engines only) must be at least 1.2; below 1 the rocket cannot leave the pad.",
+      "Engines that fit under a tank = floor(0.62 x (tank diameter / engine diameter)^2), max 9: nozzles must sit side by side under the tank base.",
+      "Feasible = enough delta-v for the mission, TWR ok, and no blocking warnings."
+    ]
+  }
+};
+for (const [k, g] of Object.entries(RULES_GOLDEN)) {
+  compare(`physicsRulesText(${k})`, physicsRulesText(g.warnings ?? undefined), g.text);
+}
+console.log(`physicsRulesText: ${Object.keys(RULES_GOLDEN).length} cases checked`);
 
 if (failures.length) {
   console.error(`\nFAIL: ${failures.length} mismatch(es)`);
