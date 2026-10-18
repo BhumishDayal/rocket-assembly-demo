@@ -7,7 +7,7 @@
 // Flow (one summary line per step; screenshots <outPrefix>-<step>.png; report <outPrefix>-report.json):
 //   load      HUD shows the preset's name
 //   build     click "Build all", HUD reaches GO / NO-GO (verdict line) within --build-timeout seconds
-//   card      click the stack, the card opens and its title is a part name from the dataset
+//   card      click a part of the stack (found by hover: pointer cursor), the card opens and its title is a part name from the dataset
 //   options   if the card has Options: open them, pick the second alternative (the next one if the second is
 //             the current record), the verdict line changes and the card shows the chosen record
 //   esc       Esc closes the card
@@ -17,7 +17,7 @@
 //   next      "]" switches to the next preset (HUD shows its name, URL has ?build=<id>)
 //   reset     build part 1 with key "1", then "R": HUD is back to "pad ready"
 // Console warnings/errors, uncaught exceptions and failed loads are collected; exceptions and console errors
-// fail the run, warnings are only reported.
+// fail the run, warnings are only reported. A 404 for /favicon.ico is ignored (the page declares none).
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -143,6 +143,7 @@ ws.onmessage = (e) => {
     const d = m.params.exceptionDetails;
     note("exception", d.exception?.description ?? d.text);
   } else if (m.method === "Log.entryAdded" && ["warning", "error"].includes(m.params.entry.level)) {
+    if (/\/favicon\.ico$/.test(m.params.entry.url ?? "")) return; // the page has no favicon; not a demo bug
     note(m.params.entry.level, `[${m.params.entry.source}] ${m.params.entry.text}${m.params.entry.url ? " " + m.params.entry.url : ""}`);
   }
 };
@@ -233,26 +234,35 @@ async function shot(name) {
   writeFileSync(file, Buffer.from(r.data, "base64"));
   return file;
 }
-// Click candidate points (centre column first, then fanning out) until the card opens on a part.
-async function clickUntilCard(points) {
-  for (const [x, y] of points) {
-    await click(Math.round(x), Math.round(y));
+// Find a part under the pointer the way a user would: hover candidate points (nearest the screen centre
+// first) and click only where the canvas shows the pointer cursor (select.js sets it over pickable parts), so
+// probing never clicks empty space or the UI. Returns the opened card, or null.
+async function clickPart(points) {
+  let probes = 0;
+  for (const [px, py] of points) {
+    const x = Math.round(px);
+    const y = Math.round(py);
+    probes++;
+    await send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+    await sleep(90); // select.js coalesces hover raycasts to one per frame, at most every 40 ms
+    const over = await js(`(() => { const c = document.getElementById("scene");
+      return document.elementFromPoint(${x}, ${y}) === c && c.style.cursor === "pointer"; })()`);
+    if (!over) continue;
+    await click(x, y);
     const c = await until(async () => {
       const s = await card();
       return s.open && s.title ? s : null;
-    }, 700, 100);
-    if (c) return { ...c, at: [Math.round(x), Math.round(y)] };
+    }, 800, 100);
+    if (c) return { ...c, at: [x, y], probes };
   }
   return null;
 }
-function columnPoints(cx, yFrom, yTo, step) {
+function gridPoints(x0, x1, y0, y1, step) {
   const pts = [];
-  const mid = (yFrom + yTo) / 2;
-  for (let d = 0; d <= (yTo - yFrom) / 2; d += step) {
-    pts.push([cx, mid - d]);
-    if (d) pts.push([cx, mid + d]);
-  }
-  return pts;
+  for (let x = x0; x <= x1; x += step) for (let y = y0; y <= y1; y += step) pts.push([x, y]);
+  const cx = (x0 + x1) / 2;
+  const cy = (y0 + y1) / 2;
+  return pts.sort((a, b) => Math.hypot(a[0] - cx, (a[1] - cy) * 0.5) - Math.hypot(b[0] - cx, (b[1] - cy) * 0.5));
 }
 
 // ---------- steps ----------
@@ -321,12 +331,12 @@ await step(
 await step(
   "card",
   async () => {
-    const c = await clickUntilCard(columnPoints(W / 2, H * 0.12, H * 0.88, 30));
-    if (!c) fail("no click on the centre column opened the card");
+    const c = await clickPart(gridPoints(W * 0.35, W * 0.65, H * 0.08, H * 0.88, 24));
+    if (!c) fail("found no clickable part on the stack (hover never showed the pointer cursor)");
     if (!partNames.has(c.title)) fail(`card title "${c.title}" is not a part name in the dataset/layout`);
     state.cardTitle = c.title;
     await shot("card");
-    return `"${c.title}" (${c.eyebrow}) at ${c.at.join(",")}${c.hasOptions ? " · has Options" : ""}`;
+    return `"${c.title}" (${c.eyebrow}) at ${c.at.join(",")} after ${c.probes} probe(s)${c.hasOptions ? " · has Options" : ""}`;
   },
   { needs: ["load"] },
 );
@@ -393,18 +403,13 @@ await step(
 await step(
   "card2",
   async () => {
-    // Exploded pieces spread sideways and up: centre column, then two side columns.
-    const pts = [
-      ...columnPoints(W / 2, H * 0.08, H * 0.9, 30),
-      ...columnPoints(W / 2 - W * 0.06, H * 0.1, H * 0.85, 40),
-      ...columnPoints(W / 2 + W * 0.06, H * 0.1, H * 0.85, 40),
-    ];
-    const c = await clickUntilCard(pts);
-    if (!c) fail("no click on the exploded stack opened the card");
+    // Exploded pieces spread sideways and up, so search a wider area than the built stack.
+    const c = await clickPart(gridPoints(W * 0.25, W * 0.75, H * 0.05, H * 0.9, 28));
+    if (!c) fail("found no clickable piece in the exploded view (hover never showed the pointer cursor)");
     if (!partNames.has(c.title)) fail(`card title "${c.title}" is not a part name in the dataset/layout`);
     await shot("card2");
     await press("Escape");
-    return `"${c.title}" (${c.eyebrow}) at ${c.at.join(",")}`;
+    return `"${c.title}" (${c.eyebrow}) at ${c.at.join(",")} after ${c.probes} probe(s)`;
   },
   { needs: ["explode"] },
 );

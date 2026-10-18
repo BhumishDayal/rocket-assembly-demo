@@ -42,7 +42,8 @@ const T = {
   flyOut: 460, // one piece's path out
   engineStagger: 110,
   subStagger: 35,
-  stagger: 38,
+  stagger: { shell: 38, interior: 28, detail: 20 }, // by mesh.userData.kind; shells set the pace
+
   outStaggerMax: 340, // remove: total stagger cap (top-down), so a 100-piece cluster still leaves in ~0.8 s
   swapInStaggerMax: 600, // swap: total arrival stagger cap, keeps the new part at 0.9–1.3 s
   lift: 500,
@@ -65,10 +66,12 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   let ghostPart = null;
   let warmRenderer = null;
 
-  // anime.js wrapper: returns a promise, remembers the animation so reset() can cancel it.
+  // anime.js wrapper: returns a promise (with the animation on .anim), remembers the animation so reset()
+  // can cancel it.
   function run(targets, params) {
-    return new Promise((resolve) => {
-      const anim = animate(targets, {
+    let anim;
+    const promise = new Promise((resolve) => {
+      anim = animate(targets, {
         ...params,
         onComplete: (self) => {
           live.delete(anim);
@@ -78,6 +81,8 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       });
       live.add(anim);
     });
+    promise.anim = anim;
+    return promise;
   }
   function cancelAll() {
     for (const a of live) a.cancel();
@@ -174,10 +179,13 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
 
   // ---------- camera ----------
   const camDir = new THREE.Vector3();
+  let camAnim = null; // one camera move at a time: a new framing replaces the one in flight
   function frameTo({ ty, dist, duration = D(1100), ease = "inOutCubic" }) {
     camDir.copy(camera.position).sub(controls.target).normalize();
     const cur = { ty: controls.target.y, d: camera.position.distanceTo(controls.target) };
-    return run(cur, {
+    camAnim?.cancel();
+    live.delete(camAnim);
+    const p = run(cur, {
       ty,
       d: dist,
       duration,
@@ -188,6 +196,8 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         camera.position.copy(controls.target).addScaledVector(camDir, cur.d);
       },
     });
+    camAnim = p.anim;
+    return p;
   }
   // Framing scales with the preset: the smallest view still shows the engine cluster and some pad; the stack
   // sits a little above centre so its base clears the bottom bar and its top clears the HUD line.
@@ -299,17 +309,19 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
 
   // ---------- mechanical build / remove ----------
   // Arrival delays in part.arrival order: engine clusters go engine by engine with the sub-pieces of one engine
-  // close behind each other, then the cluster's shared pieces (mount, heat shield); everything else staggers
-  // evenly in `order`. `cap` compresses the whole stagger to at most `cap` ms (swap).
+  // close behind each other, then the cluster's shared pieces (mount, heat shield); everything else follows in
+  // `order`, each step set by the piece kind (shells 38, interiors 28, details 20 ms). `cap` compresses the
+  // whole stagger to at most `cap` ms (swap).
+  const kindStep = (p) => T.stagger[p.mesh.userData.kind] ?? T.stagger.shell;
   function arrivalDelays(part, cap = Infinity) {
-    const delays = part.arrival.map((p) => (p.engineIndex != null ? p.engineIndex * T.engineStagger + (p.subRank ?? 0) * T.subStagger : p.rank * T.stagger));
-    const engined = part.arrival.filter((p) => p.engineIndex != null);
-    if (engined.length) {
-      let t = Math.max(...part.arrival.map((p, i) => (p.engineIndex != null ? delays[i] : 0)));
-      part.arrival.forEach((p, i) => {
-        if (p.engineIndex == null) delays[i] = t += T.subStagger;
-      });
-    }
+    const delays = part.arrival.map((p) => (p.engineIndex != null ? p.engineIndex * T.engineStagger + (p.subRank ?? 0) * T.subStagger : null));
+    const enginesEnd = delays.reduce((m, d) => (d == null ? m : Math.max(m, d)), -Infinity);
+    let t = Number.isFinite(enginesEnd) ? enginesEnd : null;
+    part.arrival.forEach((p, i) => {
+      if (delays[i] != null) return;
+      t = t == null ? 0 : t + kindStep(p);
+      delays[i] = t;
+    });
     const max = Math.max(0, ...delays);
     const k = max > cap ? cap / max : 1;
     return delays.map((d) => D(d * k));
@@ -367,7 +379,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     const source = part.group.worldToLocal(sourceWorld.clone());
     const k = THREE.MathUtils.clamp(camera.position.distanceTo(controls.target) / 18, 0.6, 2.2);
     const order = [...part.arrival].reverse(); // top-down
-    const step = Math.min(T.stagger, T.outStaggerMax / Math.max(1, order.length - 1));
+    const step = Math.min(T.stagger.shell, T.outStaggerMax / Math.max(1, order.length - 1));
     return Promise.all(
       order.map((piece, i) => {
         const mesh = piece.mesh;
@@ -750,14 +762,23 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     changed();
   }
 
-  // One-time shader warm-up so the first build has no compile hitch.
+  // Warm-up so the first build has no hitch: compile every program and upload every geometry (one offscreen
+  // render with culling off; a 200-piece stack otherwise stalls ~2 s on the frame its pieces first appear).
+  const warmTarget = new THREE.WebGLRenderTarget(4, 4);
   function prewarm(renderer) {
     warmRenderer = renderer;
-    for (const part of parts) {
-      part.ghost.visible = true;
-      for (const piece of part.pieces) piece.mesh.visible = true;
+    const meshes = parts.flatMap((p) => p.pieces.map((q) => q.mesh));
+    for (const part of parts) part.ghost.visible = true;
+    for (const m of meshes) {
+      m.visible = true;
+      m.frustumCulled = false;
     }
     renderer.compile(scene, camera);
+    const prevTarget = renderer.getRenderTarget();
+    renderer.setRenderTarget(warmTarget);
+    renderer.render(scene, camera);
+    renderer.setRenderTarget(prevTarget);
+    for (const m of meshes) m.frustumCulled = true;
     for (const part of parts) {
       part.ghost.visible = part.ghostActive || part.ghostFade.v > 0;
       for (const piece of part.pieces) piece.mesh.visible = part.built;

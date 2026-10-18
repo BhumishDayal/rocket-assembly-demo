@@ -6,20 +6,26 @@
 // constants below; they are never shown on screen as facts (cards only show record fields or derived sizes
 // labelled as such).
 //
+// A tank record's height_m is the full STAGE length, engine exit to forward end: stage 0 includes its engine
+// section, an upper stage includes the interstage its engine hangs in. (NASA SP-4029's Saturn V stage lengths
+// only add up to the vehicle height read this way; adding engines and interstages on top overshot by ~14 m.)
+// The tank is drawn as that length minus the engine section / interstage below it.
+//
 // Stack arithmetic (all in metres, converted with SCALE at the end; part local y = 0 is its bottom):
 //   stage 0 engines   slotY = 0                         height = L0 + MOUNT     (bells at y=0, mount plate on top)
-//   stage 0 tank      slotY = L0 + MOUNT                height = tank0.height_m
-//   interstage k→k+1  slotY = top of tank k             height = L(k+1) + CLEAR (the upper engines hang inside)
+//   stage 0 tank      slotY = L0 + MOUNT                height = H0 − (L0 + MOUNT)
+//   interstage k→k+1  slotY = top of tank k             height = I = L(k+1) + CLEAR (the upper engines hang inside)
 //   stage k+1 engines slotY = interstage top − (L(k+1) + MOUNT)
 //                     → bell exits sit CLEAR − MOUNT = 0.2 m above the lower tank, mount plate flush with the
 //                       interstage top (= bottom of the upper tank), so the bells never poke out below.
-//   stage k+1 tank    slotY = interstage top            height = tank.height_m
-//   payload           slotY = top of the last tank      height = adapter + payload.height_m (payload on an adapter)
+//   stage k+1 tank    slotY = interstage top            height = H(k+1) − I
+//   payload           slotY = top of the last tank      height = adapter + payload.height_m (+ escape tower)
 //   fairing           slotY = top of the last tank      height = adapter + payload.height_m + nose
 //                     (boattail + cylinder up to the payload top, then the ogive nose; skipped when exposed)
-// Stacked height = Σ stage heights (stage 0: L0 + MOUNT + tank; stage k ≥ 1: interstage + tank) + the top
-// (fairing height, or adapter + payload when the payload is exposed). Upper engines and the payload are nested
-// inside the interstage / fairing, so they add no height.
+// Stacked height = Σ stage lengths (record height_m) + the top (fairing height, or adapter + payload + tower
+// when the payload is exposed). Upper engines and the payload are nested inside the interstage / fairing.
+// If subtracting would leave a tank shorter than MIN_TANK_SHARE of its record, that record is treated as
+// tank-only (engine section / interstage added on top) and manifest.warnings says so.
 
 export const SCALE = 0.25; // scene units per metre
 
@@ -34,6 +40,7 @@ const FAIRING_PER_PAYLOAD_D = 1.2; // fairing diameter ≥ payload diameter × t
 const NOSE_PER_FAIRING_D = 1.3; // ogive nose length / fairing diameter
 const BOATTAIL_TAN = 0.7; // boattail flare (fairing wider than the stage): radial step / height (~35° half-angle)
 const FIN_SPAN_PER_TANK_D = 0.22; // stage-0 fins ("fins" feature): span / stage diameter
+const MIN_TANK_SHARE = 0.35; // guard for the stage-length reading (see header)
 
 const byId = (list, id) => (list ?? []).find((x) => x.id === id);
 
@@ -123,6 +130,7 @@ export function buildManifest(build, catalog) {
   const push = (spec) => out.push({ ...spec, key: KEYS[out.length] ?? null });
 
   let y = 0; // metres, top of what is stacked so far (excluding nested parts)
+  let interBelow = 0; // height of the interstage pushed for the stage being laid out
   stages.forEach(({ engine, tank, count }, k) => {
     const look = tankLook(tank, visuals);
     const len = engineLength(engine, visuals);
@@ -181,7 +189,13 @@ export function buildManifest(build, catalog) {
     });
 
     const tankSlot = k === 0 ? enginesH : y;
-    y = tankSlot + tank.height_m;
+    const below = k === 0 ? enginesH : interBelow; // part of the stage length taken by engines / interstage
+    let tankH = tank.height_m - below;
+    if (tankH < MIN_TANK_SHARE * tank.height_m) {
+      warnings.push(`stage ${k + 1}: "${tank.id}" height_m read as tank-only (stage-length reading would leave ${tankH.toFixed(2)} m)`);
+      tankH = tank.height_m;
+    }
+    y = tankSlot + tankH;
     push({
       id: `s${k}-tank`,
       kind: "tank",
@@ -191,16 +205,19 @@ export function buildManifest(build, catalog) {
       record: tank,
       count: 1,
       slotY: u(tankSlot),
-      height: u(tank.height_m),
+      height: u(tankH),
       radius: u(tankR),
       height_m: tank.height_m,
       diameter_m: tank.diameter_m,
       derived: false,
-      note: "",
+      note:
+        tankH < tank.height_m
+          ? `The record's height is the stage length (engine exit to forward end); the tank is drawn ${(tank.height_m - tankH).toFixed(1)} m shorter to leave room for the ${k === 0 ? "engine section" : "interstage"} below it.`
+          : "",
       icon: "tank",
       geom: {
         D_m: tank.diameter_m,
-        H_m: tank.height_m,
+        H_m: tankH, // drawn height (record height_m minus the engine section / interstage)
         finish: look.finish,
         features: look.features.filter((f) => f !== "fins" && f !== "engine-fairings" && !(f === "grid-fins" && next)),
         enclosed: look.enclosed, // skin hidden inside interstage/fairing on the real vehicle (dcss-5m)
@@ -239,6 +256,7 @@ export function buildManifest(build, catalog) {
         },
       });
       y += H;
+      interBelow = H;
     }
   });
 

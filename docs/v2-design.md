@@ -336,3 +336,53 @@ are standing in the middle with their own materials (bare aluminium inside, not 
   each part group's y to its new slotY), `highlight`, ghost, `rebuild`, `setBounds`. No swarm, no reveal.
 - card.js (C): `show(part, ctx)` renders details + the Options button + list; `onOption(part, recordId)` callback.
 - catalog.js (A): `optionsFor(kind, build, stageIndex)`, `applyOption(build, kind, stageIndex, recordId)` (done).
+
+---
+
+## 5. Art direction change (user, 2026-10-17 ~19:30): "it still looks like a simulation" → x-ray mechanical look
+
+The painted-white PBR rocket reads as a toy: a thin white stick, uniform light, no visible mechanism. The user
+wants the anime.js lens look: dark machined body, crisp edge highlights, semi-transparent shells that show the
+mechanism inside, dense mechanical detail, filling the frame. We trade photo-realism for an engineering x-ray
+look. Real finishes survive only as tints and bands on the dark shells so vehicles stay distinguishable.
+
+### Round 10 — the look, precisely
+1. **Palette + light.** Shells dark graphite (#1e2024 → #2a2d33). One warm key light, peach (#ffb48a, ~2.2)
+   from upper-left-front; cool fill (#6a7fa8, ~0.5) from the opposite side; faint hemisphere; environment
+   intensity low (0.25). Exposure ~0.95. Background, pad, grid, stars unchanged. Ghost stays holo blue
+   (unbuilt = blue, built = warm) and selection stays amber.
+2. **X-ray shells.** Every outer shell piece (tank quarters, interstage shell, fairing halves, engine nozzle
+   extension, payload bus skin) uses the `shell` material: MeshPhysicalMaterial, colour graphite, roughness 0.5,
+   metalness 0.6, `transparent: true`, `opacity 0.42`, `depthWrite: false`, `side: FrontSide`, with a fresnel
+   rim in peach added via onBeforeCompile (rim = pow(1 − dot(n, v), 3) × 0.9) so the silhouette stays readable
+   through the transparency. Internals (domes, baffles, downcomer, pressurant bottles, chambers, turbopumps,
+   pipes, gimbals, stringers, rings, flanges, legs, fins) are opaque: light brushed steel (#b9bec7, metalness
+   0.85, roughness 0.35) or dark steel (#4a4f58) so they read through the shell. `mesh.userData.kind` =
+   "shell" | "interior" | "detail" decides which material a piece gets.
+   Opacity states (animated by choreo, materials are cloned per mesh): built 0.42; exploded 0.30; selected part
+   0.15 (x-ray focus) while others stay; during fly-in 0.42 from the first frame.
+3. **Edge lines.** Every piece gets a child `LineSegments(new EdgesGeometry(geometry, 25), lineMaterial)`:
+   colour peach, `transparent`, `opacity 0.55`, `depthTest: true`, polygon offset so lines sit on the surface.
+   At 25° smooth cylinders produce only their rims, flanges, bell lips and ring edges: the technical-drawing
+   look of the lens. Lines are children of the mesh, so the choreography needs no change. Lines of shell pieces
+   fade with the shell (opacity × 1.3, clamped).
+4. **Mechanical density (real geometry, not textures).** Flanges with bolt rings (12–24 small boxes) at every
+   joint; weld lands as thin raised rings every ~3 m along tanks; a raceway with clamps every ~3 m; knurled
+   rings on engine throats and gimbal blocks (ring of boxes); stacked thin tori at interstage joints; umbilical
+   ports on the first stage; nozzle extension lip; baffle rings with cut-outs inside tanks. Edges draw all of
+   this. Keep the per-part piece budgets; merge repeated small details (one bolt ring = one merged geometry).
+5. **Framing (the lens fills the frame).** Home view fits the stack to ~85 % of the viewport height. While a
+   part flies in, the camera frames that part at ~60 % of the height with a slight orbit (the lens tilts as it
+   explodes), then eases back to the stack after lock. Clicking a part glides the camera to frame it (x-ray
+   focus); Esc returns.
+6. **Post.** Keep bloom but lower threshold a touch (0.8) so peach edges glow slightly; GTAO stays but lighter
+   (dark shells need little AO). Transparent shells must be excluded from AO/depth-based passes (they already are
+   for depthWrite-off meshes).
+
+### Ownership
+- UI4 (parts.js/layout.js): materials `shell`, `interior`, `steelDark`, `line`; edge-line children on every
+  piece; `kind` on every mesh; detail geometry of item 4; finish tints/bands from visuals as subtle variants.
+  Export `shellPieces(part)` (pieces whose userData.kind === "shell") and `setShellOpacity(part, value)` that
+  sets mesh + line opacity consistently.
+- UI 3 (main.js/choreo.js/select.js): the light rig and exposure, framing rules of item 5, opacity states
+  of item 2 via `setShellOpacity`, bloom/GTAO values of item 6.

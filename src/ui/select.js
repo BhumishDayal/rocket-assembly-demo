@@ -1,5 +1,6 @@
 // Click-to-select on the 3D stack, without stealing orbit drags.
-//   createSelector({ canvas, camera, parts, onSelect(part|null), onGhostClick(part), onHover?(hit|null) })
+//   createSelector({ canvas, camera, parts, onSelect(part|null), onGhostClick(part), onHover?(hit|null), resolve?(part) })
+//   resolve maps a clicked part to the part to select (main: the closed fairing selects the payload inside).
 //     -> { setParts(parts), select(part), clear(), refresh(), get selected(), dispose() }
 // - A click is a pointerup less than 5 px from its pointerdown (same pointer, no second finger in between),
 //   so orbiting never selects.
@@ -15,7 +16,7 @@ import * as THREE from "three";
 const CLICK_PX = 5;
 const HOVER_MS = 40;
 
-export function createSelector({ canvas, camera, parts, onSelect, onGhostClick, onHover }) {
+export function createSelector({ canvas, camera, parts, onSelect, onGhostClick, onHover, resolve = (p) => p }) {
   const raycaster = new THREE.Raycaster();
   const ndc = new THREE.Vector2();
   let list = parts;
@@ -78,7 +79,7 @@ export function createSelector({ canvas, camera, parts, onSelect, onGhostClick, 
     const ghost = ghostHit();
     if (ghost) return { part: ghost, ghost: true };
     const hits = raycaster.intersectObjects(solids(), false);
-    const part = hits.length ? partOf(hits[0].object) : null;
+    const part = hits.length ? resolve(partOf(hits[0].object)) : null;
     return part ? { part, ghost: false } : null;
   }
 

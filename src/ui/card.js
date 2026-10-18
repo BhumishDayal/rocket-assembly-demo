@@ -97,6 +97,7 @@ function payloadCard(part, ctx) {
   const p = part.record;
   const mission = ctx.mission;
   const rows = [row("Mass", f.mass(p.mass_kg)), row("Size", f.dims(p.diameter_m, p.height_m))];
+  if (ctx.fairing) rows.push(row("Fairing", `inside ${f.dims(ctx.fairing.diameter_m, ctx.fairing.height_m, { derived: true })}`, DERIVED));
   if (mission) {
     rows.push(row("Mission", f.esc(mission.name)));
     rows.push(row("Required Δv", f.ms(mission.requiredDeltaV_ms)));
@@ -198,6 +199,7 @@ export function createCard(rootEl, { onOption } = {}) {
       // The preset's engine-count citation only applies while the slot still holds the preset's engine.
       countSource: stageIndex != null && preset?.stages?.[stageIndex]?.engineId === part.record?.id ? preset.stages[stageIndex].source : null,
       mission: build?.missionId ? catalog?.missions?.find((m) => m.id === build.missionId) : null,
+      fairing: ctx.fairing ?? null,
     });
     const nextKey = `${part.id}|${part.record?.id ?? ""}|${part.count ?? ""}|${complete}|${optionsDisabled}|${verdict?.totalDeltaV_ms ?? ""}`;
     if (part === current && nextKey === key && el.classList.contains("open")) return;

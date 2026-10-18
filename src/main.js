@@ -165,12 +165,18 @@ addEventListener("resize", () => {
 // ---------- selection + card ----------
 const card = createCard(document.getElementById("detail"), { onOption: (part, id) => chooseOption(part, id) });
 const isComplete = () => parts.length > 0 && parts.every((p) => p.built);
-const cardContext = (part = card.part) => ({
-  ...current,
-  complete: isComplete(),
-  options: part ? optionsFor(part.kind, current.build, part.stageIndex) : [],
-  optionsDisabled: choreo.state.busy > 0,
-});
+// During a swap the open card still shows the old part, so it keeps the old build's numbers (shown).
+let shown = null;
+const cardContext = (part = card.part) => {
+  const ctx = shown ?? current;
+  return {
+    ...ctx,
+    complete: shown ? shown.complete : isComplete(),
+    options: part ? optionsFor(part.kind, ctx.build, part.stageIndex) : [],
+    optionsDisabled: choreo.state.busy > 0,
+    fairing: part?.kind === "payload" ? parts.find((p) => p.kind === "fairing" && p.built) : null,
+  };
+};
 
 let hovered = null;
 const selector = createSelector({
@@ -185,6 +191,10 @@ const selector = createSelector({
     card.show(part, cardContext(part));
     sfx.play("ui", { gain: 0.5 });
   },
+  // The fairing is a derived wrapper: clicking it (assembled) selects the payload inside. Its own card is
+  // reachable in the exploded view, where the halves swing out.
+  resolve: (part) =>
+    part?.kind === "fairing" && !choreo.state.exploded ? parts.find((p) => p.kind === "payload" && p.built) ?? part : part,
   onGhostClick(part) {
     if (choreo.canBuild(part)) choreo.build(part);
   },
@@ -209,7 +219,7 @@ const hudText = document.getElementById("hud-text");
 
 btnBuildAll.addEventListener("click", () => choreo.buildAll());
 btnExplode.addEventListener("click", () => choreo.toggleExplode());
-btnReset.addEventListener("click", () => choreo.reset());
+btnReset.addEventListener("click", () => reset());
 btnSound.addEventListener("click", () => {
   sfx.setMuted(!sfx.muted);
   btnSound.textContent = sfx.muted ? "Sound off" : "Sound on";
@@ -270,12 +280,14 @@ async function chooseOption(part, recordId) {
   if (choreo.state.exploded && !(await choreo.assemble())) return;
   const next = loadBuild(current.preset, applyOption(current.build, part.kind, part.stageIndex, recordId));
   if (buildKey(next.build) === buildKey(current.build)) return;
+  shown = { ...current, complete: isComplete() };
   current = next;
   swapping = true;
   applyBounds(next.bounds);
   choreo.setBounds(next.bounds);
   const res = await choreo.applyManifest(next.manifest);
   swapping = false;
+  shown = null;
   if (!res) return syncUi(); // cancelled (reset or preset switch mid-swap)
   const swapped = choreo.parts.find((p) => p.id === part.id);
   syncUi();
@@ -297,6 +309,12 @@ function switchPreset(step) {
   history.replaceState(null, "", `${location.pathname}?${q}${location.hash}`);
 }
 
+// Reset means reset: back to the empty pad and, if Options changed the build, the pristine preset.
+function reset() {
+  if (current.modified) switchPreset(0);
+  else choreo.reset();
+}
+
 function onPartKey(part) {
   if (part.built) {
     if (choreo.isTopBuilt(part)) choreo.remove(part);
@@ -316,7 +334,7 @@ addEventListener("keydown", (e) => {
     if (document.activeElement?.tagName === "BUTTON") document.activeElement.blur();
     choreo.toggleExplode();
   } else if (k === "b") choreo.buildAll();
-  else if (k === "r") choreo.reset();
+  else if (k === "r") reset();
   else if (k === "m") btnSound.click();
   else if (k === "[") switchPreset(-1);
   else if (k === "]") switchPreset(1);
