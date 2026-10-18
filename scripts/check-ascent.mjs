@@ -1,6 +1,8 @@
 // Check for src/ascent.js: every preset flies without NaN, the expected outcomes hold, Falcon 9 passes two
 // sanity ranges and recovers its booster (touchdown < 2 m/s, main ascent still in orbit), stages without legs
-// do not return, a light LEO Falcon 9 returns to the pad (< 10 km), builds the verdict blocks are not flown
+// do not return, a light LEO Falcon 9 returns to the pad (< 10 km), the round-14 detail channels and events are
+// consistent (mach/heat/x_m, tower-clear < max-q, igniters 0.4 s before ignitions, payload release at orbit
+// + 20 s, booster cold-gas/heating/grid fins/drone ship), builds the verdict blocks are not flown
 // ("blocked" with the first blocking warning), edge builds do not throw, and a run stays
 // under 100 ms. Prints one block per preset with the booster timeline.
 // Run: node scripts/check-ascent.mjs   (no deps; exits 1 on any failure)
@@ -54,6 +56,46 @@ function timeIt(build) {
 const n0 = (v) => (v == null ? "–" : Number.isFinite(v) ? Math.round(v).toLocaleString("en-US") : "∞");
 const n1 = (v) => (v == null ? "–" : v.toFixed(1));
 
+// Detail channels (round 14): mach, transonic, heat, x_m on samples; tower-clear, transonic, throttle-down/up,
+// tea-teb/igniter, payload-release events; booster cold-gas, heating window, grid fins, drone ship.
+function detailChecks(id, res) {
+  const S = res.samples;
+  const E = res.events;
+  const has = (type) => E.filter((e) => e.type === type);
+  expect(S.every((x) => Number.isFinite(x.mach) && x.mach >= 0), `${id}: bad mach`);
+  const edge = (m) => Math.abs(m - 0.85) < 0.002 || Math.abs(m - 1.15) < 0.002; // mach is rounded to 3 decimals
+  expect(S.every((x) => typeof x.transonic === "boolean" && (edge(x.mach) || x.transonic === (x.mach > 0.85 && x.mach < 1.15))), `${id}: transonic flag disagrees with mach`);
+  expect(S.some((x) => x.transonic), `${id}: never transonic`);
+  expect(S.every((x) => x.heat >= 0 && x.heat <= 1) && S.some((x) => x.heat === 1), `${id}: heat not normalised to 0..1`);
+  expect(S.every((x) => x.x_m === x.downrange_m), `${id}: x_m differs from downrange_m`);
+  expect(S.every((x, i) => i === 0 || x.x_m >= S[i - 1].x_m - 0.5), `${id}: x_m goes backwards`);
+  const tc = has("tower-clear")[0];
+  const mx = has("maxq")[0];
+  expect(tc && mx && tc.t < mx.t, `${id}: tower-clear (${tc?.t}) must come before max-q (${mx?.t})`);
+  const m1 = has("transonic")[0];
+  const firstMach1 = S.find((x) => x.mach >= 1);
+  expect(m1 && firstMach1 && Math.abs(m1.t - firstMach1.t) <= 0.6, `${id}: transonic event at ${m1?.t}, first Mach 1 sample at ${firstMach1?.t}`);
+  const down = has("throttle-down");
+  const up = has("throttle-up");
+  expect(down.length === up.length && down.every((d, i) => d.t < up[i].t), `${id}: throttle-down/up not paired in order`);
+  const ign = has("ignition2");
+  const pre = E.filter((e) => e.type === "tea-teb" || e.type === "igniter");
+  expect(pre.length === ign.length && pre.every((p, i) => Math.abs(ign[i].t - p.t - 0.4) <= 0.11), `${id}: tea-teb/igniter must lead every upper-stage ignition by 0.4 s`);
+  const orbit = has("orbit")[0];
+  const rel = has("payload-release")[0];
+  if (orbit) expect(rel && Math.abs(rel.t - orbit.t - 20) < 0.01 && rel.screen_s === 1, `${id}: payload-release must be orbit + 20 s with screen_s 1`);
+  else expect(!rel, `${id}: payload-release without an orbit`);
+  const b = res.summary.booster;
+  if (b?.returns) {
+    const cg = b.events.filter((e) => e.type === "cold-gas");
+    const flip = b.events.find((e) => e.type === "flip");
+    expect(cg.length === 2 && cg[0].phase === "start" && cg[1].phase === "end" && cg[0].t === flip.t && cg[1].t > cg[0].t, `${id}: booster cold-gas start/end`);
+    expect(b.heating && b.heating.start_t < b.heating.end_t && b.heating.peak_t >= b.heating.start_t && b.heating.peak_t <= b.heating.end_t, `${id}: booster heating window ${JSON.stringify(b.heating)}`);
+    expect(b.samples.every((x) => Number.isFinite(x.gridFin_deg) && Math.abs(x.gridFin_deg) <= 4 && x.heat >= 0 && x.heat <= 1 && Number.isFinite(x.mach)), `${id}: booster sample details`);
+    expect(b.sea === (b.mode === "droneship") && (!b.sea || (b.droneShip?.alt_m === 0 && Math.abs(b.droneShip.x_m - b.landingDownrange_m) < 1)), `${id}: drone ship position`);
+  }
+}
+
 for (const id of presetIds) {
   const { res, ms } = timeIt(presetToBuild(getPreset(id)));
   const s = res.summary;
@@ -68,6 +110,7 @@ for (const id of presetIds) {
     expect(meco && meco.t >= 130 && meco.t <= 170, `falcon-9: MECO at ${meco?.t} s, expected 130-170 s`);
     expect(s.maxG >= 3 && s.maxG <= 6, `falcon-9: max g ${s.maxG.toFixed(2)}, expected 3-6`);
   }
+  detailChecks(id, res);
   const b = s.booster;
   if (id === "falcon-9") {
     expect(b?.returns === true, `falcon-9: booster not recovered (${b?.reason})`);

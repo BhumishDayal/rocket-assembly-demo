@@ -12,7 +12,7 @@ registerHooks({
 });
 const { catalog, presetIds, getPreset, presetToBuild } = await import("../src/data/catalog.js");
 const { simulateAscent } = await import("../src/ascent.js");
-const { arrivalTimeline } = await import("../src/arrival.js");
+const { arrivalTimeline, descentTimeline } = await import("../src/arrival.js");
 
 const failures = [];
 const expect = (ok, msg) => {
@@ -79,6 +79,23 @@ for (const [label, build, s, pred] of edges) {
   sane(label, a);
   expect(pred(a), `${label}: ${JSON.stringify({ body: a.body, success: a.success, lands: a.lands, legs: a.legs.map((l) => l.type) })}`);
   console.log(`edge  ${label}: ${a.lines.join(" ")}`);
+}
+
+// Lander descent profile (animation only): 3 km -> 0 in 8 s of screen time, monotone, dust only near the ground.
+{
+  const d = descentTimeline(catalog.payloads.find((p) => p.id === "nova-c"));
+  const S = d.samples;
+  const ok =
+    d.est === true &&
+    S[0].alt_m === 3000 &&
+    S.at(-1).alt_m === 0 &&
+    S.at(-1).t_screen === 8 &&
+    S.every((x, i) => i === 0 || (x.alt_m <= S[i - 1].alt_m && x.vel_ms <= S[i - 1].vel_ms && x.t_screen > S[i - 1].t_screen)) &&
+    S.every((x) => [x.t_screen, x.t_s, x.alt_m, x.vel_ms, x.throttle, x.dust].every(Number.isFinite) && x.dust >= 0 && x.dust <= 1) &&
+    S.every((x) => x.alt_m >= 30 ? x.dust === 0 : true) &&
+    S.some((x) => x.dust > 0.5);
+  expect(ok, `descentTimeline: ${JSON.stringify(S.filter((_, i) => i % 20 === 0))}`);
+  console.log(`descent  nova-c: ${S.length} samples, ${S[0].alt_m} m -> 0 in ${d.screen_s} s screen (${S.at(-1).t_s} s sim); dust from ${S.find((x) => x.dust > 0)?.t_screen} s`);
 }
 
 if (failures.length) {

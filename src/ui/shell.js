@@ -6,18 +6,18 @@
 //                      btnExplode, btnReset }
 // The site makes no sound: a host page's Sound button (#btn-sound) is removed, never created.
 
-// The hint line under the title: [key(s), what it does]; plain text first.
-const LEAD = "Click the ghost to build the next part · click a part for details";
+// The shortcut legend under the title (a compact grid, 2 rows of 5): [key(s), what it does].
 const KEYS = [
   [["Space"], "explode"],
-  [["B"], "build all"],
-  [["R"], "reset"],
-  [["[", "]"], "change rocket"],
+  [["B"], "build"],
   [["L"], "launch"],
-  [["S"], "save card"],
+  [["R"], "reset"],
+  [["[", "]"], "rocket"],
   [["C"], "compare"],
   [["P"], "story"],
   [["X"], "opacity"],
+  [["S"], "card"],
+  [["Esc"], "close"],
 ];
 
 function make(tag, { id, className, attrs = {}, text } = {}) {
@@ -40,9 +40,13 @@ export function ensureShell() {
     canvas.after(brand);
   }
   const hint = brand.querySelector("p") ?? brand.appendChild(make("p"));
+  hint.className = "keys";
   hint.replaceChildren(
-    LEAD,
-    ...KEYS.flatMap(([keys, label]) => [" · ", ...keys.flatMap((k, i) => [i ? " " : "", make("kbd", { text: k })]), ` ${label}`]),
+    ...KEYS.map(([keys, label]) => {
+      const item = make("span");
+      item.append(...keys.flatMap((k, i) => [i ? " " : "", make("kbd", { text: k })]), ` ${label}`);
+      return item;
+    }),
   );
 
   let detail = document.getElementById("detail");

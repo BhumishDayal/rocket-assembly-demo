@@ -15,9 +15,9 @@ import { arrivalTimeline } from "./arrival.js";
 import { createSilhouette } from "./silhouette.js";
 import { createAnchors } from "./anchors.js";
 import { createPlanet } from "./planet.js";
-import { animate } from "animejs";
+import { animate, spring } from "animejs";
 import { SCALE, buildManifest, sceneBounds } from "./layout.js";
-import { createMaterials, createPart, createPad, createStars } from "./parts.js";
+import { createMaterials, createPart, createPad, createStars, setShellOpacity, LOOK } from "./parts.js";
 import { createChoreographer } from "./choreo.js";
 import { createSfx } from "./fx/sfx.js";
 import { createSelector } from "./ui/select.js";
@@ -110,19 +110,43 @@ function disposeTree(obj) {
   });
 }
 
-// Everything tuned to the stack size: fog, key-light shadow box (with room for the exploded view), orbit
-// range, pad. The light keeps its direction; only its box follows the preset.
+// Key-light shadow box: sized and centred on the stack (room for the exploded view); in flight it follows the
+// orbit target (the rocket, the booster, the craft). Changes ease over ~0.5 s (placeShadow, every frame) and the
+// centre snaps to whole shadow-map texels, so shadows neither jump nor swim.
+const shadowBox = { home: new THREE.Vector3(), half: 0, dist: 0, far: 0, goal: { half: 8, dist: 20, far: 45 }, c: new THREE.Vector3(), init: false };
+const SHADOW_AXES = (() => {
+  const x = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), KEY_DIR).normalize();
+  return { x, y: new THREE.Vector3().crossVectors(KEY_DIR, x) };
+})();
+function placeShadow(dt, snap) {
+  const s = shadowBox;
+  const k = snap || !s.init ? 1 : 1 - Math.exp(-dt / 0.15);
+  s.init = true;
+  s.c.lerp(choreo.state.launch ? controls.target : s.home, k);
+  const sc = key.shadow.camera;
+  if (Math.abs(s.goal.half - s.half) > 1e-4 || Math.abs(s.goal.far - s.far) > 1e-4) {
+    s.half += (s.goal.half - s.half) * k;
+    s.far += (s.goal.far - s.far) * k;
+    sc.left = sc.bottom = -s.half;
+    sc.right = sc.top = s.half;
+    sc.near = 1;
+    sc.far = s.far;
+    sc.updateProjectionMatrix();
+  }
+  s.dist += (s.goal.dist - s.dist) * k;
+  const texel = (2 * s.half) / key.shadow.mapSize.x;
+  const ax = s.c.dot(SHADOW_AXES.x);
+  const ay = s.c.dot(SHADOW_AXES.y);
+  key.target.position.copy(s.c).addScaledVector(SHADOW_AXES.x, Math.round(ax / texel) * texel - ax).addScaledVector(SHADOW_AXES.y, Math.round(ay / texel) * texel - ay);
+  key.position.copy(key.target.position).addScaledVector(KEY_DIR, s.dist);
+}
+
+// Everything tuned to the stack size: fog, key-light shadow box, orbit range, pad. The light keeps its
+// direction; only its box follows the preset.
 function applyBounds(b) {
   const H = b.height_u;
-  key.target.position.set(0, H * 0.45, 0);
-  key.position.copy(key.target.position).addScaledVector(KEY_DIR, H * 1.5 + 20);
-  const half = Math.max(8, H * 0.85, b.radius_u * 6);
-  const sc = key.shadow.camera;
-  sc.left = sc.bottom = -half;
-  sc.right = sc.top = half;
-  sc.near = 1;
-  sc.far = H * 3.2 + 45;
-  sc.updateProjectionMatrix();
+  shadowBox.home.set(0, H * 0.45, 0);
+  shadowBox.goal = { half: Math.max(8, H * 0.85, b.radius_u * 6), dist: H * 1.5 + 20, far: H * 3.2 + 45 };
   controls.maxDistance = Math.max(70, H * 3.4);
   if (pad?.baseRadius_u !== b.baseRadius_u) {
     if (pad) {
@@ -149,8 +173,9 @@ const choreo = createChoreographer({ parts, scene, root, camera, controls, sfx, 
 
 // ---------- post ----------
 // GTAO skips what writes no depth (holograms, flashes, the pad ring, x-ray shells), so they never darken the
-// stack. It runs at half resolution (the AO is soft anyway) and is a luxury: off while anything animates,
-// off on stacks over 230 pieces, and off for the session if frames average over 22 ms (see frame()).
+// stack. It runs at half resolution (the AO is soft anyway) and is a luxury: off while anything animates and
+// for the whole launch (countdown to the held final frame: no AO popping on mid-flight), off on stacks over
+// 230 pieces, and off for the session if frames average over 22 ms (see frame()).
 class SolidGTAOPass extends GTAOPass {
   setSize(width, height) {
     super.setSize(Math.max(1, Math.round(width / 2)), Math.max(1, Math.round(height / 2)));
@@ -266,9 +291,20 @@ const { btnRockets, rocketsEl, btnBuildAll, btnExplode, btnReset, hudText } = sh
 btnBuildAll.addEventListener("click", () => (isComplete() ? launch() : choreo.buildAll()));
 
 // Rockets: the presets as an in-place list above the bar. One line each: name, stages, height est.,
-// payload → mission (all from the records and the layout). Choosing one loads it and builds it.
-function rocketsHtml() {
-  const rows = presetIds.map((id, i) => {
+// payload → mission (all from the records and the layout). Choosing one loads it (it appears built).
+// Compare mode (key C): the closest real rocket (GCAT twin) first, then the other presets; choosing one shows
+// it beside the current rocket at true scale.
+let rocketsMode = "switch";
+function rocketsHtml(mode = "switch") {
+  const rows = [];
+  const rec = mode === "compare" ? twinRecord() : null;
+  if (rec) {
+    const name = rec.variant ? `${rec.name} (${rec.variant})` : rec.name;
+    const meta = catalogModule.twinLine ? catalogModule.twinLine(rec) : name;
+    rows.push(`<li><button type="button" class="opt" data-twin="1"><span class="opt-name">Closest real rocket: ${f.esc(name)}</span><span class="opt-meta" title="${f.esc(meta)}">${f.esc(meta)}</span></button></li>`);
+  }
+  presetIds.forEach((id, i) => {
+    if (mode === "compare" && i === presetIndex && !current.modified) return; // not itself
     const p = getPreset(id);
     const b = presetToBuild(p);
     const height = sceneBounds(buildManifest(b, catalog)).height_m;
@@ -276,16 +312,18 @@ function rocketsHtml() {
     const mission = catalog.missions.find((x) => x.id === b.missionId);
     const n = b.stages.length;
     const meta = `${n} stage${n === 1 ? "" : "s"} · ${f.m(height)} est. · ${payload?.name ?? b.payloadId} → ${mission?.name ?? b.missionId}`;
-    const cur = i === presetIndex && !current.modified;
-    return `<li><button type="button" class="opt" data-i="${i}"${cur ? ' aria-current="true"' : ""}><span class="opt-name">${f.esc(p.name)}</span><span class="opt-meta" title="${f.esc(meta)}">${f.esc(meta)}</span></button></li>`;
+    const cur = mode === "switch" && i === presetIndex && !current.modified;
+    rows.push(`<li><button type="button" class="opt" data-i="${i}"${cur ? ' aria-current="true"' : ""}><span class="opt-name">${f.esc(p.name)}</span><span class="opt-meta" title="${f.esc(meta)}">${f.esc(meta)}</span></button></li>`);
   });
   return `<ul>${rows.join("")}</ul>`;
 }
-function setRocketsOpen(open) {
-  if (open === !rocketsEl.hidden) return;
+function setRocketsOpen(open, mode = "switch") {
+  if (open === !rocketsEl.hidden && (!open || mode === rocketsMode)) return;
   if (open) {
     selector.clear(); // one panel at a time (the card is a bottom sheet on phones)
-    rocketsEl.innerHTML = rocketsHtml();
+    rocketsMode = mode;
+    rocketsEl.innerHTML = rocketsHtml(mode);
+    rocketsEl.setAttribute("aria-label", mode === "compare" ? "Compare with" : "Pre-made rockets");
   }
   rocketsEl.hidden = !open;
   btnRockets.setAttribute("aria-expanded", String(open));
@@ -297,8 +335,12 @@ btnRockets.addEventListener("click", () => setRocketsOpen(rocketsEl.hidden));
 rocketsEl.addEventListener("click", (e) => {
   const opt = e.target.closest(".opt");
   if (!opt) return;
+  const mode = rocketsMode;
   setRocketsOpen(false);
-  switchPreset(Number(opt.dataset.i) - presetIndex);
+  if (mode !== "compare") return switchPreset(Number(opt.dataset.i) - presetIndex);
+  clearCompare({ reframe: false });
+  if (opt.dataset.twin) showTwin();
+  else showRival(Number(opt.dataset.i));
 });
 addEventListener("pointerdown", (e) => {
   if (!rocketsEl.hidden && !e.target.closest("#rockets, #btn-rockets")) setRocketsOpen(false);
@@ -346,13 +388,15 @@ function syncUi() {
   btnExplode.textContent = exploded ? "Assemble" : "Explode";
   btnExplode.classList.toggle("on", exploded);
   const launched = Boolean(choreo.state.launch);
+  if (built === parts.length && !launched) presimulate();
   btnBuildAll.textContent = built === parts.length ? "Launch" : "Build all";
   btnBuildAll.disabled = busy > 0 || exploded || launched;
   btnExplode.disabled ||= launched;
-  if (twin && (twin.key !== buildKey(current.build) || launched || busy > 0)) hideTwin({ reframe: false });
+  const cmp = twin ?? rival;
+  if (cmp && (cmp.key !== buildKey(current.build) || launched || busy > 0 || built < parts.length)) clearCompare({ reframe: false });
   if (launched) {
     if (telemetry.final) hudText.innerHTML = telemetry.final;
-  } else if (twin) hudText.innerHTML = twin.line;
+  } else if (twin ?? rival) hudText.innerHTML = (twin ?? rival).line;
   else if (!swapping) hudText.innerHTML = hudHtml();
   // A selected part that is being removed (or gone after reset) loses its card.
   const sel = selector.selected;
@@ -394,7 +438,7 @@ function switchPreset(step, { built = true } = {}) {
   selector.setParts(parts);
   choreo.rebuild(parts);
   if (built) choreo.appearBuilt();
-  if (!rocketsEl.hidden) rocketsEl.innerHTML = rocketsHtml();
+  if (!rocketsEl.hidden) rocketsEl.innerHTML = rocketsHtml(rocketsMode);
   const q = new URLSearchParams(location.search);
   q.set("build", current.preset.id);
   history.replaceState(null, "", `${location.pathname}?${q}${location.hash}`);
@@ -505,11 +549,28 @@ function onTelemetry(tel) {
   telemetry.last = now;
   hudText.innerHTML = telemetryHtml(tel);
 }
+// The ascent is simulated ahead, at idle, once a stack is complete (it takes ~45 ms, which otherwise lands on
+// the first frame of the countdown as a stutter); launch() reuses it for the same build.
+const simCache = { key: null, sim: null, pending: false };
+function simFor(build) {
+  const k = buildKey(build);
+  if (simCache.key !== k) Object.assign(simCache, { key: k, sim: simulateAscent(build, catalog) });
+  return simCache.sim;
+}
+const idle = window.requestIdleCallback ?? ((fn) => setTimeout(fn, 250));
+function presimulate() {
+  if (simCache.pending || simCache.key === buildKey(current.build)) return;
+  simCache.pending = true;
+  idle(() => {
+    simCache.pending = false;
+    if (isComplete() && !choreo.state.launch) simFor(current.build);
+  });
+}
 async function launch({ countdown } = {}) {
   if (!isComplete() || choreo.state.busy || choreo.state.launch) return;
   setRocketsOpen(false);
   if (choreo.state.exploded && !(await choreo.assemble())) return;
-  const sim = simulateAscent(current.build, catalog);
+  const sim = simFor(current.build);
   // A verdict with a blocking warning never flies (ascent.js says "blocked"): a pad abort line for 3 s, no sim.
   if (sim.summary.outcome === "blocked" || !sim.samples.length) {
     const why = sim.summary.reason ?? sim.summary.blockedBy ?? sim.summary.error ?? "no trajectory";
@@ -536,7 +597,7 @@ function twinRecord() {
 }
 const gcatCredit = () => String(catalogModule.gcatSource ?? "").split("; ").pop();
 function showTwin() {
-  if (twin || choreo.state.launch || choreo.state.busy || !isComplete()) return false;
+  if (twin || rival || choreo.state.launch || choreo.state.busy || !isComplete()) return false;
   const rec = twinRecord();
   if (!rec) {
     hudText.innerHTML = "Closest real rocket: data not loaded yet";
@@ -544,7 +605,8 @@ function showTwin() {
   }
   const text = catalogModule.twinLine ? catalogModule.twinLine(rec) : rec.name;
   const credit = gcatCredit();
-  const line = `Closest real rocket: <strong>${f.esc(text)}</strong> · est.${credit ? ` · ${f.esc(credit)}` : ""}`;
+  const line = `${compareLead()} vs <strong>${f.esc(text)}</strong>${credit ? ` · ${f.esc(credit)}` : ""}`;
+  const cardLine = `Closest real rocket: ${text} · est.`;
   let sil = null;
   const stackR = current.bounds.radius_u;
   if (rec.length_m > 0 && rec.diameter_m > 0) {
@@ -557,7 +619,7 @@ function showTwin() {
     const c = (off + sil.radius_u - stackR) / 2;
     choreo.frameCompare(right.clone().multiplyScalar(c), Math.max(current.bounds.height_u, sil.height_u), (off + sil.radius_u + stackR) / 2);
   }
-  twin = { rec, sil, line, key: buildKey(current.build) };
+  twin = { rec, sil, line, cardLine, key: buildKey(current.build) };
   if (anchors?.tower) anchors.tower.visible = false; // the service tower would stand between camera and pair
   hudText.innerHTML = line;
   return true;
@@ -573,7 +635,66 @@ function hideTwin({ reframe = true } = {}) {
   if (reframe) choreo.frameStack();
   hudText.innerHTML = hudHtml();
 }
-const toggleTwin = () => (twin ? hideTwin() : showTwin());
+// The compare line's own side: "<A> · 67.9 m est.".
+const compareLead = () => `<strong>${f.esc(current.preset.name)}</strong>${current.modified ? " (modified)" : ""} · ${f.m(current.bounds.height_m)} est.`;
+
+// A preset beside the current rocket (compare chooser): its parts from its own manifest, to the camera's right
+// with the twin's spacing, appearing built with the same snap. Not selectable (not in `parts`), shells opaque.
+let rival = null;
+function showRival(i) {
+  if (twin || rival || choreo.state.launch || choreo.state.busy || !isComplete()) return false;
+  const other = loadPreset(presetIds[i]);
+  const group = new THREE.Group();
+  const rparts = other.manifest.map(makePart);
+  for (const p of rparts) {
+    p.group.traverse((o) => {
+      if (o.isLine) o.castShadow = o.receiveShadow = false;
+    });
+    if (LOOK === "xray") setShellOpacity(p, 0.92);
+    group.add(p.group);
+  }
+  const right = new THREE.Vector3().crossVectors(camera.getWorldDirection(new THREE.Vector3()), camera.up).setY(0).normalize();
+  const stackR = current.bounds.radius_u;
+  const otherR = other.bounds.radius_u;
+  const off = stackR * 1.6 + otherR;
+  group.position.copy(right).multiplyScalar(off);
+  root.add(group);
+  // The snap (choreo.appearBuilt): each part drops from 1.2 m × its index into its slot on a spring.
+  const gap = 1.2 * SCALE;
+  const k = { v: 1 };
+  const place = () => rparts.forEach((p, j) => (p.group.position.y = p.slotY + (j + 1) * gap * k.v));
+  place();
+  const anim = animate(k, { v: 0, ease: spring({ stiffness: 130, damping: 12 }), onUpdate: place });
+  const c = (off + otherR - stackR) / 2;
+  choreo.frameCompare(right.clone().multiplyScalar(c), Math.max(current.bounds.height_u, other.bounds.height_u), (off + otherR + stackR) / 2);
+  const line = `${compareLead()} vs <strong>${f.esc(other.preset.name)}</strong> · ${f.m(other.bounds.height_m)} est.`;
+  const cardLine = `vs ${other.preset.name} · ${f.m(other.bounds.height_m)} est.`;
+  rival = { group, anim, line, cardLine, key: buildKey(current.build) };
+  if (anchors?.tower) anchors.tower.visible = false;
+  hudText.innerHTML = line;
+  return true;
+}
+function hideRival({ reframe = true } = {}) {
+  if (!rival) return;
+  rival.anim.cancel();
+  root.remove(rival.group);
+  disposeTree(rival.group);
+  rival = null;
+  if (anchors?.tower) anchors.tower.visible = true;
+  if (reframe) choreo.frameStack();
+  hudText.innerHTML = hudHtml();
+}
+function clearCompare(opts) {
+  hideTwin(opts);
+  hideRival(opts);
+}
+// C: the compare chooser, or clear what is being compared.
+function toggleCompare() {
+  if (twin || rival) return clearCompare();
+  if (!rocketsEl.hidden && rocketsMode === "compare") return setRocketsOpen(false);
+  if (choreo.state.launch || choreo.state.busy || !isComplete()) return;
+  setRocketsOpen(true, "compare");
+}
 
 // ---------- result card (design H32) ----------
 // Key S saves "rocket-card.png": the current view rendered once at 1600×900 through a private offscreen
@@ -692,9 +813,9 @@ async function makeCardCanvas() {
   y += 40;
   text("Mission", 64, y, `600 20px ${FONT}`, "#a9adb8");
   text(`${mission?.name ?? build.missionId} · ${f.ms(mission?.requiredDeltaV_ms ?? 0)} required`, 184, y, `600 20px ${FONT}`, "#f6f7fb");
-  if (twin) {
+  if (twin ?? rival) {
     y += 52;
-    text(plain(twin.line).split(" · GCAT")[0], 64, y, `500 17px ${MONO}`, "#ffb48a");
+    text((twin ?? rival).cardLine, 64, y, `500 17px ${MONO}`, "#ffb48a");
   }
   // Footer: where the numbers come from.
   const credit = twin ? ` · ${gcatCredit()}` : "";
@@ -742,7 +863,7 @@ async function runStory() {
       }),
     );
   try {
-    hideTwin({ reframe: false });
+    clearCompare({ reframe: false });
     setRocketsOpen(false);
     if (current.preset.id !== "falcon-9" || current.modified) switchPreset(presetIds.indexOf("falcon-9") - presetIndex, { built: false });
     else if (parts.some((p) => p.built) || choreo.state.launch) choreo.reset();
@@ -852,14 +973,15 @@ function onPartKey(part) {
 addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (landing) {
-    if (e.key === "Enter" || e.key === " ") {
+    if (!e.repeat && !["Shift", "Control", "Alt", "Meta", "Tab"].includes(e.key)) {
       e.preventDefault();
-      enterFromLanding();
+      enterFromLanding(); // any key enters
     }
     return; // nothing else until the user has entered
   }
   if (e.target.closest?.("input, textarea, select")) return;
   if (e.key === "Escape" && !rocketsEl.hidden) return setRocketsOpen(false);
+  if (e.key === "Escape" && (twin || rival)) return clearCompare();
   // After a launch the final frame holds (HUD outcome line) until R, Esc or a double-click.
   if (e.key === "Escape" && choreo.state.launch === "done" && !choreo.state.ending) {
     choreo.skip();
@@ -875,7 +997,7 @@ addEventListener("keydown", (e) => {
   } else if (k === "b") choreo.buildAll();
   else if (k === "r") reset();
   else if (k === "l") launch();
-  else if (k === "c") toggleTwin();
+  else if (k === "c") toggleCompare();
   else if (k === "s") saveCard();
   else if (k === "x") choreo.toggleLookAll();
   else if (k === "p") runStory();
@@ -889,31 +1011,37 @@ addEventListener("keydown", (e) => {
 // shot: the pad group appears once the camera is above the deck, the planet sinks away under the ground, and
 // the UI fades in. The landing DOM is created here and removed after entering.
 const LANDING_R = 40;
-const LANDING_AZ = 0.58; // the home view's azimuth
+const LANDING_AZ = choreo.landingView.az; // the home view's azimuth (the ending's Earth reuses this shot)
 let landing = null;
 function startLanding() {
   document.body.classList.add("landing");
   const planet = createPlanet({ kind: "earth", radius_u: LANDING_R });
   planet.object3d.position.set(0, -LANDING_R - 0.2, 0); // the pad stands on its north pole
-  planet.setSunDir?.(new THREE.Vector3(-0.85, 0.35, -0.2).normalize());
+  planet.setSunDir?.(choreo.landingView.sun);
   scene.add(planet.object3d);
   root.visible = false;
   controls.enabled = false;
   const c = planet.object3d.position;
-  const off = new THREE.Vector3(0, 0.62 * LANDING_R, 2.05 * LANDING_R).applyAxisAngle(new THREE.Vector3(0, 1, 0), LANDING_AZ);
+  const v = choreo.landingView;
+  const off = new THREE.Vector3(0, v.up * LANDING_R, v.back * LANDING_R).applyAxisAngle(new THREE.Vector3(0, 1, 0), LANDING_AZ);
   camera.position.copy(c).add(off);
-  controls.target.set(c.x, c.y + 1.02 * LANDING_R, c.z);
+  controls.target.set(c.x, c.y + v.aim * LANDING_R, c.z);
   camera.lookAt(controls.target);
   const el = document.createElement("div");
   el.className = "landing";
   el.innerHTML = `<h1>Rocket Assembly</h1><button type="button" class="landing-go">Build a rocket</button>`;
   document.body.appendChild(el);
   el.querySelector(".landing-go").addEventListener("click", enterFromLanding);
+  // Any click, touch or wheel enters too (keys: see the keydown handler).
+  addEventListener("pointerdown", enterFromLanding, { capture: true });
+  addEventListener("wheel", enterFromLanding, { capture: true, passive: true });
   landing = { planet, el, entering: false, y0: planet.object3d.position.y };
 }
 function enterFromLanding() {
   if (!landing || landing.entering) return;
   landing.entering = true;
+  removeEventListener("pointerdown", enterFromLanding, { capture: true });
+  removeEventListener("wheel", enterFromLanding, { capture: true });
   sfx.unlock();
   sfx.play("whoosh", { rate: 0.6, gain: 0.8 });
   const { planet, el, y0 } = landing;
@@ -974,7 +1102,7 @@ const perf = { gtaoOk: true, sum: 0, n: 0, windows: 0 };
 const pieceCount = () => parts.reduce((n, p) => n + p.pieces.length, 0);
 function gtaoBudget(rawDt) {
   if (!gtao) return;
-  gtao.enabled = perf.gtaoOk && choreo.state.busy === 0 && pieceCount() <= GTAO_MAX_PIECES;
+  gtao.enabled = perf.gtaoOk && choreo.state.busy === 0 && !choreo.state.launch && !landing && pieceCount() <= GTAO_MAX_PIECES;
   if (!gtao.enabled) {
     perf.sum = perf.n = 0;
     return;
@@ -986,6 +1114,12 @@ function gtaoBudget(rawDt) {
   perf.sum = perf.n = 0;
 }
 
+const band = { near: null, far: null }; // fog band widths, eased
+// The fade through black between the ending's scenes (choreo.state.cut): over the canvas, under the page UI.
+const cutEl = document.createElement("div");
+cutEl.className = "cut";
+canvas.after(cutEl);
+
 const clock = new THREE.Clock();
 function frame() {
   const rawDt = clock.getDelta();
@@ -994,13 +1128,23 @@ function frame() {
   gtaoBudget(rawDt);
   choreo.update(dt, t);
   controls.update();
+  choreo.postUpdate();
   // Depth cue: fog (background colour) in a band around the orbit target, sized by what is framed, so the far
   // side of the rocket and its far lines fade toward black while the near silhouette stays bright.
   // The band is wide at home and while building (the pad stays visible) and tight on a focus or exploded view.
+  // Its widths ease over ~0.5 s when the framing changes (no fog jump); on a black cut frame they snap.
+  const black = choreo.state.cut >= 1;
   const { r: R, mode } = choreo.framing();
+  const goalNear = 0.6 * R;
+  const goalFar = (mode === "focus" || mode === "exploded" ? 3 : 6) * R;
+  const kb = band.near == null || black ? 1 : 1 - Math.exp(-dt / 0.15);
+  band.near = band.near == null ? goalNear : band.near + (goalNear - band.near) * kb;
+  band.far = band.far == null ? goalFar : band.far + (goalFar - band.far) * kb;
   const dist = camera.position.distanceTo(controls.target);
-  scene.fog.near = Math.max(0.1, dist - 0.6 * R);
-  scene.fog.far = dist + (mode === "focus" || mode === "exploded" ? 3 : 6) * R;
+  scene.fog.near = Math.max(0.1, dist - band.near);
+  scene.fog.far = dist + band.far;
+  placeShadow(dt, black);
+  if (cutEl.style.opacity !== String(choreo.state.cut)) cutEl.style.opacity = String(choreo.state.cut);
   if (pad?.ringMat) pad.ringMat.opacity = 0.55 + 0.3 * (0.5 + 0.5 * Math.sin(t * 1.6));
   twin?.sil?.update(camera);
   landing?.planet.update(t, camera);

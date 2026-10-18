@@ -2,6 +2,7 @@
 //   arrivalTimeline(build, catalog, ascentSummary) -> { body, success, lands, lines, legs, mission, shortBy_ms, est }
 //   legs: [{ type: "orbit" | "transfer" | "descent" | "touchdown" | "stranded", seconds, alt_km, note, body }]
 //   (seconds = screen time; all legs together take at most 8 s)
+//   descentTimeline(payload, opts?) -> samples for the touchdown animation (see the bottom of this file)
 // Rules (no physics beyond missions.json and ascent.js):
 // - body from the mission: leo / gto / earth-escape -> earth; moon-transfer / lunar-orbit -> moon;
 //   mars-transfer -> mars.
@@ -114,4 +115,36 @@ export function arrivalTimeline(build, catalog, ascentSummary) {
   legs.push({ type: "touchdown", alt_km: 0, body, note: `Touchdown on ${BODY_NAME[body]}.`, weight: 0.8 });
   lines.push(`${who} lands on ${BODY_NAME[body]} with its own engine (est.).`);
   return result(legs, lines);
+}
+
+// Lander descent for the touchdown animation (est., illustrative, not a mission figure): a constant-deceleration
+// profile from 3 km to 0 m. The start speed is a model choice (60 m/s at 3 km), so the descent takes about
+// 100 s, compressed linearly into 8 s of screen time; throttle is a constant 0.8 (no lander thrust or mass is
+// in the dataset). dust = throttle * clamp(1 - alt / 30 m) for the surface plume.
+//   descentTimeline(payload, opts?) -> { payloadId, from_m, screen_s, samples: [{ t_screen, t_s, alt_m, vel_ms,
+//   throttle, dust }], est, note }
+export function descentTimeline(payload, { from_m = 3000, v0_ms = 60, screen_s = 8, throttle = 0.8, step_s = 0.1 } = {}) {
+  const T = (2 * from_m) / v0_ms; // h(t) = from (1 - t/T)^2, v(t) = v0 (1 - t/T): constant deceleration v0 / T
+  const samples = [];
+  const n = Math.round(screen_s / step_s);
+  for (let i = 0; i <= n; i++) {
+    const u = i / n;
+    const alt = from_m * (1 - u) ** 2;
+    samples.push({
+      t_screen: Math.round(u * screen_s * 100) / 100,
+      t_s: Math.round(u * T * 10) / 10,
+      alt_m: Math.round(alt * 10) / 10,
+      vel_ms: Math.round(v0_ms * (1 - u) * 100) / 100,
+      throttle: i === n ? 0 : throttle,
+      dust: i === n ? 0 : Math.round(throttle * Math.min(1, Math.max(0, 1 - alt / 30)) * 1000) / 1000,
+    });
+  }
+  return {
+    payloadId: payload?.id ?? null,
+    from_m,
+    screen_s,
+    samples,
+    est: true,
+    note: `Illustrative constant-deceleration descent for the animation: ${v0_ms} m/s at ${from_m / 1000} km to 0, about ${Math.round(T)} s shown in ${screen_s} s. Not a mission figure.`,
+  };
 }

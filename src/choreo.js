@@ -69,7 +69,41 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   const flash = createBoltFlash();
   scene.add(flash.object3d);
 
-  const state = { busy: 0, exploded: false, scrubbing: false, auto: false, launch: null, deploying: false, ending: false, gen: 0, shake: 0 };
+  // Pad glow: UI4's pad lights (createPadLight) each carry a PointLight that is shown only while lit. A light
+  // appearing or vanishing changes three's light count, which recompiles every lit material in the scene (a
+  // ~100 ms freeze at ignition, again at the booster's landing burn). So one point light lives in the scene from
+  // the start at intensity 0 and mirrors the brightest pad light shown; theirs are detached.
+  const glow = new THREE.PointLight(0xff8a3a, 0, 0, 2);
+  scene.add(glow);
+  const glowSources = new Set();
+  function adoptPadLight(pl) {
+    pl.light.removeFromParent();
+    glowSources.add(pl);
+    return pl;
+  }
+  function dropPadLight(pl) {
+    if (!pl) return;
+    glowSources.delete(pl);
+    pl.dispose();
+  }
+  function shownInScene(o) {
+    for (; o; o = o.parent) {
+      if (!o.visible) return false;
+      if (o === scene) return true;
+    }
+    return false;
+  }
+  function updateGlow() {
+    let best = null;
+    for (const pl of glowSources) if (shownInScene(pl.object3d) && (!best || pl.light.intensity > best.light.intensity)) best = pl;
+    glow.intensity = best ? best.light.intensity : 0;
+    if (!best) return;
+    glow.color.copy(best.light.color);
+    best.object3d.localToWorld(glow.position.copy(best.light.position));
+  }
+
+  // cut: 0..1, the fade through black between the ending's scenes (main draws it as a full-screen overlay).
+  const state = { busy: 0, exploded: false, scrubbing: false, auto: false, launch: null, deploying: false, ending: false, gen: 0, shake: 0, cut: 0 };
   const live = new Set();
   const selectColor = new THREE.Color(COLORS.select ?? 0xffb020);
   const highlighted = new Set();
@@ -1043,7 +1077,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     const plumes = attachPlumes(part);
     for (const plume of plumes) L.plumes.push({ plume, stage, ignite: t + plume.engine * (stage === 0 ? 0.07 : 0.05), dead: false });
     if (stage === 0 && L.pad && plumes.length) {
-      L.padLight = createPadLight({ baseRadius_u: bounds?.baseRadius_u ?? 1, bellExitRadius_u: Math.max(...plumes.map((p) => p.exitRadius_u ?? 0.1)) });
+      L.padLight = adoptPadLight(createPadLight({ baseRadius_u: bounds?.baseRadius_u ?? 1, bellExitRadius_u: Math.max(...plumes.map((p) => p.exitRadius_u ?? 0.1)) }));
       L.pad.add(L.padLight.object3d);
     }
   }
@@ -1197,6 +1231,10 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     const inOrbit = types.has("orbit");
     L.drifting = inOrbit;
     const maxAlt = Math.max(...L.samples.map((x) => x.alt_m));
+    // The ascent's outcome line first; the planet ending's own lines follow it (and its final line wins).
+    state.busy--;
+    state.launch = "done";
+    L.onTelemetry({ final: true, outcome: summary.outcome, inOrbit, summary, alt_m: s.alt_m });
     if (inOrbit && L.arrival?.legs?.length) {
       startEnding(L.arrival); // the planet ending (≤ 8 s): orbit, transfer, arrival, landing
     } else if (inOrbit) {
@@ -1233,9 +1271,6 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         },
       });
     }
-    state.busy--;
-    state.launch = "done";
-    L.onTelemetry({ final: true, outcome: summary.outcome, inOrbit, summary, alt_m: s.alt_m });
     changed();
     L.resolve?.(summary.outcome);
   }
@@ -1346,6 +1381,63 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   // in Earth orbit with the shortfall line.
   const PLANET_R = { earth: 70, moon: 26, mars: 40 };
   let E = null;
+  // The Earth in orbit legs as the landing page shows it: the same place on screen, size and light relative to
+  // the camera (main's landing shot: camera 0.62 R up and 2.05 R out from the centre at azimuth 0.58, aimed 1.02 R
+  // up, sun from `sun`; pole at the top limb), re-placed and re-oriented from the camera every frame (postUpdate),
+  // so the craft floats in front of the globe's dark limb while the ground slides east under it. Close above a huge globe, the old placement showed its lit pole at grazing angles: rims
+  // and atmosphere over half the frame, washed out. Drawn at 4.5 craft radii (scaled), well inside the stars.
+  const landingView = { up: 0.62, back: 2.05, aim: 1.02, az: 0.58, sun: new THREE.Vector3(-0.85, 0.35, -0.2).normalize() };
+  const backdrop = (() => {
+    const eye = new THREE.Vector3(0, landingView.up, landingView.back).applyAxisAngle(Y, landingView.az);
+    const q = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().lookAt(eye, new THREE.Vector3(0, landingView.aim, 0), Y)).invert();
+    // camera space: the centre (per unit R), the sun, the globe's orientation
+    return { off: eye.clone().negate().applyQuaternion(q), sun: landingView.sun.clone().applyQuaternion(q), q };
+  })();
+  const tmpV = new THREE.Vector3();
+  function placeBackdrop() {
+    const b = E?.backdrop;
+    if (!b) return;
+    const R = b.planet.R * b.planet.object3d.scale.x;
+    tmpV.copy(backdrop.off).multiplyScalar(R);
+    tmpV.y -= (1 - b.k.v) * 0.9 * R; // rising into place
+    b.planet.object3d.position.copy(tmpV.applyQuaternion(camera.quaternion).add(camera.position));
+    b.planet.setSunDir(tmpV.copy(backdrop.sun).applyQuaternion(camera.quaternion));
+    tmpQ.setFromAxisAngle(Y, (performance.now() - b.t0) * 5e-5); // 0.05 rad/s
+    b.planet.object3d.quaternion.copy(camera.quaternion).multiply(backdrop.q).multiply(tmpQ);
+  }
+  function setBackdrop(planet, ms) {
+    planet.object3d.visible = true;
+    planet.object3d.scale.setScalar(Math.max(2, E.r * 4.5) / planet.R);
+    E.backdrop = { planet, k: { v: ms ? 0 : 1 }, t0: performance.now() };
+    if (ms) run(E.backdrop.k, { v: 1, duration: D(ms), ease: "outCubic" });
+    placeBackdrop();
+  }
+
+  // Scene changes inside the ending (to the booster, back to the payload, down to the surface) go through black:
+  // 120 ms down while the old scene plays on, the change on a black frame (held one more frame so first-use
+  // uploads land unseen), 130 ms up. state.cut is the overlay's opacity.
+  const CUT_DOWN = 0.12;
+  const CUT_UP = 0.13;
+  const CUT_LEGS = new Set(["booster", "earth-payload", "stranded", "descent"]);
+  function cutUpdate(dt) {
+    const c = E.cut;
+    if (!c.fired) {
+      c.t += dt;
+      state.cut = Math.min(1, c.t / CUT_DOWN);
+      if (c.t < CUT_DOWN) return;
+      c.fired = true;
+      c.hold = 1;
+      c.fn();
+      return;
+    }
+    if (c.hold-- > 0) return;
+    c.up += dt;
+    state.cut = Math.max(0, 1 - c.up / CUT_UP);
+    if (c.up >= CUT_UP) {
+      E.cut = null;
+      state.cut = 0;
+    }
+  }
   function craftBox() {
     focusBox.makeEmpty();
     for (const part of parts) {
@@ -1411,6 +1503,9 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   }
   // Run the remaining legs to their end state at once (double-click skip).
   function fastForwardEnding() {
+    E.fast = true;
+    E.cut = null;
+    state.cut = 0;
     while (E && state.ending) {
       const leg = E.legs[E.i];
       if (leg?.type === "booster" && E.booster && !E.booster.ended) {
@@ -1428,6 +1523,14 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     }
   }
   function nextLeg() {
+    const up = E.legs[E.i + 1];
+    if (up && CUT_LEGS.has(up.type) && !E.fast) {
+      E.cut ??= { t: 0, up: 0, fired: false, hold: 0, fn: advanceLeg };
+      return;
+    }
+    advanceLeg();
+  }
+  function advanceLeg() {
     E.i++;
     E.legT = 0;
     const leg = E.legs[E.i];
@@ -1437,7 +1540,9 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     switch (leg.type) {
       case "orbit": {
         const planet = planetFor(leg.body);
-        if (E.origin !== planet) bringPlanet(planet, Math.min(900, leg.seconds * 600));
+        if (leg.body === "earth" || !leg.body) {
+          if (E.backdrop?.planet !== planet) setBackdrop(planet, Math.min(900, leg.seconds * 600));
+        } else if (E.origin !== planet) bringPlanet(planet, Math.min(900, leg.seconds * 600));
         for (const p of Object.values(E.planets)) if (p !== planet) p.object3d.visible = false;
         E.origin = planet;
         frameCraft(5.5, 18);
@@ -1451,6 +1556,8 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       case "transfer": {
         E.burn = leg.seconds * 0.5; // the upper stage relights for the first half
         E.from = E.origin;
+        E.backdrop = null; // the origin recedes in the world from where it is
+        E.fromScale = E.from?.object3d.scale.x ?? 1;
         E.to = leg.body && E.planets[leg.body] !== E.origin && PLANET_R[leg.body] ? planetFor(leg.body) : null;
         if (E.to) E.to.object3d.visible = false;
         frameCraft(9, 12, leg.seconds * 500);
@@ -1476,9 +1583,9 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         endBoosterScene();
         L.flight.visible = true;
         const planet = planetFor("earth");
-        bringPlanet(planet, 500);
         E.origin = planet;
-        frameCraft(5.5, 18, 1); // a hard cut from the booster
+        frameCraft(5.5, 18, 1); // on the black frame of the cut
+        setBackdrop(planet, 0);
         const payload = parts.find((p) => p.kind === "payload" && !L.gone.has(p));
         if (leg.type === "earth-payload" && payload && deployables(payload).length) deploy(payload, { gap: 500 });
         break;
@@ -1549,7 +1656,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       .map((pl) => pl.plume)
       .sort((a, b) => Math.hypot(a.object3d.position.x, a.object3d.position.z) - Math.hypot(b.object3d.position.x, b.object3d.position.z));
     const exitR = Math.max(...bplumes.map((p) => p.exitRadius_u ?? 0.1), 0.1);
-    const splash = createPadLight({ baseRadius_u: Math.max(...bparts.map((p) => p.radius)), bellExitRadius_u: exitR });
+    const splash = adoptPadLight(createPadLight({ baseRadius_u: Math.max(...bparts.map((p) => p.radius)), bellExitRadius_u: exitR }));
     scene.add(splash.object3d);
     const ev = (type) => bst.events.find((e) => e.type === type);
     const tFlip = ev("flip")?.t ?? bst.samples[0].t;
@@ -1655,9 +1762,14 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     if (deps.length) deploy(payload, { gap: 300 });
     framedR = E.r * 2;
     framedMode = "focus";
-    frameTo({ tx: ground.x, ty: ground.y + E.r * 1.4, tz: ground.z, dist: E.r * 6, pitch: THREE.MathUtils.degToRad(10), duration: D(500) });
+    E.backdrop = null;
+    frameTo({ tx: ground.x, ty: ground.y + E.r * 1.4, tz: ground.z, dist: E.r * 6, pitch: THREE.MathUtils.degToRad(10), duration: 1 }); // on the black frame of the cut
   }
   function endingUpdate(dt) {
+    if (E.cut) {
+      cutUpdate(dt);
+      if (!E) return;
+    }
     const leg = E.legs[E.i];
     E.legT += dt;
     for (const p of Object.values(E.planets)) {
@@ -1668,8 +1780,8 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     if (leg?.type === "transfer") {
       const q = Math.min(1, E.legT / Math.max(0.1, leg.seconds));
       if (E.from) {
-        E.from.object3d.position.y -= dt * E.from.R * 0.6;
-        E.from.object3d.scale.setScalar(1 - 0.6 * q);
+        E.from.object3d.position.y -= dt * E.from.R * E.fromScale * 0.6;
+        E.from.object3d.scale.setScalar(E.fromScale * (1 - 0.6 * q));
       }
       if (E.to && q > 0.5 && !E.to.object3d.visible) bringPlanet(E.to, leg.seconds * 450);
       const lastStage = Math.max(...L.plumes.map((pl) => pl.stage));
@@ -1687,7 +1799,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     }
     E.patch?.update?.(E.legT);
     E.dust.update(dt);
-    if (leg && E.legT >= leg.seconds) nextLeg();
+    if (leg && E.legT >= leg.seconds && !E.cut) nextLeg();
   }
   function finishEnding() {
     state.ending = false;
@@ -1703,7 +1815,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     if (E.patch) scene.remove(E.patch.object3d);
     E.lander?.plume?.dispose();
     if (E.booster) {
-      E.booster.splash.dispose?.();
+      dropPadLight(E.booster.splash);
       if (E.booster.zone) {
         scene.remove(E.booster.zone);
         E.booster.zone.traverse((o) => o.geometry?.dispose()); // UI4's ship shares its prop materials: keep them
@@ -1714,6 +1826,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     scene.remove(E.dust.object3d);
     E = null;
     state.ending = false;
+    state.cut = 0;
   }
 
   // After a launch: the assembled rocket back on the pad, still built (story mode's twin compare).
@@ -1739,7 +1852,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     disposeEnding();
     if (!L) return;
     for (const pl of L.plumes) pl.plume.dispose();
-    L.padLight?.dispose();
+    dropPadLight(L.padLight);
     (L.anchors?.arms ?? []).forEach((arm, i) => (arm.mesh.rotation.y = L.arms0[i] ?? arm.mesh.rotation.y));
     if (L.pad) {
       L.pad.position.y = 0;
@@ -1951,9 +2064,38 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
 
   // Warm-up so the first build has no hitch: compile every program and upload every geometry (one offscreen
   // render with culling off; a 200-piece stack otherwise stalls ~2 s on the frame its pieces first appear).
+  // The launch and ending effects (plume and sprite, pad disc and splash, the three planets, the surface
+  // patches, dust, the drone ship) are warmed the same way, from one hidden set kept for the session so their
+  // programs stay cached: otherwise each compiles on the frame it first appears (ignition, the booster's
+  // landing burn, the arrival).
+  let warmFx = null;
+  function warmEffects() {
+    if (!warmFx) {
+      warmFx = new THREE.Group();
+      warmFx.name = "warm-fx";
+      const pad = createPadLight({ baseRadius_u: 0.5 });
+      pad.light.removeFromParent(); // the scene's light count stays as it is (see glow)
+      warmFx.add(
+        createPlume({ engineRecord: { id: "warm", propellant: "kerolox" }, exitRadius_u: 0.05 }).object3d,
+        pad.object3d,
+        ...["earth", "moon", "mars"].map((kind) => createPlanet({ kind, radius_u: 0.05 }).object3d),
+        ...["moon", "mars"].map((kind) => createSurfacePatch({ kind, radius_u: 0.5 }).object3d),
+        createDustPuff().object3d,
+        createDroneShip({ size_u: 0.5 }).object3d,
+      );
+      warmFx.position.set(0, -50, 0);
+      scene.add(warmFx);
+    }
+    warmFx.traverse((o) => {
+      o.visible = true;
+      o.frustumCulled = false;
+    });
+    return () => (warmFx.visible = false);
+  }
   const warmTarget = new THREE.WebGLRenderTarget(4, 4);
   function prewarm(renderer) {
     warmRenderer = renderer;
+    const unwarm = warmEffects();
     const meshes = parts.flatMap((p) => p.pieces.map((q) => q.mesh));
     for (const part of parts) part.ghost.visible = true;
     for (const m of meshes) {
@@ -1966,6 +2108,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     renderer.render(scene, camera);
     renderer.setRenderTarget(prevTarget);
     for (const m of meshes) m.frustumCulled = true;
+    unwarm();
     for (const part of parts) {
       part.ghost.visible = part.ghostActive || part.ghostFade.v > 0;
       for (const piece of part.pieces) piece.mesh.visible = part.built;
@@ -1979,6 +2122,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     }
     if (highlighted.size) updateHighlights(t);
     if (L) launchUpdate(dt);
+    updateGlow();
     flash.update(dt);
     if (state.shake > 0.002) {
       state.shake *= Math.exp(-dt * 8);
@@ -1986,6 +2130,11 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     } else if (root.position.x !== 0) {
       root.position.set(0, 0, 0);
     }
+  }
+
+  // After main's controls.update(): what hangs off the final camera pose this frame.
+  function postUpdate() {
+    placeBackdrop();
   }
 
   // The always-on ghost starts with the first part.
@@ -2034,6 +2183,8 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     setBounds,
     prewarm,
     update,
+    postUpdate,
+    landingView,
     home,
   };
 }

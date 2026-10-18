@@ -11,6 +11,9 @@
 //     on the Moon, dunes and rocks on Mars; receives shadows. Keep the middle (r < 0.12 R) clear for the lander.
 //   createDustPuff() -> { object3d, fire({ position, radius }), update(dt), active(), dispose() }
 //     a ring of additive dust blobs thrown out at touchdown over ~1 s (one Points draw).
+//   createShadowDecal({ radius_u }) -> { object3d, update({ position, altitude_u, sunDir }), dispose() }
+//     the lander's soft shadow on a surface patch: offset away from the sun by altitude, softer and fainter
+//     as it climbs (1 draw). Earth also shows sparse warm city lights on its night side.
 // Planet materials ignore fog so a distant globe is not swallowed by the per-frame fog band around the rocket.
 import * as THREE from "three";
 import { peachLineMaterial } from "./parts.js";
@@ -89,9 +92,10 @@ const bodyFragment = /* glsl */ `
     vec3 albedo = uBase;
     float glint = 0.0;
     float clouds = 0.0;
+    float land = 0.0;
   #ifdef KIND_EARTH
     float c = fbm3(vObj * 1.7 + 3.1);
-    float land = smoothstep(0.53, 0.57, c);
+    land = smoothstep(0.53, 0.57, c);
     albedo = mix(uBase, uLand, land);
     albedo += uRim * 0.05 * exp(-pow((c - 0.55) / 0.012, 2.0));              // faint warm coastline
     glint = (1.0 - land) * pow(max(dot(reflect(-L, N0), V), 0.0), 60.0) * 0.35; // ocean sun glint
@@ -125,6 +129,13 @@ const bodyFragment = /* glsl */ `
     float fres = pow(1.0 - clamp(dot(N0, V), 0.0, 1.0), 4.0);
     fres = pow(fres, 1.25);                                                              // narrow on huge globes
     col += uRim * fres * (0.1 + 0.9 * smoothstep(-0.25, 0.6, ndl0)) * 0.35;           // peach fresnel rim
+  #ifdef KIND_EARTH
+    // Night-side city lights: sparse warm dots on land, clustered by a population noise.
+    float night = smoothstep(0.06, -0.2, ndl0);
+    float pop = smoothstep(0.45, 0.72, fbm3(vObj * 5.0 + 9.0));
+    float city = step(0.955, hash3(floor(vObj * 170.0))) * land * pop;
+    col += vec3(1.0, 0.72, 0.42) * city * night * (1.0 - clouds) * 0.8;
+  #endif
     gl_FragColor = vec4(col, 1.0);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
@@ -418,6 +429,48 @@ export function createDustPuff() {
     active: () => object3d.visible,
     dispose() {
       geo.dispose();
+      mat.dispose();
+      object3d.removeFromParent();
+    },
+  };
+}
+
+// Soft lander shadow on a surface patch. position: the ground point under the lander (same frame as object3d);
+// the shadow falls away from the sun (offset −sun.xz / sun.y × altitude) and widens and fades as it climbs.
+export function createShadowDecal({ radius_u = 0.6 } = {}) {
+  const r0 = Math.max(1e-3, radius_u);
+  const uA = { value: 0 };
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uA },
+    vertexShader: /* glsl */ `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: /* glsl */ `uniform float uA; varying vec2 vUv;
+      void main() { float r = length(vUv - 0.5) * 2.0; gl_FragColor = vec4(0.0, 0.0, 0.0, uA * (1.0 - smoothstep(0.35, 1.0, r))); }`,
+    transparent: true,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
+    fog: false,
+  });
+  const mesh = new THREE.Mesh(new THREE.CircleGeometry(1, 48).rotateX(-Math.PI / 2), mat);
+  mesh.name = "shadow-decal";
+  mesh.raycast = () => {};
+  const object3d = new THREE.Group();
+  object3d.name = "shadow-decal";
+  object3d.add(mesh);
+  return {
+    object3d,
+    update({ position, altitude_u = 0, sunDir = DEFAULT_SUN } = {}) {
+      const alt = Math.max(0, altitude_u);
+      const sy = Math.max(0.15, sunDir.y);
+      if (position) object3d.position.set(position.x - (sunDir.x / sy) * alt, position.y + 0.004, position.z - (sunDir.z / sy) * alt);
+      const s = r0 * (1 + alt / (r0 * 8));
+      mesh.scale.set(s, 1, s);
+      uA.value = 0.6 / (1 + alt / (r0 * 6)) ** 2;
+      object3d.visible = uA.value > 0.005;
+    },
+    dispose() {
+      mesh.geometry.dispose();
       mat.dispose();
       object3d.removeFromParent();
     },

@@ -21,8 +21,9 @@
 // - g-limit (default 4.5 g, opts.gLimit; null turns it off): any stage throttles down, never below 0.4, to hold
 //   thrust / mass at the limit, as real vehicles do near burnout. Samples carry gLimited; summary.gLimited_s
 //   counts the time spent limited. Below 0.4 throttle the limit is exceeded rather than flame out.
-// - Max-Q: the first stage throttles to 0.8 while q > 25 kPa and still rising, and returns to full once q has
-//   peaked.
+// - Max-Q: a first stage with a sourced throttle capability (THROTTLEABLE: Merlin 1D, RD-180, RS-68A) throttles
+//   to 0.8 once q exceeds 25 kPa and returns to full when q is back under 25 kPa (events throttle-down /
+//   throttle-up); other first stages fly through Max-Q at full thrust.
 // - Staging at propellant depletion: cutoff, separation 1 s later (the spent stage's dry mass is dropped),
 //   next-stage ignition 1 s after that (2 s coast). Fairing jettison at 110 km is an event only: the dataset
 //   has no fairing mass, and there is no fairing for exposed payloads (visuals.json).
@@ -97,6 +98,33 @@ const TARGET_ALT = 200e3;
 
 const byId = (list, id) => (id ? list?.find((x) => x.id === id) : undefined);
 
+// Detail channels for the animation (est.):
+// - mach: speed / speed of sound from a simplified ISA table (ISO 2533 / US Standard Atmosphere 1976:
+//   340 m/s at sea level falling to 295 m/s at 11 km); above 11 km it is held at 295 m/s (model choice).
+// - transonic: 0.85 < Mach < 1.15, the window where condensation collars show.
+// - heat: a heating proxy rho * v^3, normalised to its own maximum over that flight (0..1); the main vehicle
+//   and the booster are normalised separately. Not a heat-flux figure.
+const speedOfSound = (h) => (h <= 0 ? 340 : h >= 11000 ? 295 : 340 - (45 * h) / 11000);
+const TRANSONIC = [0.85, 1.15];
+// Igniters: only the Merlin Vacuum's is sourced ("the engine contains dual redundant triethylaluminum-
+// triethylborane (TEA-TEB) pyrophoric igniters", Falcon User's Guide 2025,
+// https://www.spacex.com/assets/media/falcon-users-guide-2025-05-09.pdf); other upper-stage ignitions get a
+// generic "igniter" event.
+const TEA_TEB = new Set(["merlin-1d-vac"]);
+// Max-Q throttling only for first-stage engines with a sourced throttle capability; the others have none in our
+// data and fly through Max-Q at full thrust (no throttle-down / throttle-up events).
+const THROTTLEABLE = {
+  "merlin-1d": "https://www.spacex.com/assets/media/falcon-users-guide-2025-05-09.pdf (throttle \"Yes (190,000 lbf to 108,300 lbf sea level)\")",
+  "rd-180": "https://www.ulalaunch.com/rockets/atlas-v (\"an impressive range of continuous throttling capability\")",
+  "rs-68a": "https://web.archive.org/web/20140720073154/http://www.ulalaunch.com/Products_DeltaIV.aspx (\"the throttleable RS-68A engine\")",
+};
+const IGNITER_LEAD_S = 0.4;
+const RELEASE_AFTER_S = 20; // payload release: SECO + 20 s of sim time (shown as 1 s on screen)
+const normaliseHeat = (samples) => {
+  const max = samples.reduce((m, s) => Math.max(m, s.heat), 0);
+  for (const s of samples) s.heat = max > 0 ? round(s.heat / max, 4) : 0;
+};
+
 function stagesOf(build, catalog) {
   return build.stages.map((s) => {
     const e = byId(catalog.engines, s.engineId);
@@ -104,6 +132,8 @@ function stagesOf(build, catalog) {
     if (!e || !t) return null;
     const n = s.engineCount;
     return {
+      engineId: e.id,
+      throttleable: e.id in THROTTLEABLE,
       n,
       prop: t.propellantMass_kg,
       dry: n * e.mass_kg + t.dryMass_kg,
@@ -141,7 +171,7 @@ function orbitOf(x, y, vx, vy) {
 }
 
 // One flight. record=false skips samples and stops as soon as the outcome is known (used by the kick search).
-function fly(stages, payload_kg, fairing, increment_ms, { kick_deg, targetAlt_m, maxQThrottle, gLimit, record, sampleEvery_s, dt: DT_RUN, tMax, stopAtSep = false }) {
+function fly(stages, payload_kg, fairing, increment_ms, { kick_deg, targetAlt_m, maxQThrottle, gLimit, record, sampleEvery_s, dt: DT_RUN, tMax, stopAtSep = false, towerClear_m = 0 }) {
   const samples = [];
   const events = [];
   let x = 0;
@@ -178,14 +208,18 @@ function fly(stages, payload_kg, fairing, increment_ms, { kick_deg, targetAlt_m,
   let thrustNow = 0;
   let accNow = 0;
   let sep0 = null; // state at the first stage's separation (for the booster return)
+  let towerCleared = false;
+  let machOne = false;
+  let qThrottling = false;
+  let igniterDone = false;
 
   const state = () => {
     const r = Math.hypot(x, y);
     return { alt_m: r - RE, vel_ms: Math.hypot(vx, vy) };
   };
-  const ev = (type, stage = k) => {
+  const ev = (type, stage = k, extra = null) => {
     const s = state();
-    events.push({ t: round(t, 2), type, alt_m: round(s.alt_m, 0), vel_ms: round(s.vel_ms, 1), stage });
+    events.push({ t: round(t, 2), type, alt_m: round(s.alt_m, 0), vel_ms: round(s.vel_ms, 1), stage, ...(extra ?? {}) });
     if (record) sample(true);
   };
   const sample = (force = false) => {
@@ -207,6 +241,10 @@ function fly(stages, payload_kg, fairing, increment_ms, { kick_deg, targetAlt_m,
       q_Pa: round(0.5 * rho * v * v, 1),
       thrust_kN: round(thrustNow / 1000, 2),
       downrange_m: round(RE * Math.atan2(x, y), 1),
+      x_m: round(RE * Math.atan2(x, y), 1),
+      mach: round(v / speedOfSound(h), 3),
+      transonic: v / speedOfSound(h) > TRANSONIC[0] && v / speedOfSound(h) < TRANSONIC[1],
+      heat: h < 150e3 ? rho * v * v * v : 0, // normalised after the flight
       gamma_deg: round(v > 1 ? (Math.asin(Math.max(-1, Math.min(1, (x * vx + y * vy) / (r * v)))) * 180) / Math.PI : 90, 3),
     });
   };
@@ -261,9 +299,15 @@ function fly(stages, payload_kg, fairing, increment_ms, { kick_deg, targetAlt_m,
       const Ffull = Math.max(0, st.Fvac - (st.Fvac - st.Fsl) * pRatio);
       const isp = Math.max(0, st.ispVac - (st.ispVac - st.ispSl) * pRatio);
       throttle = 1;
-      if (maxQThrottle && k === 0) {
-        if (!qPeakPassed && q > MAXQ_LIMIT) throttle = MAXQ_THROTTLE;
-        if (q > MAXQ_LIMIT && q < qPrev) qPeakPassed = true;
+      if (maxQThrottle && k === 0 && stages[0].throttleable) {
+        // Throttled from q > 25 kPa through the peak until q is back under 25 kPa (once per flight). Releasing
+        // at the first dip would be wrong: the throttle-down itself makes q dip before the real peak.
+        if (qThrottling && q <= MAXQ_LIMIT) qPeakPassed = true;
+        const active = !qPeakPassed && q > MAXQ_LIMIT;
+        if (active) throttle = MAXQ_THROTTLE;
+        if (active && !qThrottling) ev("throttle-down", 0, { reason: "max-q", throttle: MAXQ_THROTTLE });
+        if (!active && qThrottling) ev("throttle-up", 0, { reason: "max-q", throttle: 1 });
+        qThrottling = active;
       }
       if (gLimit > 0 && Ffull > 0) {
         const cap = (gLimit * G0 * m) / Ffull;
@@ -355,6 +399,14 @@ function fly(stages, payload_kg, fairing, increment_ms, { kick_deg, targetAlt_m,
     t += dt;
 
     const now = state();
+    if (lifted && !towerCleared && towerClear_m > 0 && now.alt_m > towerClear_m) {
+      towerCleared = true;
+      ev("tower-clear", 0);
+    }
+    if (lifted && !machOne && now.vel_ms >= speedOfSound(now.alt_m)) {
+      machOne = true;
+      ev("transonic", k, { mach: 1 });
+    }
     if (!fairingDone && now.alt_m >= FAIRING_ALT) {
       fairingDone = true;
       ev("fairing");
@@ -385,9 +437,13 @@ function fly(stages, payload_kg, fairing, increment_ms, { kick_deg, targetAlt_m,
         if (k === 0 && stopAtSep) phase = "done";
         k += 1;
         propLeft = stages[k].prop;
+      } else if (sepDone && !igniterDone && t >= stagingAt + SEP_DELAY_S + IGNITION_DELAY_S - IGNITER_LEAD_S - 1e-9) {
+        igniterDone = true;
+        ev(TEA_TEB.has(stages[k].engineId) ? "tea-teb" : "igniter", k);
       } else if (sepDone && t >= stagingAt + SEP_DELAY_S + IGNITION_DELAY_S - 1e-9) {
         phase = "burn";
         ignitedAt = t;
+        igniterDone = false;
         ev("ignition2");
       }
     }
@@ -397,6 +453,8 @@ function fly(stages, payload_kg, fairing, increment_ms, { kick_deg, targetAlt_m,
       if (orbit.escape || orbit.perigee_m > PERIGEE_MIN) {
         remaining = remainingDeltaV(stages, k, propLeft, payload_kg);
         ev("orbit");
+        const s = state();
+        events.push({ t: round(t + RELEASE_AFTER_S, 2), type: "payload-release", alt_m: round(s.alt_m, 0), vel_ms: round(s.vel_ms, 1), stage: k, screen_s: 1 });
         if (remaining + 1e-6 >= increment_ms) outcome = "orbit";
         else {
           outcome = "shortfall";
@@ -435,6 +493,7 @@ function fly(stages, payload_kg, fairing, increment_ms, { kick_deg, targetAlt_m,
     orbit = orbitOf(x, y, vx, vy);
     outcome = orbit.perigee_m !== null && orbit.perigee_m > PERIGEE_MIN ? "orbit" : (orbit.apogee_m ?? 0) >= SPACE_ALT ? "shortfall" : "impact";
   }
+  if (record) normaliseHeat(samples);
   if (maxQAt) events.push({ t: round(maxQAt.t, 2), type: "maxq", alt_m: round(maxQAt.alt_m, 0), vel_ms: round(maxQAt.vel_ms, 1), stage: maxQAt.stage });
   events.sort((a, b) => a.t - b.t);
   return {
@@ -542,18 +601,42 @@ function flyBooster(sep, st, reserve_kg, cfg, { aim_m = 0, mode = "rtls", record
   let nextPredict = -Infinity; // the landing look-ahead is re-run only as the predicted stop nears the ground
   let landN = cfg.landingEngines;
   const downrange = () => RE * Math.atan2(x, y);
-  const evb = (type) => {
-    events.push({ t: round(t, 2), type, alt_m: round(Math.hypot(x, y) - RE, 0), vel_ms: round(Math.hypot(vx, vy), 1) });
+  const evb = (type, extra = null) => {
+    events.push({ t: round(t, 2), type, alt_m: round(Math.hypot(x, y) - RE, 0), vel_ms: round(Math.hypot(vx, vy), 1), ...(extra ?? {}) });
     if (record) sampleB(true);
+  };
+  // Grid fins (visual, not physics): out after the flip; a small steering wiggle scaled by dynamic pressure
+  // (up to +-4 deg at 20 kPa) while descending in the air.
+  const finDeg = (h, v, vr) => {
+    if (phase === "flip" || vr >= 0 || h > 80e3) return 0;
+    const q = 0.5 * RHO0 * Math.exp(-Math.max(0, h) / SCALE_H) * v * v;
+    const amp = 4 * Math.min(1, q / 20000);
+    return amp * (0.6 * Math.sin(2 * Math.PI * 0.7 * t) + 0.4 * Math.sin(2 * Math.PI * 1.9 * t + 1));
   };
   const sampleB = (force = false) => {
     if (!record || (!force && t < nextSample - 1e-9)) return;
     if (!force) nextSample += sampleEvery_s;
-    samples.push({ t: round(t, 2), x_m: round(downrange(), 1), alt_m: round(Math.hypot(x, y) - RE, 1), vel_ms: round(Math.hypot(vx, vy), 2), throttle: round(throttle, 3), enginesLit: lit });
+    const r = Math.hypot(x, y);
+    const h = r - RE;
+    const v = Math.hypot(vx, vy);
+    const vr = (vx * x + vy * y) / r;
+    const rho = RHO0 * Math.exp(-Math.max(0, h) / SCALE_H);
+    samples.push({
+      t: round(t, 2),
+      x_m: round(downrange(), 1),
+      alt_m: round(h, 1),
+      vel_ms: round(v, 2),
+      throttle: round(throttle, 3),
+      enginesLit: lit,
+      mach: round(v / speedOfSound(h), 3),
+      heat: h < 150e3 ? rho * v * v * v : 0, // normalised after the flight
+      gridFin_deg: round(finDeg(h, v, vr), 2),
+    });
   };
   const needFor = (dv) => (dryM + 0) * (Math.exp(dv / (st.ispVac * G0)) - 1);
   const landReserve = needFor(cfg.landingDv_ms);
   evb("flip");
+  evb("cold-gas", { phase: "start" }); // the flip is done on cold-gas thrusters
   const end = sep.t + 1200;
   while (t < end) {
     const r = Math.hypot(x, y);
@@ -572,6 +655,7 @@ function flyBooster(sep, st, reserve_kg, cfg, { aim_m = 0, mode = "rtls", record
     throttle = 0;
     let dir = [0, 0];
     if (phase === "flip" && t >= phaseAt + cfg.flip_s) {
+      evb("cold-gas", { phase: "end" });
       if (mode === "rtls") {
         phase = "boostback";
         evb("boostback");
@@ -675,6 +759,7 @@ function flyBooster(sep, st, reserve_kg, cfg, { aim_m = 0, mode = "rtls", record
     evb("lost");
     result = { landed: false, touchdownSpeed_ms: Math.hypot(vx, vy), landingX_m: downrange(), prop_kg: prop };
   }
+  if (record) normaliseHeat(samples);
   return { ...result, events, samples };
 }
 
@@ -767,8 +852,13 @@ export function simulateAscent(build, catalog, opts = {}) {
   // The first stage with `reserve_kg` of its propellant held back: it burns that much less and carries it.
   const withReserve = (reserve_kg) =>
     reserve_kg > 0 ? [{ ...stagesFull[0], prop: stagesFull[0].prop - reserve_kg, dry: stagesFull[0].dry + reserve_kg }, ...stagesFull.slice(1)] : stagesFull;
+  // Tower clear at 1.2 x the stack height: opts.stackHeight_m (the UI knows the drawn height), else tank heights
+  // + payload height + the first engine's sourced length (visuals.json) where there is one.
+  const stackHeight_m =
+    opts.stackHeight_m ??
+    build.stages.reduce((s, st) => s + (byId(catalog.tanks, st.tankId)?.height_m ?? 0), 0) + (payload?.height_m ?? 0) + (catalog.visuals?.engines?.[build.stages[0]?.engineId]?.length_m ?? 0);
   const flyWith = (stages, kick_deg, record, extra = {}) =>
-    fly(stages, payload_kg, Boolean(payload) && !exposed, increment_ms, { ...base, kick_deg, record, dt: record ? DT : SEARCH_DT, tMax, ...extra });
+    fly(stages, payload_kg, Boolean(payload) && !exposed, increment_ms, { ...base, kick_deg, record, dt: record ? DT : SEARCH_DT, tMax, towerClear_m: 1.2 * stackHeight_m, ...extra });
 
   // Kick angle: coarse grid (1-45 deg, 2 deg steps), then golden-section refinement around the best point.
   // Light upper stages on a powerful first stage want large kicks (the demo build: ~27 deg).
@@ -879,9 +969,13 @@ export function simulateAscent(build, catalog, opts = {}) {
         stages = withReserve(reserve);
         kick = kickR;
         res = asc;
+        const hot = ret.samples.filter((s) => s.heat > 0.25);
         booster = {
           returns: true,
           mode, // "rtls" (back to the pad) | "droneship" (lands where the arc comes down)
+          sea: mode === "droneship",
+          droneShip: mode === "droneship" ? { x_m: round(ret.landingX_m, 1), alt_m: 0 } : null,
+          heating: hot.length ? { start_t: hot[0].t, end_t: hot.at(-1).t, peak_t: ret.samples.find((s) => s.heat === 1)?.t ?? null } : null,
           events: ret.events,
           samples: ret.samples,
           propellantReserve_kg: reserve,
@@ -909,6 +1003,7 @@ export function simulateAscent(build, catalog, opts = {}) {
       ...res.summary,
       kick_deg: round(kick, 3),
       targetAlt_km: base.targetAlt_m / 1000,
+      stackHeight_m: round(stackHeight_m, 1),
       remainingDeltaV_ms: res.remaining,
       mission: mission
         ? {

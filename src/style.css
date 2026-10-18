@@ -38,6 +38,15 @@ body {
   touch-action: none;
 }
 
+/* The fade through black between the ending's scenes (opacity from choreo.state.cut). */
+.cut {
+  position: fixed;
+  inset: 0;
+  background: #000;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .brand {
   position: fixed;
   top: 28px;
@@ -57,6 +66,18 @@ body {
   margin: 6px 0 0;
   font-size: 13px;
   color: var(--text-2);
+}
+
+/* Shortcut legend under the title: 2 rows of key + action. */
+.brand p.keys {
+  display: grid;
+  grid-template-columns: repeat(5, max-content);
+  gap: 7px 18px;
+  margin-top: 10px;
+}
+
+.brand p.keys span {
+  white-space: nowrap;
 }
 
 kbd {
@@ -576,7 +597,8 @@ body.landing .detail {
   .brand h1 {
     font-size: 18px;
   }
-  .brand p {
+  .brand p,
+  .brand p.keys {
     display: none;
   }
   .hud {

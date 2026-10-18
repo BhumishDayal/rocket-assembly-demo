@@ -73,6 +73,7 @@ Each step prints one line: `PASS` / `FAIL` / `SKIP`, then seconds, then detail.
 | Step | Does | Passes when (budget, s) |
 |---|---|---|
 | load | opens the URL | HUD shows the preset's name from `presets.json` (20) |
+| landing | only without `?build` / `?story` / `?skip` / `?demo` (else SKIP): presses Enter on the landing page | the landing page (`.landing .landing-go`) appears, and after Enter it is gone and the UI is back (8), then frames are smooth |
 | build | clicks **Build all** | HUD shows `GO` or `NO-GO` (90), then frames are smooth |
 | card | hovers over the stack until the canvas shows the pointer cursor, then clicks there | card opens and its title is a part name from the dataset or `layout.js` (10) |
 | options | if the card has **Options**: opens them and picks the 2nd entry (the next one if the 2nd is the current record) | verdict line changes (swap 5), the card shows the chosen record, frames are smooth |
@@ -80,8 +81,8 @@ Each step prints one line: `PASS` / `FAIL` / `SKIP`, then seconds, then detail.
 | explode | clicks **Explode** | button flips to **Assemble** and frames are smooth (6) |
 | card2 | hovers and clicks across the exploded pieces | card opens on a part (20) |
 | assemble | clicks **Assemble** | button is an enabled **Explode** again, which means the springs are done (6), then frames are smooth |
-| next | presses `]` | HUD shows the next preset's name, the URL has `?build=<id>`, frames are smooth (8) |
-| reset | presses `1` (builds part 1), then `R` | HUD is back to "pad ready" (15) |
+| next | presses `]` | the next preset appears built: HUD shows its name and a GO / NO-GO verdict, the URL has `?build=<id>`, frames are smooth (8) |
+| reset | presses `R`, then `1` | HUD reads "<name> · pad ready", then key 1 builds part 1 from the empty pad (15 each) |
 
 Other rules:
 - "Smooth" means 600 ms of frames with none slower than `--jank-ms`. It catches the class of bug where
@@ -120,6 +121,7 @@ It relies on:
 - `#btn-explode` (label Explode / Assemble; disabled while assembling);
 - `#detail.open`, `#detail h2`, `#detail .eyebrow`;
 - `#detail .opt-toggle`, `#detail .opt[data-id]` (with `aria-current` on the current record);
-- the keys `]`, `1`, `R` and Esc.
+- `.landing`, `.landing .landing-go` and `body.landing` (the landing page);
+- the keys `]`, `1`, `R`, Enter and Esc.
 
 If the UI changes, update them here and in the script.

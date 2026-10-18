@@ -542,3 +542,48 @@ UI4 (src/planet.js: Earth/Moon/Mars, surface patch, dust puff), UI 2 (port #23, 
 8. Ending: the rocket must land on a planet, not float: Earth missions end with the Falcon booster landing
    (drone ship / pad) and the payload deployed above a visible Earth; Moon missions with the lander touching
    down; staging/floating phases short. (Honesty rules of arrival.js stay.)
+
+### Round 14 — "ADD DETAILS, 100× more" for the landing swipe, the launch and the endings (user, ~23:15)
+Target: every phase shows the real physical events, as cheap sprites/shaders, directed like a webcast.
+A. Landing swipe (5.5 s): dive from orbit through the atmosphere glow and a cloud layer, the ground map
+   (coastline + grid) resolves, the pad with tower and masts rises into frame, settle at home.
+B. Pad (T−10→T+10): tower arms retract and the strongback leans back; vapour venting at the umbilicals; deluge
+   water sheets at T−3; ignition in pairs with the trench exhaust jetting out sideways and a billowing steam
+   cloud lit from below; hold-down clamps open; ignition shake; slow 1.4 g liftoff past the tower; pad cam low
+   angle, then tracking cam.
+C. Ascent: horizon haze band drops away, stars thicken, the ground map shrinks and the Earth's curvature
+   appears above ~60 km; Max-Q condensation halo + vibration; throttle-down dims the plume; plume grows.
+D. Staging: MECO flicker + sparks; pushers extend; stages drift apart at ~1 m/s; cold-gas puffs orient the
+   booster; TEA-TEB green flash at upper-stage ignition; fairing halves hinge open, tumble with puffs.
+E. Upper stage: huge faint vacuum plume, slow roll, Earth limb with terminator and night-side lights; SECO;
+   payload release springs; deploys; stage drifts.
+F. Booster: flip with puffs, boostback (3 engines), coast, re-entry plasma glow scaled by ρ·v³, grid fins
+   actuating, cloud layer passing, sea plane with wave lines and the drone ship bobbing, landing burn, legs,
+   touchdown, ship rocks, haze.
+G. Moon: Earth shrinks behind, Moon grows, orbit-insertion burn, lander separates, descent plume with dust
+   sheets growing near the surface, lander shadow, touchdown, dust settles, Earth in the sky.
+H. Direction: pad cam, tracking cam, onboard cam (looking back at the booster/Earth after sep), drone-ship
+   cam; 250 ms fades between cuts; shake at ignition and Max-Q; ascent ≈ 25 s, ending ≈ 15 s; double-click skips.
+Owners: UI4 src/fx/launchfx.js (all effects) + planet night lights + ground map; UI 2 ascent.js extras (q, heat
+proxy, condensation window, cold-gas/TEA-TEB events, downrange, lunar descent profile, sea/ship positions);
+UI 3 choreography/camera/pad sequence/landing swipe.
+
+### Round 15 — "realistic planet landing, proper atmosphere, scroll landing page, depth" (user, ~23:30)
+Decisions:
+1. Flight + endings switch to a PHOTOREAL style: NASA public-domain maps (Earth day/night/clouds/normal, Moon
+   colour+displacement, Mars colour+normal) in src/assets/planets with attribution; atmospheric scattering
+   shader (limb glow + sky dome by altitude); cloud decks; terrain patch (displacement with craters/dunes +
+   noise, regolith detail texture, instanced boulders, shadows); ocean with animated normals under the drone
+   ship. The rocket crossfades to its painted PBR finish at launch; x-ray stays for the builder (and on click).
+2. Default builder look = painted PBR (upgraded classic materials with clearcoat, micro-roughness, grime),
+   shadows + AO; clear/x-ray on click. Edge lines faint in opaque mode.
+3. Landing page: scroll-driven. Wheel/touch delta drives the descent 0→1 (spring-smoothed); past 0.98 the
+   builder activates; at 0 scrolling up stays on the landing page; scrolling up from the top of the builder
+   (when nothing is built) returns.
+4. Landing sequence: orbit → entry (plasma, sky colour rising) → cloud deck → approach over terrain with the
+   lander's shadow → touchdown with dust; Moon: powered descent profile (braking, pitch-over, vertical),
+   no atmosphere; Mars: thin entry glow then powered descent; Earth: booster to the drone ship on a real sea.
+5. Optional "hyperframes": pre-rendered cut-in clips (Grok Imagine, team key) played from src/assets/clips/
+   <ending>.mp4 in a video overlay when present; the real-time sequence is the fallback. Not generated here.
+Owners: UI4 (assets, planet shaders, terrain, ocean, PBR materials), UI 2 (powered-descent profiles, lighting
+geometry per body), UI 3 (scroll landing, look switch, DoF/sky, landing direction, clip hook).
