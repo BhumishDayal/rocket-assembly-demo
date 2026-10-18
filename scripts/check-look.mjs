@@ -16,7 +16,7 @@ registerHooks({
 const THREE = await import("three");
 const { catalog, presetToBuild } = await import("../src/data/catalog.js");
 const { buildManifest } = await import("../src/layout.js");
-const { createMaterials, createPart, setShellOpacity, shellPieces, LOOK } = await import("../src/parts.js");
+const { createMaterials, createPart, setShellOpacity, setBellGlow, shellPieces, LOOK } = await import("../src/parts.js");
 
 const failures = [];
 const expect = (ok, msg) => {
@@ -56,6 +56,34 @@ for (const preset of catalog.presets) {
         expect(!(s?.z > 0) || spec.kind === "engines" || (spec.kind === "tank" && spec.stageIndex === 0), `${id}: soot away from the base`);
       }
       if (looks.xray.vertexColors && m.vertexColors && m.metalness === 1) expect(m.anisotropy > 0 && m.roughnessMap, `${id}: bell should be brushed metal`);
+    }
+    // Bell glow: every bell piece of an engines part has one uniform shared by both looks, lip below throat;
+    // setBellGlow sets it (clamped), per engine or all.
+    const bells = part.pieces.filter((p) => p.mesh.userData.bellGlow);
+    if (spec.kind === "engines") {
+      expect(bells.length >= spec.count, `${id}: ${bells.length} bell pieces for ${spec.count} engines`);
+      for (const p of bells) {
+        const g = p.mesh.userData.bellGlow;
+        const { painted, xray } = p.mesh.userData.looks;
+        expect(painted.glow === g && xray.glow === g && g.value.x < g.value.y, `${id}: ${p.mesh.name} glow uniform`);
+      }
+      setBellGlow(part, 1.7);
+      expect(bells.every((p) => p.mesh.userData.bellGlow.value.z === 1), `${id}: setBellGlow(1.7) should clamp to 1`);
+      setBellGlow(part, 0.4, bells[0].engine);
+      expect(bells.every((p) => p.mesh.userData.bellGlow.value.z === (p.engine === bells[0].engine ? 0.4 : 1)), `${id}: setBellGlow per engine`);
+      setBellGlow(part, 0);
+    } else expect(bells.length === 0, `${id}: bell glow outside the engines`);
+    // Frost: painted tank skins only; kerolox above ~55 % of the tank, hydrolox all over; never in x-ray.
+    const prop = spec.kind === "tank" ? spec.record?.propellant : null;
+    for (const p of part.pieces) {
+      const f = p.mesh.userData.looks?.painted.frost?.value;
+      const want = (prop === "kerolox" || prop === "hydrolox") && p.kind === "shell" && p.mesh.userData.looks?.painted.userData.soot;
+      expect(!!(f && f.z > 0) === !!want, `${id}: ${p.mesh.name} frost ${f?.z} (${prop})`);
+      if (want && f) {
+        const edge = f.x + p.mesh.position.y;
+        expect(prop === "kerolox" ? Math.abs(edge - 0.55 * spec.height) < 1e-9 : edge < 0, `${id}: frost edge ${edge}`);
+        expect(!p.mesh.userData.looks.xray.frost, `${id}: frost in the x-ray look`);
+      }
     }
     // Clear: x-ray shells at the value, lines at base. Opaque: paint, lines at 0.15 / 0.55 of base.
     setShellOpacity(part, 0.18);

@@ -32,7 +32,7 @@
       import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
       import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
       import { buildManifest, sceneBounds } from "../src/layout.js";
-      import { createMaterials, createPart, createPad, createStars, deployables } from "../src/parts.js";
+      import { createMaterials, createPart, createPad, createStars, deployables, setBellGlow } from "../src/parts.js";
       import { attachPlumes, createPadLight, P0 } from "../src/plume.js";
       import { createSilhouette } from "../src/silhouette.js";
       import { createAnchors } from "../src/anchors.js";
@@ -74,6 +74,7 @@
       stack.position.y = alt;
       scene.add(stack);
       let plumes = [];
+      let firing = null; // the engines part that fires (bell glow follows the throttle)
       const hide = new Set((q.get("hide") ?? "").split(",").filter(Boolean));
       const k = num("deploy", 0);
       for (const spec of manifest) {
@@ -87,7 +88,7 @@
           piece.mesh.position.copy(piece.rest.position).sub(d.pivot).applyQuaternion(R).add(d.pivot);
           piece.mesh.quaternion.copy(R).multiply(piece.rest.quaternion);
         }
-        if (spec.kind === "engines" && spec.stageIndex === stage) plumes = attachPlumes(part);
+        if (spec.kind === "engines" && spec.stageIndex === stage) (plumes = attachPlumes(part)), (firing = part);
       }
       const padLight = createPadLight({ baseRadius_u: bounds.baseRadius_u, bellExitRadius_u: Math.max(0.01, ...plumes.map((p) => p.exitRadius_u)) });
       scene.add(padLight.object3d);
@@ -119,6 +120,7 @@
         const dt = Math.min(clock.getDelta(), 0.05);
         const camDist = camera.position.length();
         for (const p of plumes) p.update(dt, { throttle, ambientPressure_Pa: pressure, cameraDistance: camDist });
+        if (firing) setBellGlow(firing, throttle);
         padLight.update(dt, stage === 0 ? throttle : 0, alt / 0.25); // altitude in metres
         twin?.update(camera);
         anchors?.update(clock.elapsedTime);

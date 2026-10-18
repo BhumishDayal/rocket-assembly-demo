@@ -321,7 +321,11 @@ export function createMaterials() {
   classic.leg = classic.composite;
   classic.copv = classic.composite;
   classic.steelDark = classic.darkMetal;
-  if (!XRAY) return classic;
+  // Role names travel with the materials into piece() (mesh.userData.role): the bells are found by role.
+  const tag = (set) => {
+    for (const k of Object.keys(set)) if (!Object.hasOwn(set[k], "role")) Object.defineProperty(set[k], "role", { value: k });
+  };
+  if (!XRAY) return tag(classic), classic;
   const x = xrayMaterials(t, classic);
   const paint = paintedMaterials(t, classic);
   // Each role gets its own x-ray object (the x-ray set shares a few) carrying its painted twin; piece() reads
@@ -337,6 +341,7 @@ export function createMaterials() {
     seen.add(m);
     if (paint[k]) Object.defineProperty(m, "painted", { value: paint[k], configurable: true });
   }
+  tag(x);
   return x;
 }
 
@@ -344,31 +349,101 @@ export function createMaterials() {
 // coat. Per material: material.soot = { value: Vector4(y0, height, strength, 0) } in mesh-local units: full
 // strength at y0, gone by y0 + height
 // (set by createPart; strength 0 = clean). The streak pattern runs on the mesh-local azimuth.
+//
+// Frost (same hook): a matte blue-white layer over cryogenic tank skin above an edge at mesh-local y, the edge
+// wavering with 3D noise and drifting slowly in time; patchy inside. material.frost = { value: Vector4(edgeY,
+// waver, amount, softness) } (amount 0 = none). The time uniform is shared and set before each frosted draw.
+const frostTime = { value: 0 };
+const tickFrost = () => (frostTime.value = (typeof performance !== "undefined" ? performance.now() : Date.now()) / 1000);
 function sootHook(shader) {
   shader.uniforms.uSoot = this.soot ?? (this.soot = { value: new THREE.Vector4(0, 1, 0, 0) });
+  shader.uniforms.uFrost = this.frost ?? (this.frost = { value: new THREE.Vector4(0, 0, 0, 1) });
+  shader.uniforms.uFrostT = frostTime;
   shader.vertexShader = shader.vertexShader
-    .replace("#include <common>", "#include <common>\nvarying vec2 vSoot;")
-    .replace("#include <begin_vertex>", "#include <begin_vertex>\nvSoot = vec2(position.y, atan(position.x, position.z));");
+    .replace("#include <common>", "#include <common>\nvarying vec2 vSoot;\nvarying vec3 vSootP;")
+    .replace("#include <begin_vertex>", "#include <begin_vertex>\nvSoot = vec2(position.y, atan(position.x, position.z));\nvSootP = position;");
   shader.fragmentShader = shader.fragmentShader
-    .replace("#include <common>", "#include <common>\nvarying vec2 vSoot;\nuniform vec4 uSoot;")
+    .replace(
+      "#include <common>",
+      `#include <common>
+      varying vec2 vSoot;
+      varying vec3 vSootP;
+      uniform vec4 uSoot, uFrost;
+      uniform float uFrostT;
+      float frostH(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+      float frostN(vec3 p) {
+        vec3 i = floor(p); vec3 f = fract(p); f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(mix(frostH(i), frostH(i + vec3(1, 0, 0)), f.x), mix(frostH(i + vec3(0, 1, 0)), frostH(i + vec3(1, 1, 0)), f.x), f.y),
+                   mix(mix(frostH(i + vec3(0, 0, 1)), frostH(i + vec3(1, 0, 1)), f.x), mix(frostH(i + vec3(0, 1, 1)), frostH(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+      }`,
+    )
     .replace(
       "#include <map_fragment>",
       `#include <map_fragment>
       float sootStreak = 0.5 + 0.25 * sin(vSoot.y * 23.0 + 1.7 * sin(vSoot.y * 7.0)) + 0.25 * sin(vSoot.y * 61.0 + 0.4);
       float sootG = 1.0 - smoothstep(uSoot.x, uSoot.x + uSoot.y * (0.55 + 0.9 * sootStreak), vSoot.x);
       float soot = uSoot.z * sootG * (2.0 - sootG);
-      diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.035, 0.032, 0.03), soot);`,
+      diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.035, 0.032, 0.03), soot);
+      float frost = 0.0;
+      if (uFrost.z > 0.0) {
+        vec3 fp = vSootP * 4.0 + vec3(0.0, 0.0, uFrostT * 0.02);
+        float edge = uFrost.x + uFrost.y * (frostN(fp) + 0.5 * frostN(fp * 2.7) - 0.75);
+        float fine = 0.6 * frostN(vSootP * 9.0) + 0.4 * frostN(vSootP * 25.0);
+        frost = uFrost.z * smoothstep(edge - uFrost.w, edge + uFrost.w, vSoot.x) * (0.65 + 0.35 * frostN(vSootP * 5.0 + 3.1)) * (1.0 - soot);
+        float wet = uFrost.z * exp(-pow((vSoot.x - edge + 2.5 * uFrost.w) / uFrost.w, 2.0)); // condensation under the line
+        diffuseColor.rgb *= 1.0 - 0.14 * wet;
+        diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.74, 0.81, 0.9) * (0.74 + 0.3 * fine), frost);
+      }`,
     )
-    .replace("#include <roughnessmap_fragment>", "#include <roughnessmap_fragment>\nroughnessFactor = mix(roughnessFactor, 0.85, soot);")
+    .replace("#include <roughnessmap_fragment>", "#include <roughnessmap_fragment>\nroughnessFactor = mix(mix(roughnessFactor, 0.85, soot), 0.92, frost);")
     .replace(
       "#include <lights_physical_fragment>",
       `#include <lights_physical_fragment>
       #ifdef USE_CLEARCOAT
-        material.clearcoat *= 1.0 - 0.8 * soot;
+        material.clearcoat *= (1.0 - 0.8 * soot) * (1.0 - frost);
       #endif`,
     );
 }
-const sootKey = () => "paint-soot-v1";
+const sootKey = () => "paint-soot-frost-v3";
+
+// Bell glow: an emissive ramp on the nozzle while it fires, orange at the lip to dull red at the throat, the
+// inside (back faces) brightest. Chained after any hook the material already has (the x-ray shell's rim).
+// material.glow = { value: Vector4(lipY, throatY, intensity, 0) } in mesh-local units, shared by both looks.
+const GLOW_LIP = new THREE.Color(1.0, 0.42, 0.1);
+const GLOW_THROAT = new THREE.Color(0.6, 0.07, 0.02);
+function addBellGlow(m, glow) {
+  const prev = m.onBeforeCompile;
+  const prevKey = prev === THREE.Material.prototype.onBeforeCompile ? "" : m.customProgramCacheKey();
+  m.glow = glow;
+  m.onBeforeCompile = function (shader, renderer) {
+    prev.call(this, shader, renderer);
+    shader.uniforms.uGlow = this.glow;
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying float vGlowY;")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvGlowY = position.y;");
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", "#include <common>\nvarying float vGlowY;\nuniform vec4 uGlow;")
+      .replace(
+        "#include <emissivemap_fragment>",
+        `#include <emissivemap_fragment>
+        if (uGlow.z > 0.0) {
+          float glowT = clamp((vGlowY - uGlow.x) / max(uGlow.y - uGlow.x, 1e-5), 0.0, 1.0);
+          vec3 glowC = mix(vec3(${GLOW_LIP.toArray().map((v) => v.toFixed(3))}), vec3(${GLOW_THROAT.toArray().map((v) => v.toFixed(3))}), glowT);
+          totalEmissiveRadiance += glowC * uGlow.z * (gl_FrontFacing ? 0.35 : 1.0) * 1.6;
+        }`,
+      );
+  };
+  m.customProgramCacheKey = () => `${prevKey}|bell-glow-v1`;
+}
+// Bell glow for a part's engines: throttle 0..1 (clamped), every engine or only engine index `engine`
+// (piece.engine, e.g. plume.engine from attachPlumes). Drive it with the plume updates; 0 = cold metal.
+export function setBellGlow(part, throttle = 0, engine = null) {
+  const v = Math.min(1, Math.max(0, Number(throttle) || 0));
+  for (const p of part.pieces) {
+    const g = p.mesh.userData.bellGlow;
+    if (g && (engine === null || p.engine === engine)) g.value.z = v;
+  }
+}
 
 // Painted PBR twins of every role (round 15). Paint: MeshPhysicalMaterial, clear coat 0.4, roughness 0.35-0.5
 // broken up by the paint map's micro-roughness, soot near the base (sootHook). Bells: brushed bare metal with an
@@ -740,6 +815,7 @@ function piece(geo, material, { x = 0, y = 0, z = 0, ry = 0, order = 0, dir = UP
   const painted = XRAY && material.painted ? cloneMat(material.painted) : null;
   if (painted && side !== undefined) painted.side = side;
   const mesh = new THREE.Mesh(g, painted ?? mat);
+  mesh.userData.role = material.role ?? null;
   if (painted) {
     mesh.userData.looks = { xray: mat, painted };
     for (const m of [mat, painted]) if (m.emissive) m.userData.emissive0 = [m.emissive.getHex(), m.emissiveIntensity];
@@ -1676,6 +1752,34 @@ export function createPart(spec, mats) {
     if (!m?.userData.soot) continue;
     const bb = p.mesh.geometry.boundingBox;
     m.soot = { value: new THREE.Vector4(bb.min.y, soot ? (soot[1] ?? bb.max.y - bb.min.y) : 1, soot ? soot[0] : 0, 0) };
+  }
+  // Bell glow: each engine's bell pieces share a lip-to-throat range (part-local y), one uniform per piece
+  // shared by both looks (setBellGlow).
+  const bellY = new Map();
+  for (const p of pieces) {
+    if (p.mesh.userData.role !== "engine") continue;
+    const r = bellY.get(p.engine) ?? [Infinity, -Infinity];
+    bellY.set(p.engine, [Math.min(r[0], p.bottomY), Math.max(r[1], p.topY)]);
+  }
+  for (const p of pieces) {
+    const r = p.mesh.userData.role === "engine" && bellY.get(p.engine);
+    if (!r) continue;
+    const glow = { value: new THREE.Vector4(r[0] - p.mesh.position.y, r[1] - p.mesh.position.y, 0, 0) };
+    p.mesh.userData.bellGlow = glow;
+    for (const m of new Set([p.mesh.material, ...Object.values(p.mesh.userData.looks ?? {})])) addBellGlow(m, glow);
+  }
+  // Cryogenic frost (painted look): kerolox tanks over the LOX section (the upper ~45 %), hydrolox tanks over
+  // the whole skin; lighter on foam, which insulates. Visual amounts.
+  const prop = spec.kind === "tank" ? spec.record?.propellant : null;
+  if (prop === "kerolox" || prop === "hydrolox") {
+    for (const p of pieces) {
+      const m = p.mesh.userData.looks?.painted;
+      if (!m?.userData.soot || p.kind !== "shell") continue;
+      const edge = prop === "kerolox" ? 0.55 * spec.height : -spec.height; // hydrolox: below the bottom = all
+      const amount = m.roughness >= 0.8 ? 0.4 : 0.85; // matte sprayed foam vs paint
+      m.frost = { value: new THREE.Vector4(edge - p.mesh.position.y, 0.06 * spec.height, amount, 0.012 * spec.height + 0.02) };
+      p.mesh.onBeforeRender = tickFrost;
+    }
   }
   axisOffsets(pieces, clamp(0.035 * spec.height, 0.04, 0.3));
   pieces.sort((a, b) => a.order - b.order || a.bottomY - b.bottomY);
