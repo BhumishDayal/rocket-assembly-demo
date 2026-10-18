@@ -17,13 +17,14 @@
 // Ghost    = the next buildable part shows as a faint hologram at its slot (idle 0.12, hover 0.35); hidden
 //            while busy, exploded or auto-building. part.ghostActive marks the clickable one.
 // Highlight = soft emissive pulse in COLORS.select on a selected part's (per-mesh cloned) materials.
-// X-ray    = shell opacity states via parts.setShellOpacity (design round 10): built 0.55, exploded 0.30,
-//            selected part 0.15 while the others keep theirs, 0.55 from the first frame of a fly-in.
+// Look     = per part, per instance: opaque (shells 0.92) or clear (0.18, interiors visible), toggled by a click
+//            on the part or by X for all; exploded parts keep theirs; R / preset / swap-in / rebuild → opaque.
+//            Edge lines stay at their base in both looks (the silhouette survives the clear look).
 import * as THREE from "three";
 import { animate, spring } from "animejs";
 import { createHologramMaterial } from "./fx/hologram.js";
 import { createBoltFlash } from "./fx/flash.js";
-import { COLORS, LOOK, setShellOpacity as setShell } from "./parts.js";
+import { COLORS, LOOK, deployables, setShellOpacity as setShell } from "./parts.js";
 import { attachPlumes, createPadLight, P0 } from "./plume.js";
 
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -37,7 +38,9 @@ const tmpQ = new THREE.Quaternion();
 const tmpQ2 = new THREE.Quaternion();
 const tmpC = new THREE.Color();
 
-const SHELL = { built: 0.55, exploded: 0.3, focus: 0.15 };
+// Shell opacity per part look: opaque by default, clear (interiors visible) after a click or X.
+const SHELL = { opaque: 0.92, clear: 0.18 };
+const LINE_BASE = 0.55; // UI4's built edge-line opacity
 // Opacity states belong to the x-ray look only; the classic look keeps opaque shells.
 const setShellOpacity = LOOK === "xray" ? setShell : () => {};
 const GHOST_IDLE = 0.12;
@@ -64,7 +67,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   const flash = createBoltFlash();
   scene.add(flash.object3d);
 
-  const state = { busy: 0, exploded: false, scrubbing: false, auto: false, launch: null, gen: 0, shake: 0 };
+  const state = { busy: 0, exploded: false, scrubbing: false, auto: false, launch: null, deploying: false, gen: 0, shake: 0 };
   const live = new Set();
   const selectColor = new THREE.Color(COLORS.select ?? 0xffb020);
   const highlighted = new Set();
@@ -117,8 +120,10 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     part.ghostFade = { v: 0 };
     part.ghostActive = false;
     part.hl = { v: 0 };
-    part.shell = { v: SHELL.built };
-    setShellOpacity(part, SHELL.built);
+    part.look = "opaque";
+    part.shell = { v: SHELL.opaque };
+    setShellOpacity(part, SHELL.opaque);
+    applyLines(part);
     part.group.position.y = part.slotY;
     const n = part.pieces.length;
     part.arrival = [...part.pieces].sort((a, b) => (a.order ?? a.index) - (b.order ?? b.index) || a.bottomY - b.bottomY);
@@ -341,13 +346,14 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     fadeGhost(part, on ? GHOST_HOVER : GHOST_IDLE);
   }
 
-  // ---------- x-ray: shell opacity states ----------
-  const shellTarget = (part) => (highlighted.has(part) ? SHELL.focus : state.exploded ? SHELL.exploded : SHELL.built);
+  // ---------- look: opaque / clear shells per part ----------
+  const shellTarget = (part) => (part.look === "clear" ? SHELL.clear : SHELL.opaque);
   function fadeShell(part, v = shellTarget(part), duration = D(420)) {
     part.shellAnim?.cancel();
     if (duration <= 0) {
       part.shell.v = v;
       setShellOpacity(part, v);
+      applyLines(part);
       return;
     }
     part.shellAnim = animate(part.shell, {
@@ -356,23 +362,34 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       ease: "outQuad",
       onUpdate: () => {
         setShellOpacity(part, part.shell.v);
-        if (part.dim && part.dim.v !== 1) applyLines(part);
+        applyLines(part); // setShellOpacity scales shell lines with the shell; keep them at their base
       },
     });
   }
+  function setLook(part, look) {
+    if (!part?.pieces || part.look === look) return;
+    part.look = look;
+    fadeShell(part);
+  }
+  const toggleLook = (part) => setLook(part, part?.look === "clear" ? "opaque" : "clear");
+  // X: every built part at once; any opaque one makes them all clear, else all go back to opaque.
+  function toggleLookAll() {
+    const built = parts.filter((p) => p.built);
+    const look = built.some((p) => p.look !== "clear") ? "clear" : "opaque";
+    for (const p of built) setLook(p, look);
+    return look;
+  }
 
   // Edge lines: while a part is selected, the OTHER parts' lines dim to 0.3 (from 0.55) so the focused part
-  // pops. A line's opacity = its built base (UI4: line.userData.base) × dim × (shell lines follow the shell).
-  const LINE_DIM = 0.3 / SHELL.built;
+  // pops. A line's opacity = its built base (UI4: line.userData.base) × dim, in either look.
+  const LINE_DIM = 0.3 / LINE_BASE;
   function applyLines(part) {
     if (LOOK !== "xray") return;
     const dim = part.dim?.v ?? 1;
-    const shellK = (part.shell?.v ?? SHELL.built) / SHELL.built;
     part.group.traverse((o) => {
       if (!o.isLine || !o.material) return;
       o.userData.base ??= o.material.opacity;
-      const k = o.parent?.userData?.kind === "shell" ? shellK : 1;
-      o.material.opacity = Math.min(1, o.userData.base * dim * k);
+      o.material.opacity = Math.min(1, o.userData.base * dim);
     });
   }
   function fadeDim(part, v) {
@@ -391,12 +408,10 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         if (m.emissive && !emissive0.has(m)) emissive0.set(m, { color: m.emissive.clone(), intensity: m.emissiveIntensity });
       }
       highlighted.add(part);
-      fadeShell(part, SHELL.focus);
       fadeDim(part, 1);
       for (const p of parts) if (p !== part) fadeDim(p, LINE_DIM);
     } else if (!highlighted.has(part)) return;
     else {
-      fadeShell(part, state.exploded ? SHELL.exploded : SHELL.built);
       for (const p of parts) if (p !== part) fadeDim(p, 1);
     }
     part.hlAnim = animate(part.hl, {
@@ -461,7 +476,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
 
   // onSeated fires once the part's body is in place (see header); the promise resolves when every piece is.
   function flyIn(part, sourceWorld, { cap = Infinity, onSeated } = {}) {
-    fadeShell(part, SHELL.built, 0);
+    fadeShell(part, shellTarget(part), 0);
     const source = part.group.worldToLocal(sourceWorld.clone());
     const k = THREE.MathUtils.clamp(camera.position.distanceTo(controls.target) / 18, 0.6, 2.2);
     const delays = arrivalDelays(part, cap);
@@ -679,12 +694,6 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         const t = Math.min(1, Math.max(0, (vc - piece.xOff) / X_WINDOW)) + over;
         piece.mesh.position.lerpVectors(piece.rest.position, piece.xTo, t);
         piece.mesh.quaternion.slerpQuaternions(piece.rest.quaternion, piece.xQ, Math.min(1, t));
-      }
-      if (!highlighted.has(part)) {
-        part.shellAnim?.cancel();
-        part.shell.v = SHELL.built + (SHELL.exploded - SHELL.built) * vc;
-        setShellOpacity(part, part.shell.v);
-        if (part.dim && part.dim.v !== 1) applyLines(part);
       }
     }
   }
@@ -928,16 +937,37 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   const SCALE_HEIGHT_M = 8434; // isothermal atmosphere, for the plume's ambient pressure only (visual)
   let L = null;
 
-  // [sim t, real t] keyframes at every event: real time up to 6 s after liftoff, log-compressed gaps after.
+  // [sim t, real t] keyframes. Real time until 2.5 s after liftoff, then a fixed on-screen budget per phase so
+  // the whole ascent fits ~16 s whatever the vehicle (telemetry still shows the true T+): liftoff → Max-Q 3 s,
+  // → first MECO 3 s, each MECO → SEP → ignition 1.5 s, intermediate burns 2.5 s, the last burn to SECO 4 s,
+  // SECO → outcome 1.5 s. Phases a flight does not have are skipped.
+  const PHASE_S = { toMaxQ: 3, toMeco: 3, sep: 1.5, midBurn: 2.5, lastBurn: 4, coast: 1.5 };
+  const PHASE_TOTAL_S = 13; // after the real-time opening; more stages share it (Saturn V scales down)
   function playbackKeys(events, tEnd) {
     const lift = events.find((e) => e.type === "liftoff")?.t ?? 0;
-    const ts = [...new Set([0, lift + 6, ...events.map((e) => e.t), tEnd])].filter((t) => t >= 0 && t <= tEnd).sort((a, b) => a - b);
+    const plan = []; // [sim t, planned seconds]
+    const maxq = events.find((e) => e.type === "maxq");
+    if (maxq) plan.push([maxq.t, PHASE_S.toMaxQ]);
+    events
+      .filter((e) => e.type === "meco")
+      .forEach((m, i) => {
+        plan.push([m.t, i === 0 ? PHASE_S.toMeco : PHASE_S.midBurn]);
+        const ign = events.find((e) => e.type === "ignition2" && e.t >= m.t);
+        if (ign) plan.push([ign.t, PHASE_S.sep]);
+      });
+    const seco = events.find((e) => e.type === "seco");
+    if (seco) plan.push([seco.t, PHASE_S.lastBurn]);
+    plan.push([tEnd, PHASE_S.coast]);
+    const total = plan.reduce((n, [, d]) => n + d, 0);
+    const k = total > PHASE_TOTAL_S ? PHASE_TOTAL_S / total : 1;
     const keys = [[0, 0]];
-    for (let i = 1; i < ts.length; i++) {
-      const gap = ts[i] - ts[i - 1];
-      const real = ts[i] <= lift + 6 ? gap : Math.min(gap, 1 + 1.3 * Math.log2(1 + gap / 6));
-      keys.push([ts[i], keys[keys.length - 1][1] + real]);
-    }
+    const add = (simT, realDur) => {
+      const [s0, r0] = keys[keys.length - 1];
+      const t = Math.min(simT, tEnd);
+      if (t > s0 + 1e-6) keys.push([t, r0 + realDur]);
+    };
+    add(lift + 2.5, lift + 2.5);
+    for (const [t, d] of plan) add(t, Math.max(1, d * k));
     return keys;
   }
   function simTime(keys, real) {
@@ -1024,7 +1054,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
 
   function onEvent(e) {
     L.label = EVENT_LABEL[e.type] ?? e.type.toUpperCase();
-    L.labelUntil = L.real + 2.5;
+    L.labelUntil = L.real + 1.5;
     switch (e.type) {
       case "ignition":
         ignite(0, e.t);
@@ -1140,8 +1170,21 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     L.drifting = inOrbit;
     const maxAlt = Math.max(...L.samples.map((x) => x.alt_m));
     if (inOrbit) {
+      // In orbit: frame the payload, orbit it slowly, unfold its hinges (fairing is long gone).
+      const payload = parts.find((p) => p.kind === "payload" && !L.gone.has(p));
       controls.autoRotate = true;
-      controls.autoRotateSpeed = 0.35;
+      controls.autoRotateSpeed = payload ? 0.6 : 0.35;
+      if (payload && deployables(payload).length) {
+        const gen = state.gen;
+        state.deploying = true;
+        L.drifting = false; // hold the roll while the camera orbits the payload
+        frameWorldPart(payload);
+        wait(D(900))
+          .then(() => (gen === state.gen ? deploy(payload) : false))
+          .finally(() => {
+            if (gen === state.gen) state.deploying = false;
+          });
+      }
     } else if (maxAlt < 50) {
       // Pad abort: thrust below weight, the engines shut down and it stays on the pad.
       state.shake = 0.3;
@@ -1153,7 +1196,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         duration: D(1200),
         ease: "inQuad",
         onUpdate: () => {
-          for (const part of parts) if (!L?.gone.has(part)) setShellOpacity(part, SHELL.built * fade.v);
+          for (const part of parts) if (!L?.gone.has(part)) setShellOpacity(part, shellTarget(part) * fade.v);
         },
         onComplete: () => {
           if (L) L.flight.visible = false;
@@ -1219,6 +1262,47 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     return new Promise((resolve) => (L.resolve = resolve));
   }
 
+  // ---------- deployables (design A4/A5) ----------
+  // UI4's hinges: piece.deploy = { axis, pivot, angle, order } in part-local units; at fraction k the piece
+  // turns k·angle about the axis through the pivot (k = 0 is exactly rest). Orders go one after another, each
+  // hinge on a soft spring (a little overshoot past the open angle, then it settles).
+  const hingeQ = new THREE.Quaternion();
+  function applyDeploy(piece, k) {
+    const d = piece.deploy;
+    hingeQ.setFromAxisAngle(d.axis, k * d.angle);
+    piece.mesh.position.copy(piece.rest.position).sub(d.pivot).applyQuaternion(hingeQ).add(d.pivot);
+    piece.mesh.quaternion.copy(hingeQ).multiply(piece.rest.quaternion);
+  }
+  function deploy(part, { gap = 1300 } = {}) {
+    const list = deployables(part);
+    if (!list.length) return Promise.resolve(false);
+    const orders = [...new Set(list.map((p) => p.deploy.order))].sort((a, b) => a - b);
+    return Promise.all(
+      list.map((piece, i) => {
+        const k = { v: 0 };
+        return run(k, {
+          v: 1,
+          delay: D(orders.indexOf(piece.deploy.order) * gap + (i % 4) * 60),
+          ease: spring({ stiffness: 55, damping: 9 }),
+          onBegin: () => sfx.play("tick", { rate: rnd(0.8, 0.95) }),
+          onUpdate: () => applyDeploy(piece, k.v),
+        });
+      }),
+    ).then(() => true);
+  }
+  // Frame a part where it is in the world (in flight it is off the pad axis), close, for the deploy.
+  function frameWorldPart(part) {
+    focusBox.makeEmpty();
+    for (const piece of part.pieces) if (piece.mesh.visible) focusBox.expandByObject(piece.mesh);
+    if (focusBox.isEmpty()) return;
+    const c = focusBox.getCenter(new THREE.Vector3());
+    const r = Math.max(0.3, focusBox.getSize(new THREE.Vector3()).length() / 2);
+    const dist = (r / Math.sin(THREE.MathUtils.degToRad(camera.fov / 2))) * 1.25;
+    framedR = r;
+    framedMode = "focus";
+    return frameTo({ tx: c.x, ty: c.y, tz: c.z, dist: Math.max(controls.minDistance, dist), duration: D(1400) });
+  }
+
   // After a launch: the assembled rocket back on the pad, still built (story mode's twin compare).
   function returnToPad() {
     if (!L || !L.done) return false;
@@ -1228,7 +1312,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         piece.mesh.position.copy(piece.rest.position);
         piece.mesh.quaternion.copy(piece.rest.quaternion);
       }
-      fadeShell(part, SHELL.built, 0);
+      fadeShell(part, shellTarget(part), 0);
     }
     controls.autoRotate = false;
     frameStack();
@@ -1309,6 +1393,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     state.exploded = false;
     state.scrubbing = false;
     state.auto = false;
+    state.deploying = false;
     xs.v = 0;
     xAnim = null;
     xParts = [];
@@ -1326,7 +1411,8 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       part.built = false;
       part.busy = false;
       hideGhostNow(part);
-      fadeShell(part, SHELL.built, 0);
+      part.look = "opaque";
+      fadeShell(part, SHELL.opaque, 0);
       part.group.position.y = part.slotY;
       for (const piece of part.pieces) {
         piece.mesh.visible = false;
@@ -1420,6 +1506,9 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     scrubStart,
     scrubBy,
     scrubEnd,
+    toggleLook,
+    toggleLookAll,
+    setLook,
     launch,
     returnToPad,
     frameCompare,

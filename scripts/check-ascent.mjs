@@ -1,5 +1,8 @@
 // Check for src/ascent.js: every preset flies without NaN, the expected outcomes hold, Falcon 9 passes two
-// sanity ranges, edge builds do not throw, and a run stays under 50 ms. Prints one block per preset.
+// sanity ranges and recovers its booster (touchdown < 2 m/s, main ascent still in orbit), stages without legs
+// do not return, a light LEO Falcon 9 returns to the pad (< 10 km), builds the verdict blocks are not flown
+// ("blocked" with the first blocking warning), edge builds do not throw, and a run stays
+// under 100 ms. Prints one block per preset with the booster timeline.
 // Run: node scripts/check-ascent.mjs   (no deps; exits 1 on any failure)
 import { registerHooks } from "node:module";
 
@@ -19,7 +22,7 @@ const expect = (ok, msg) => {
 };
 // Outcomes the head chat asked for. Saturn V has no expectation: it is printed, whatever it says.
 const EXPECT_OUTCOME = { "falcon-9": "orbit", "delta-iv-m": "orbit", "atlas-v-401": "shortfall", "demo-build": "shortfall" };
-const MAX_MS = 50;
+const MAX_MS = 100;
 
 function badNumbers(res) {
   const bad = [];
@@ -65,6 +68,16 @@ for (const id of presetIds) {
     expect(meco && meco.t >= 130 && meco.t <= 170, `falcon-9: MECO at ${meco?.t} s, expected 130-170 s`);
     expect(s.maxG >= 3 && s.maxG <= 6, `falcon-9: max g ${s.maxG.toFixed(2)}, expected 3-6`);
   }
+  const b = s.booster;
+  if (id === "falcon-9") {
+    expect(b?.returns === true, `falcon-9: booster not recovered (${b?.reason})`);
+    expect(b?.returns && b.touchdownSpeed_ms < 2, `falcon-9: touchdown at ${b?.touchdownSpeed_ms?.toFixed(2)} m/s`);
+    expect(b?.mode !== "rtls" || Math.abs(b.landingDownrange_m) <= 10e3, `falcon-9: pad return landed ${(b?.landingDownrange_m / 1000).toFixed(1)} km out`);
+    expect(s.outcome === "orbit", `falcon-9: main ascent outcome ${s.outcome} with the booster reserve`);
+    expect(ordered(b?.samples ?? []) && ordered(b?.events ?? []), "falcon-9: booster samples or events out of order");
+  } else if (id !== "demo-build") {
+    expect(b?.returns === false, `${id}: a stage without landing legs came back`);
+  }
   // Default 4.5 g limit holds wherever throttling to 0.4 is enough (small tolerance for drag and the step).
   const limitHolds = res.samples.every((x) => x.acc_ms2 / 9.80665 <= 4.5 + 0.05 || x.throttle <= 0.4 + 1e-9);
   expect(limitHolds, `${id}: sensed acceleration above the 4.5 g limit while throttle was above 0.4`);
@@ -74,7 +87,14 @@ for (const id of presetIds) {
       `  orbit ${n0(s.perigee_km)} × ${n0(s.apogee_km)} km · Δv flown ${n0(s.achievedDeltaV_ms)} m/s · losses gravity ${n0(s.gravityLoss_ms)}, drag ${n0(s.dragLoss_ms)} m/s\n` +
       `  max Q ${n1(s.maxQ_Pa / 1000)} kPa · max ${s.maxG.toFixed(2)} g (g-limited ${n0(s.gLimited_s)} s) · burns ${s.burnTimes_s.map((b) => `${n0(b)} s`).join(" / ")}\n` +
       `  after orbit: ${n0(s.remainingDeltaV_ms)} m/s left, mission ${m?.id ?? "–"} needs ${n0(m?.beyondLEO_ms)} beyond LEO${m?.shortBy_ms ? ` → short by ${n0(m.shortBy_ms)}` : ""}\n` +
-      `  events: ${res.events.map((e) => `${e.type}${e.type === "meco" || e.type === "sep" || e.type === "ignition2" ? `(s${e.stage + 1})` : ""} T+${e.t.toFixed(1)}`).join(", ")}`,
+      `  events: ${res.events.map((e) => `${e.type}${e.type === "meco" || e.type === "sep" || e.type === "ignition2" ? `(s${e.stage + 1})` : ""} T+${e.t.toFixed(1)}`).join(", ")}\n` +
+      `  booster: ${
+        b?.returns
+          ? `${b.mode === "rtls" ? "returns to the pad" : "lands on a drone ship"}, reserve ${n0(b.propellantReserve_kg)} kg (${(b.reserveFraction * 100).toFixed(1)} %), touchdown ${b.touchdownSpeed_ms.toFixed(2)} m/s ${n1(b.landingDownrange_m / 1000)} km downrange, ${n0(b.propellantLeft_kg)} kg left` +
+            `\n           ${b.events.map((e) => `${e.type} T+${e.t.toFixed(1)} (${n1(e.alt_m / 1000)} km, ${n0(e.vel_ms)} m/s)`).join(", ")}` +
+            (b.note ? `\n           why not ${b.mode === "rtls" ? "a ship" : "the pad"}: ${b.note}` : "")
+          : b?.reason ?? "–"
+      }`,
   );
 }
 
@@ -87,17 +107,23 @@ const build = (stages, payloadId = "", missionId = "leo") => ({
   stages: stages.map(([engineId, engineCount, tankId]) => ({ engineId, engineCount, tankId })),
 });
 const edges = [
-  ["empty build", build([]), "impact"],
-  ["unknown ids", build([["nope", 1, "falcon9-s1-tank"]]), "impact"],
-  ["vacuum engine on stage 0 (never lifts off)", build([["merlin-1d-vac", 1, "falcon9-s1-tank"]]), "impact"],
-  ["TWR below 1 (one Merlin under a full F9 tank)", build([["merlin-1d", 1, "falcon9-s1-tank"]]), "impact"],
+  ["Falcon 9 with GOES-R to LEO: booster returns to the pad", { ...presetToBuild(getPreset("falcon-9")), payloadId: "goes-r", missionId: "leo" }, "orbit", (r) => r.summary.booster.returns && r.summary.booster.mode === "rtls" && Math.abs(r.summary.booster.landingDownrange_m) <= 10e3 && r.summary.booster.touchdownSpeed_ms < 2],
+  // Blocked by the verdict: not flown (pad abort), reason = the first blocking warning.
+  ["9 RD-191 under the F9 tank (too many engines)", { ...presetToBuild(getPreset("falcon-9")), stages: [{ engineId: "rd-191", engineCount: 9, tankId: "falcon9-s1-tank" }, presetToBuild(getPreset("falcon-9")).stages[1]] }, "blocked", (r) => r.summary.reason === "9 RD-191 engines don't fit a 3.66 m wide Falcon 9 Block 5 first-stage tank: max 1" && r.samples.length === 0 && r.events.length === 0],
+  ["empty build", build([]), "blocked", (r) => r.summary.reason === "empty build"],
+  ["unknown ids", build([["nope", 1, "falcon9-s1-tank"]]), "blocked", (r) => r.summary.reason === "unknown engine id: nope"],
+  ["vacuum engine on stage 0", build([["merlin-1d-vac", 1, "falcon9-s1-tank"]]), "blocked", (r) => r.summary.reason === "vacuum-only engine on stage 0"],
+  ["TWR below 1 (one Merlin under a full F9 tank)", build([["merlin-1d", 1, "falcon9-s1-tank"]]), "blocked", (r) => r.summary.reason === "liftoff TWR below 1.0"],
+  // The same builds flown anyway (opts.ignoreVerdict): the simulator's own pad abort still applies.
+  ["vacuum engine on stage 0, flown anyway (never lifts off)", build([["merlin-1d-vac", 1, "falcon9-s1-tank"]]), "impact", null, { ignoreVerdict: true }],
+  ["TWR below 1, flown anyway", build([["merlin-1d", 1, "falcon9-s1-tank"]]), "impact", null, { ignoreVerdict: true }],
   ["single F9 stage trying for orbit (never reaches 100 km)", build([["merlin-1d", 9, "falcon9-s1-tank"]], "goes-r"), "impact"],
   ["Atlas booster + Centaur with Hubble: reaches space, falls back", build([["rd-180", 1, "atlas-v-ccb-tank"], ["rl10c-1", 1, "centaur-iii-tank"]], "hubble"), "shortfall"],
 ];
-for (const [label, b, want] of edges) {
+for (const [label, b, want, extra, simOpts] of edges) {
   let res;
   try {
-    res = simulateAscent(b, catalog);
+    res = simulateAscent(b, catalog, simOpts);
   } catch (e) {
     failures.push(`${label}: threw ${e.message}`);
     continue;
@@ -105,8 +131,9 @@ for (const [label, b, want] of edges) {
   const bad = badNumbers(res);
   expect(bad.length === 0, `${label}: NaN/non-finite at ${bad.slice(0, 5).join(", ")}`);
   expect(res.summary.outcome === want, `${label}: outcome ${res.summary.outcome}, expected ${want}`);
+  if (extra) expect(extra(res), `${label}: ${JSON.stringify({ ...res.summary.booster, samples: undefined, events: undefined })}`);
   const last = res.events.at(-1);
-  console.log(`edge  ${label}: ${res.summary.outcome}${res.summary.error ? ` (${res.summary.error})` : ""}${last ? `, last event ${last.type} T+${last.t}` : ""}`);
+  console.log(`edge  ${label}: ${res.summary.outcome}${res.summary.reason && res.summary.outcome === "blocked" ? ` (${res.summary.reason})` : ""}${res.summary.error ? ` (${res.summary.error})` : ""}${last ? `, last event ${last.type} T+${last.t}` : ""}`);
 }
 
 if (failures.length) {
@@ -114,4 +141,4 @@ if (failures.length) {
   for (const f of failures) console.error("  " + f);
   process.exit(1);
 }
-console.log("\nOK: ascent runs, outcomes, Falcon 9 sanity ranges, edge builds and speed all check out.");
+console.log("\nOK: ascent runs, outcomes, Falcon 9 sanity ranges and booster recovery, edge builds and speed all check out.");

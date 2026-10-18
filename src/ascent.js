@@ -60,7 +60,15 @@
 // - R: the 6,371 km mean Earth radius.
 // - p0 101,325 Pa and rho0 1.225 kg/m^3: ISA sea level.
 // - The 8.5 km scale height and Cd 0.3: model choices, from the design brief.
-import { G0 } from "./physics.js";
+import { G0, evaluateBuild } from "./physics.js";
+
+// Pad abort: a build whose verdict has a blocking warning is not flown (outcome "blocked", reason = the first
+// blocking warning, no samples or events). In physics.js every warning blocks except "liftoff TWR below 1.2".
+// FLIGHT_EXEMPT lists blocking warnings that are app rules rather than physics, which a real vehicle breaks and
+// the simulation can still fly honestly: the 4 % dry-mass rule, which the real Falcon 9 second stage (3.2 %)
+// fails. Remove it to ground those builds too. opts.ignoreVerdict flies any build regardless.
+const NON_BLOCKING = new Set(["liftoff TWR below 1.2"]);
+const FLIGHT_EXEMPT = [/^tank dry mass below 4 percent of propellant$/];
 
 const MU = 3.986004418e14; // m^3/s^2
 const RE = 6371e3; // m
@@ -96,6 +104,7 @@ function stagesOf(build, catalog) {
     if (!e || !t) return null;
     const n = s.engineCount;
     return {
+      n,
       prop: t.propellantMass_kg,
       dry: n * e.mass_kg + t.dryMass_kg,
       Fsl: n * e.thrustSL_kN * 1000,
@@ -132,7 +141,7 @@ function orbitOf(x, y, vx, vy) {
 }
 
 // One flight. record=false skips samples and stops as soon as the outcome is known (used by the kick search).
-function fly(stages, payload_kg, fairing, increment_ms, { kick_deg, targetAlt_m, maxQThrottle, gLimit, record, sampleEvery_s, dt: DT_RUN, tMax }) {
+function fly(stages, payload_kg, fairing, increment_ms, { kick_deg, targetAlt_m, maxQThrottle, gLimit, record, sampleEvery_s, dt: DT_RUN, tMax, stopAtSep = false }) {
   const samples = [];
   const events = [];
   let x = 0;
@@ -168,6 +177,7 @@ function fly(stages, payload_kg, fairing, increment_ms, { kick_deg, targetAlt_m,
   let gLimitedTime = 0;
   let thrustNow = 0;
   let accNow = 0;
+  let sep0 = null; // state at the first stage's separation (for the booster return)
 
   const state = () => {
     const r = Math.hypot(x, y);
@@ -368,9 +378,11 @@ function fly(stages, payload_kg, fairing, increment_ms, { kick_deg, targetAlt_m,
       }
     } else if (phase === "staging") {
       if (!sepDone && t >= stagingAt + SEP_DELAY_S - 1e-9) {
+        if (k === 0) sep0 = { t, x, y, vx, vy };
         m -= stages[k].dry;
         sepDone = true;
         ev("sep");
+        if (k === 0 && stopAtSep) phase = "done";
         k += 1;
         propLeft = stages[k].prop;
       } else if (sepDone && t >= stagingAt + SEP_DELAY_S + IGNITION_DELAY_S - 1e-9) {
@@ -431,6 +443,7 @@ function fly(stages, payload_kg, fairing, increment_ms, { kick_deg, targetAlt_m,
     outcome,
     orbit,
     remaining,
+    sep0,
     summary: {
       outcome,
       achievedDeltaV_ms: dvAch,
@@ -466,18 +479,281 @@ function score(res) {
   return (o.perigee_m ?? -RE) + Math.min(o.apogee_m, 1e7) * 1e-3;
 }
 
+// ---------- booster return (return to launch site) ----------
+// For a first stage whose tank lists "landing-legs" in visuals.json (Falcon 9 today). After separation the
+// booster flies on its own from the separation state with the propellant held in reserve (est.):
+//   flip      3 s coast while it turns around;
+//   boostback n engines (default 3), thrust horizontal toward the pad, until the predicted ballistic impact
+//             (flat-Earth, vacuum) is at the aim point; the aim point is corrected over a few runs so the
+//             landing (with drag) ends on the pad;
+//   coast     ballistic;
+//   entry     n engines (default 3), retrograde, up to 20 s, on the way down below 70 km while faster than
+//             700 m/s (low boostback arcs never reach 70 km but still fall fast); stops early at 450 m/s;
+//   descent   grid fins out: Cd 1.0 instead of 0.3 (model choice; same frontal area);
+//   landing   1 engine (3 if one cannot out-push gravity with margin, as Falcon 9 has flown). Ignition: below
+//             the no-drag closed-form height h = v_r^2 / (2 (0.9 T/m - g)), a short look-ahead (0.9 throttle,
+//             retrograde, drag, gravity) predicts where the descent stops; the burn lights when that is at the
+//             ground (drag changes too much on the way down for the closed form alone). Then closed loop,
+//             thrust retrograde: throttle (0.4-1) so the vertical share delivers v_r^2/(2h) + g - 0.5 D_v/m
+//             (drag averages about half its current value over the burn). If it stops above the pad, the
+//             engine is cut and relit by the same trigger.
+//   Touchdown below 2 m/s counts; faster, or out of propellant, is "lost".
+// The reserve is the smallest share of the stage's propellant (bisection, then +1 % of the load) that lands
+// within 10 km of the pad; the stage burns that much less, so MECO comes earlier. The reserve may not make the
+// flight worse (a mission success stays one; a build already short of its mission still reaches the parking
+// orbit). If returning to the pad would, a drone-ship landing is tried: no boostback, the booster comes down
+// where its arc ends (the ship is stationed there), which needs far less propellant; that is what Falcon 9 does
+// on GTO missions. If neither works, the booster is not recovered ("no-return") and the normal ascent is flown.
+// Real Falcon 9 return reserves are roughly 10-15 % of the stage propellant for a pad return, less for a ship.
+const BOOSTER = {
+  flip_s: 3,
+  boostbackEngines: 3,
+  entryEngines: 3,
+  entryAlt_m: 70e3,
+  entry_s: 20,
+  entryMinSpeed_ms: 700,
+  entryStopSpeed_ms: 450,
+  landingEngines: 1,
+  cd: 1.0,
+  landingDv_ms: 400, // propellant kept back for the landing burn while boostback and entry run (est.)
+  touchdownMax_ms: 2,
+  padRadius_m: 10e3,
+  maxReserve: 0.45,
+  modes: ["rtls", "droneship"], // tried in this order; the first that lands without costing the orbit wins
+};
+
+function flyBooster(sep, st, reserve_kg, cfg, { aim_m = 0, mode = "rtls", record = false, sampleEvery_s = 0.5 } = {}) {
+  let { x, y, vx, vy } = sep;
+  let t = sep.t;
+  let prop = reserve_kg;
+  const dryM = st.dry;
+  const perFvac = st.Fvac / st.n;
+  const perFsl = st.Fsl / st.n;
+  const events = [];
+  const samples = [];
+  let phase = "flip";
+  let phaseAt = t;
+  let throttle = 0;
+  let lit = 0;
+  let nextSample = t;
+  let result = null;
+  let maxAlt = Math.hypot(x, y) - RE;
+  let entryDone = false;
+  let nextPredict = -Infinity; // the landing look-ahead is re-run only as the predicted stop nears the ground
+  let landN = cfg.landingEngines;
+  const downrange = () => RE * Math.atan2(x, y);
+  const evb = (type) => {
+    events.push({ t: round(t, 2), type, alt_m: round(Math.hypot(x, y) - RE, 0), vel_ms: round(Math.hypot(vx, vy), 1) });
+    if (record) sampleB(true);
+  };
+  const sampleB = (force = false) => {
+    if (!record || (!force && t < nextSample - 1e-9)) return;
+    if (!force) nextSample += sampleEvery_s;
+    samples.push({ t: round(t, 2), x_m: round(downrange(), 1), alt_m: round(Math.hypot(x, y) - RE, 1), vel_ms: round(Math.hypot(vx, vy), 2), throttle: round(throttle, 3), enginesLit: lit });
+  };
+  const needFor = (dv) => (dryM + 0) * (Math.exp(dv / (st.ispVac * G0)) - 1);
+  const landReserve = needFor(cfg.landingDv_ms);
+  evb("flip");
+  const end = sep.t + 1200;
+  while (t < end) {
+    const r = Math.hypot(x, y);
+    const h = r - RE;
+    const ur = [x / r, y / r];
+    const ut = [ur[1], -ur[0]];
+    const v = Math.hypot(vx, vy);
+    const vr = vx * ur[0] + vy * ur[1];
+    const vt = vx * ut[0] + vy * ut[1];
+    const g = MU / (r * r);
+    const pRatio = h > 0 ? Math.exp(-h / SCALE_H) : 1;
+    const m = dryM + prop;
+    const perF = Math.max(0, perFvac - (perFvac - perFsl) * pRatio);
+    const isp = Math.max(1, st.ispVac - (st.ispVac - st.ispSl) * pRatio);
+    let n = 0;
+    throttle = 0;
+    let dir = [0, 0];
+    if (phase === "flip" && t >= phaseAt + cfg.flip_s) {
+      if (mode === "rtls") {
+        phase = "boostback";
+        evb("boostback");
+      } else phase = "coast"; // drone ship: no boostback, the ship waits where the arc comes down
+    }
+    if (phase === "boostback") {
+      // Predicted ballistic impact (flat Earth, no drag) from here.
+      const tf = (vr + Math.sqrt(Math.max(0, vr * vr + 2 * g * Math.max(0, h)))) / g;
+      const impact = downrange() + vt * tf;
+      if (impact <= aim_m || prop <= landReserve + cfg.entryEngines * (perF / (isp * G0)) * cfg.entry_s * 0.5) {
+        phase = "coast";
+      } else {
+        n = cfg.boostbackEngines;
+        throttle = 1;
+        dir = [-ut[0], -ut[1]];
+      }
+    }
+    maxAlt = Math.max(maxAlt, h);
+    if ((phase === "coast" || phase === "descent") && !entryDone && vr < 0 && h <= cfg.entryAlt_m && v > cfg.entryMinSpeed_ms) {
+      entryDone = true;
+      phase = "entry";
+      phaseAt = t;
+      evb("entry");
+    }
+    if (phase === "entry") {
+      if (t >= phaseAt + cfg.entry_s || prop <= landReserve || v <= cfg.entryStopSpeed_ms) phase = "descent";
+      else {
+        n = cfg.entryEngines;
+        throttle = 1;
+        dir = v > 0 ? [-vx / v, -vy / v] : [0, 1];
+      }
+    }
+    if (phase === "coast" && vr < 0 && h < cfg.entryAlt_m && v <= cfg.entryMinSpeed_ms) phase = "descent";
+    if (phase === "descent" || phase === "landing") {
+      const D0 = h < 150e3 && v > 0 ? 0.5 * RHO0 * pRatio * v * v * cfg.cd * st.area : 0;
+      if (phase === "descent") {
+        // One engine unless it cannot beat gravity with 2 m/s^2 to spare; then three (or all there are).
+        landN = cfg.landingEngines;
+        if (0.9 * landN * perF / m - g < 2) landN = Math.min(st.n, Math.max(landN, 3));
+      }
+      const Fmax = landN * perF;
+      const Dv = v > 0 ? (D0 * -vr) / v : 0; // drag's upward share while descending
+      const aNoDrag = (0.9 * Fmax) / m - g;
+      if (phase === "descent" && vr < 0 && aNoDrag > 0 && h <= (vr * vr) / (2 * aNoDrag) && t >= nextPredict) {
+        const s = stopHeight(h, vr, vt, m, 0.9 * Fmax, isp, cfg, st.area);
+        if (s <= 0) {
+          phase = "landing";
+          evb("landing-burn");
+        } else nextPredict = t + Math.min(2, (0.25 * s) / Math.max(1, -vr)); // a quarter of the time to close the gap
+      }
+      if (phase === "landing") {
+        // Retrograde (as the look-ahead assumed), throttled so the vertical share of the thrust stops the
+        // descent at 0 m: need v_r^2/(2h) + g - D_v/m; the horizontal speed shrinks in proportion.
+        const hh = Math.max(h, 0.5);
+        // Drag falls with v^2 during the burn: over a constant-deceleration stop it averages about half of
+        // its value now, so only half is counted (counting all of it under-throttles early and lands hard).
+        const aV = (vr * vr) / (2 * hh) + g - (0.5 * Dv) / m;
+        const share = v > 0 && vr < 0 ? -vr / v : 1;
+        n = landN;
+        throttle = Math.max(MIN_THROTTLE, Math.min(1, (aV * m) / Math.max(1, Fmax * Math.max(0.2, share))));
+        dir = v > 0.5 && vr < 0 ? [-vx / v, -vy / v] : [ur[0], ur[1]];
+        // Stopped above the pad (minimum throttle still out-pushes gravity): cut and let the trigger relight.
+        if (vr > -0.5 && h > 3) {
+          phase = "descent";
+          n = 0;
+          throttle = 0;
+        }
+      }
+    }
+    if (n > 0 && prop <= 0) {
+      n = 0;
+      throttle = 0;
+    }
+    lit = n;
+    const F = n * perF * throttle;
+    const mdot = F > 0 ? F / (isp * G0) : 0;
+    let dt = DT;
+    if (mdot > 0 && mdot * dt > prop) dt = prop / mdot;
+    // Euler-Cromer is enough here: short arcs, strong drag, and the controller closes the loop every step.
+    const D = h < 150e3 && v > 0 ? 0.5 * RHO0 * pRatio * v * v * cfg.cd * st.area : 0;
+    const ax = (-g * x) / r + (F * dir[0]) / m - (v > 0 ? (D / m) * (vx / v) : 0);
+    const ay = (-g * y) / r + (F * dir[1]) / m - (v > 0 ? (D / m) * (vy / v) : 0);
+    vx += ax * dt;
+    vy += ay * dt;
+    x += vx * dt;
+    y += vy * dt;
+    prop = Math.max(0, prop - mdot * dt);
+    t += dt;
+    sampleB();
+    const hNow = Math.hypot(x, y) - RE;
+    if (hNow <= 0) {
+      // Interpolate the touchdown speed at h = 0 is not needed at 0.1 s: report the speed at ground contact.
+      const vNow = Math.hypot(vx, vy);
+      const ok = phase === "landing" && vNow < cfg.touchdownMax_ms;
+      evb(ok ? "touchdown" : "lost");
+      result = { landed: ok, touchdownSpeed_ms: vNow, landingX_m: downrange(), prop_kg: prop };
+      break;
+    }
+  }
+  if (!result) {
+    evb("lost");
+    result = { landed: false, touchdownSpeed_ms: Math.hypot(vx, vy), landingX_m: downrange(), prop_kg: prop };
+  }
+  return { ...result, events, samples };
+}
+
+// Look-ahead for the landing burn: flat Earth, thrust F retrograde, drag, gravity; returns the height where the
+// descent would stop (negative: it would hit the ground first, by that much "below" 0).
+function stopHeight(h, vr, vt, m, F, isp, cfg, area) {
+  const dt = 0.2;
+  for (let i = 0; i < 1500; i++) {
+    const v = Math.hypot(vr, vt);
+    if (vr >= 0) return h;
+    if (h <= 0) return h + vr * dt; // below ground: how far, roughly
+    const rho = RHO0 * Math.exp(-Math.max(0, h) / SCALE_H);
+    const D = 0.5 * rho * v * v * cfg.cd * area;
+    const g = MU / ((RE + h) * (RE + h));
+    const a = (F + D) / m;
+    vr += (a * (-vr / v) - g) * dt;
+    vt += a * (-vt / v) * dt;
+    h += vr * dt;
+    m -= (F / (isp * G0)) * dt;
+  }
+  return h;
+}
+
+// Booster return with the aim point corrected for drag (secant on the landing error, a few runs).
+function returnBooster(sep, st, reserve_kg, cfg, record, mode = "rtls") {
+  if (mode !== "rtls") return flyBooster(sep, st, reserve_kg, cfg, { mode, record });
+  let aim = 0;
+  let res = flyBooster(sep, st, reserve_kg, cfg, { aim_m: aim });
+  let prevAim = null;
+  let prevErr = null;
+  for (let i = 0; i < 4 && res.landed && Math.abs(res.landingX_m) > 500; i++) {
+    const err = res.landingX_m;
+    const next = prevErr == null || err === prevErr ? aim - err : aim - (err * (aim - prevAim)) / (err - prevErr);
+    prevAim = aim;
+    prevErr = err;
+    aim = next;
+    res = flyBooster(sep, st, reserve_kg, cfg, { aim_m: aim });
+  }
+  return record ? flyBooster(sep, st, reserve_kg, cfg, { aim_m: aim, record: true }) : res;
+}
+
 export function simulateAscent(build, catalog, opts = {}) {
-  const stages = stagesOf(build, catalog);
+  if (!opts.ignoreVerdict) {
+    const verdict = evaluateBuild(build, catalog);
+    const blocking = verdict.warnings.filter((w) => !NON_BLOCKING.has(w) && !FLIGHT_EXEMPT.some((re) => re.test(w)));
+    if (blocking.length) {
+      return {
+        samples: [],
+        events: [],
+        summary: {
+          outcome: "blocked",
+          reason: blocking[0],
+          blockingWarnings: blocking,
+          achievedDeltaV_ms: 0,
+          gravityLoss_ms: 0,
+          dragLoss_ms: 0,
+          maxQ_Pa: 0,
+          maxG: 0,
+          burnTimes_s: [],
+          perigee_km: null,
+          apogee_km: null,
+          remainingDeltaV_ms: null,
+          booster: { returns: false, reason: "blocked", events: [], samples: [], propellantReserve_kg: 0 },
+          est: true,
+        },
+      };
+    }
+  }
+  const stagesFull = stagesOf(build, catalog);
   const payload = byId(catalog.payloads, build.payloadId);
   const mission = byId(catalog.missions, build.missionId);
   const leo = byId(catalog.missions, "leo");
   const empty = (why) => ({
     samples: [],
     events: [],
-    summary: { outcome: "impact", achievedDeltaV_ms: 0, gravityLoss_ms: 0, dragLoss_ms: 0, maxQ_Pa: 0, maxG: 0, burnTimes_s: [], perigee_km: null, apogee_km: null, error: why },
+    summary: { outcome: "impact", achievedDeltaV_ms: 0, gravityLoss_ms: 0, dragLoss_ms: 0, maxQ_Pa: 0, maxG: 0, burnTimes_s: [], perigee_km: null, apogee_km: null, booster: { returns: false, reason: why }, error: why },
   });
-  if (!stages.length) return empty("empty build");
-  if (stages.some((s) => !s)) return empty("unknown engine or tank id");
+  if (!stagesFull.length) return empty("empty build");
+  if (stagesFull.some((s) => !s)) return empty("unknown engine or tank id");
   const payload_kg = payload?.mass_kg ?? 0;
   const exposed = catalog.visuals?.payloads?.[payload?.id]?.exposed === true;
   const increment_ms = mission && leo ? Math.max(0, mission.requiredDeltaV_ms - leo.requiredDeltaV_ms) : 0;
@@ -487,17 +763,20 @@ export function simulateAscent(build, catalog, opts = {}) {
     gLimit: opts.gLimit === undefined ? G_LIMIT : opts.gLimit ?? 0,
     sampleEvery_s: opts.sampleEvery_s ?? 0.5,
   };
-  const tMax = capFor(stages);
-  const run = (kick_deg, record) =>
-    fly(stages, payload_kg, Boolean(payload) && !exposed, increment_ms, { ...base, kick_deg, record, dt: record ? DT : SEARCH_DT, tMax });
+  const tMax = capFor(stagesFull);
+  // The first stage with `reserve_kg` of its propellant held back: it burns that much less and carries it.
+  const withReserve = (reserve_kg) =>
+    reserve_kg > 0 ? [{ ...stagesFull[0], prop: stagesFull[0].prop - reserve_kg, dry: stagesFull[0].dry + reserve_kg }, ...stagesFull.slice(1)] : stagesFull;
+  const flyWith = (stages, kick_deg, record, extra = {}) =>
+    fly(stages, payload_kg, Boolean(payload) && !exposed, increment_ms, { ...base, kick_deg, record, dt: record ? DT : SEARCH_DT, tMax, ...extra });
 
   // Kick angle: coarse grid (1-45 deg, 2 deg steps), then golden-section refinement around the best point.
   // Light upper stages on a powerful first stage want large kicks (the demo build: ~27 deg).
-  let kick = opts.kick_deg;
-  if (kick == null) {
+  const searchKick = (stages) => {
+    const run = (a) => score(flyWith(stages, a, false));
     let best = { kick: 3, s: -Infinity };
     for (let a = 1; a <= 45.01; a += 2) {
-      const s = score(run(a, false));
+      const s = run(a);
       if (s > best.s) best = { kick: a, s };
     }
     let lo = Math.max(0.1, best.kick - 2);
@@ -505,27 +784,124 @@ export function simulateAscent(build, catalog, opts = {}) {
     const phi = (Math.sqrt(5) - 1) / 2;
     let c = hi - phi * (hi - lo);
     let d = lo + phi * (hi - lo);
-    let sc = score(run(c, false));
-    let sd = score(run(d, false));
+    let sc = run(c);
+    let sd = run(d);
     for (let i = 0; i < 10; i++) {
       if (sc > sd) {
         hi = d;
         d = c;
         sd = sc;
         c = hi - phi * (hi - lo);
-        sc = score(run(c, false));
+        sc = run(c);
       } else {
         lo = c;
         c = d;
         sc = sd;
         d = lo + phi * (hi - lo);
-        sd = score(run(d, false));
+        sd = run(d);
       }
     }
-    kick = sc > sd ? c : d;
-    if (Math.max(sc, sd) < best.s) kick = best.kick;
+    const k = sc > sd ? c : d;
+    return Math.max(sc, sd) < best.s ? best.kick : k;
+  };
+
+  // Booster return: only for a first stage with landing legs and something above it.
+  const legs = stagesFull.length > 1 && (catalog.visuals?.tanks?.[build.stages[0].tankId]?.features ?? []).includes("landing-legs");
+  const cfg = { ...BOOSTER, ...(opts.booster ?? {}) };
+  let booster = { returns: false, reason: legs ? null : "no landing legs on the first stage", events: [], samples: [], propellantReserve_kg: 0 };
+  let stages = stagesFull;
+  let kick = opts.kick_deg;
+  let res = null;
+  if (legs && opts.boosterReturn !== false) {
+    const st0 = stagesFull[0];
+    const kickR = kick ?? searchKick(withReserve(0.08 * st0.prop));
+    // The reserve may not make the flight worse: a mission success must stay one; a build that already falls
+    // short of its mission must still reach the parking orbit.
+    const baseline = flyWith(stagesFull, kickR, false);
+    const keepsOrbit = (frac) => {
+      const r = frac > 0 ? flyWith(withReserve(frac * st0.prop), kickR, false) : baseline;
+      return baseline.outcome === "orbit" ? r.outcome === "orbit" : r.remaining != null;
+    };
+    const sepState = (frac) => flyWith(withReserve(frac * st0.prop), kickR, false, { dt: DT, stopAtSep: true }).sep0;
+    const lands = (frac, mode) => {
+      const sep = sepState(frac);
+      if (!sep) return null;
+      const b = returnBooster(sep, st0, frac * st0.prop, cfg, false, mode);
+      return b.landed && (mode !== "rtls" || Math.abs(b.landingX_m) <= cfg.padRadius_m) ? b : null;
+    };
+    let reason = null;
+    if (baseline.remaining == null) reason = "the stack does not reach orbit even without a reserve";
+    else if (!keepsOrbit(0.02)) reason = "even a 2 % reserve costs the orbit";
+    else {
+      // Largest reserve that still reaches orbit (coarse ascent runs), then the smallest that lands, per mode.
+      let lo = 0.02;
+      let hi = cfg.maxReserve;
+      if (keepsOrbit(hi)) lo = hi;
+      for (let i = 0; i < 7 && hi - lo > 0.005; i++) {
+        const mid = (lo + hi) / 2;
+        if (keepsOrbit(mid)) lo = mid;
+        else hi = mid;
+      }
+      const fMax = lo;
+      const tried = [];
+      for (const mode of cfg.modes) {
+        if (!lands(fMax, mode)) {
+          tried.push(`${mode === "rtls" ? "return to the pad" : "drone ship"} needs more than the ${Math.round(fMax * 100)} % the orbit allows`);
+          continue;
+        }
+        let a = 0.02;
+        let b = fMax;
+        if (lands(a, mode)) b = a;
+        for (let i = 0; i < 6 && b - a > 0.005; i++) {
+          const mid = (a + b) / 2;
+          if (lands(mid, mode)) b = mid;
+          else a = mid;
+        }
+        // The searches use the minimum share that lands; the recorded flight takes 1 % more, and steps up by
+        // 2 % (at most twice, never past fMax) if the recorded flight still misses.
+        let frac = 0;
+        let asc = null;
+        let ret = null;
+        for (const extra of [0.01, 0.03, 0.05]) {
+          frac = Math.min(fMax, b + extra);
+          asc = flyWith(withReserve(frac * st0.prop), kickR, true);
+          const ok = (baseline.outcome === "orbit" ? asc.outcome === "orbit" : asc.remaining != null) && asc.sep0;
+          ret = ok ? returnBooster(asc.sep0, st0, frac * st0.prop, cfg, true, mode) : null;
+          if (ret && ret.landed && (mode !== "rtls" || Math.abs(ret.landingX_m) <= cfg.padRadius_m)) break;
+          ret = null;
+          if (frac >= fMax) break;
+        }
+        if (!ret) {
+          tried.push(`${mode === "rtls" ? "return to the pad" : "drone ship"}: the recorded flight missed at ${Math.round(frac * 100)} %`);
+          continue;
+        }
+        const reserve = frac * st0.prop;
+        stages = withReserve(reserve);
+        kick = kickR;
+        res = asc;
+        booster = {
+          returns: true,
+          mode, // "rtls" (back to the pad) | "droneship" (lands where the arc comes down)
+          events: ret.events,
+          samples: ret.samples,
+          propellantReserve_kg: reserve,
+          reserveFraction: frac,
+          touchdownSpeed_ms: ret.touchdownSpeed_ms,
+          landingDownrange_m: ret.landingX_m,
+          propellantLeft_kg: ret.prop_kg,
+          note: tried.length ? tried.join("; ") : null,
+          est: true,
+        };
+        break;
+      }
+      if (!booster.returns) reason = tried.join("; ") || "no landing found";
+    }
+    if (reason) booster = { ...booster, returns: false, reason: `no-return: ${reason}` };
   }
-  const res = run(kick, true);
+  if (!res) {
+    kick = kick ?? searchKick(stagesFull);
+    res = flyWith(stagesFull, kick, true);
+  }
   return {
     samples: res.samples,
     events: res.events,
@@ -541,6 +917,7 @@ export function simulateAscent(build, catalog, opts = {}) {
             shortBy_ms: res.remaining == null ? null : Math.max(0, increment_ms - res.remaining),
           }
         : null,
+      booster,
       est: true,
     },
   };

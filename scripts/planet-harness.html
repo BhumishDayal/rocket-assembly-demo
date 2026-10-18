@@ -1,0 +1,120 @@
+<!doctype html>
+<!--
+  Visual harness for src/planet.js. Not part of the demo.
+  Serve the repo root with Vite on a free port (never 5173), then open
+    /scripts/planet-harness.html?view=earth                Earth (radius 40 u) filling the lower half of the frame
+    /scripts/planet-harness.html?view=lander               a small Moon in the sky, the Nova-C lander (legs deployed)
+                                                           on a lunar surface patch, touchdown dust
+  Params: kind (earth|moon|mars, for view=earth), r (planet radius), t (seconds of self-rotation).
+  window.__ready is set after ~45 animated frames.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Planet harness</title>
+    <style>
+      html, body { margin: 0; background: #0b0d12; overflow: hidden; }
+      canvas { display: block; }
+    </style>
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+    <script type="module">
+      import * as THREE from "three";
+      import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+      import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+      import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+      import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+      import { createPlanet, createSurfacePatch, createDustPuff } from "../src/planet.js";
+      import { createMaterials, createPart, createStars, deployables } from "../src/parts.js";
+      import { buildManifest, SCALE } from "../src/layout.js";
+      import { catalog, getPreset, presetToBuild } from "../src/data/catalog.js";
+
+      const q = new URLSearchParams(location.search);
+      const view = q.get("view") ?? "earth";
+      const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("c"), antialias: true, preserveDrawingBuffer: true });
+      renderer.setPixelRatio(1);
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 0.95;
+      renderer.shadowMap.enabled = true;
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0b0d12);
+      scene.add(createStars());
+      const sunDir = new THREE.Vector3(-0.45, 0.75, 0.5).normalize();
+      const key = new THREE.DirectionalLight(0xffb48a, 2.2);
+      key.position.copy(sunDir).multiplyScalar(20);
+      key.castShadow = true;
+      Object.assign(key.shadow.camera, { left: -6, right: 6, top: 6, bottom: -6, near: 1, far: 60 });
+      const fill = new THREE.DirectionalLight(0x6a7fa8, 0.5);
+      fill.position.set(8, 3, -8);
+      scene.add(key, fill, new THREE.HemisphereLight(0x8fa6c8, 0x0f1118, 0.2));
+      const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.05, 2000);
+      const updates = [];
+
+      if (view === "earth") {
+        const R = +(q.get("r") ?? 40);
+        const planet = createPlanet({ kind: q.get("kind") ?? "earth", radius_u: R });
+        planet.setSunDir(new THREE.Vector3(-0.85, 0.35, -0.2)); // from the side, so the terminator crosses the disc
+        scene.add(planet.object3d);
+        const t0 = +(q.get("t") ?? 30);
+        updates.push((t) => planet.update(t0 + t, camera));
+        camera.position.set(0, R * 0.62, R * 2.05);
+        camera.lookAt(0, R * 1.02, 0);
+      } else {
+        scene.fog = new THREE.Fog(0x0b0d12, 10, 45);
+        const patch = createSurfacePatch({ kind: "moon", radius_u: 14 });
+        scene.add(patch.object3d);
+        const moon = createPlanet({ kind: "moon", radius_u: 2.2 });
+        moon.setSunDir(sunDir);
+        moon.object3d.position.set(-9, 8.5, -32);
+        scene.add(moon.object3d);
+        updates.push((t) => moon.update(t, camera));
+        // The Nova-C payload part, adapter hidden, legs deployed, set down on the surface.
+        const manifest = buildManifest(presetToBuild(getPreset("delta-iv-m")), catalog);
+        const spec = manifest.find((s) => s.kind === "payload");
+        const part = createPart(spec, createMaterials());
+        for (const p of part.pieces) if (/:(0|1)$/.test(p.mesh.name)) p.mesh.visible = false; // adapter cone + clamp band
+        let minY = Infinity;
+        for (const p of deployables(part)) {
+          const d = p.deploy;
+          const R = new THREE.Quaternion().setFromAxisAngle(d.axis, d.angle);
+          p.mesh.position.copy(p.rest.position).sub(d.pivot).applyQuaternion(R).add(d.pivot);
+          p.mesh.quaternion.copy(R).multiply(p.rest.quaternion);
+          p.mesh.updateMatrix();
+          minY = Math.min(minY, new THREE.Box3().setFromBufferAttribute(p.mesh.geometry.attributes.position).applyMatrix4(p.mesh.matrix).min.y);
+        }
+        part.group.position.y = -minY;
+        scene.add(part.group);
+        const dust = createDustPuff();
+        scene.add(dust.object3d);
+        let fired = false;
+        updates.push((t, dt, frame) => {
+          if (!fired && frame === 22) dust.fire({ position: new THREE.Vector3(0, 0.02, 0), radius: spec.radius * 1.6 }), (fired = true);
+          dust.update(dt);
+        });
+        camera.position.set(3.4, 1.5, 5.2);
+        camera.lookAt(0, 0.75, -1.5);
+      }
+
+      const composer = new EffectComposer(renderer);
+      composer.addPass(new RenderPass(scene, camera));
+      composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.36, 0.55, 0.8));
+      composer.addPass(new OutputPass());
+      let frame = 0;
+      let time = 0;
+      function tick() {
+        const dt = 1 / 60; // fixed step so shots are repeatable
+        time += dt;
+        for (const u of updates) u(time, dt, frame);
+        composer.render();
+        if (++frame === 45) {
+          document.title = `ready ${view} · ${renderer.info.render.calls} calls`;
+          window.__ready = true;
+        }
+        requestAnimationFrame(tick);
+      }
+      tick();
+    </script>
+  </body>
+</html>

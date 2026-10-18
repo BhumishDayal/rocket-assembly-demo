@@ -496,3 +496,31 @@ Tier 3: E18 drag-and-drop, D14 CoM, D16 reliability, J36 race, I34 instancing/LO
 Ownership for Tier 1: UI 2 = src/ascent.js (integrator, events, losses, achieved orbit) + check script;
 UI4 = src/plume.js (plume shader, pad light, ground scorch) + twin silhouette geometry from the GCAT pool;
 UI 3 = launch choreography/camera/telemetry, scrub mode, sourced-number drawer, story mode.
+
+---
+
+## 8. Context change + user round (2026-10-17 ~22:25)
+
+**The prototype is the app.** SpaxeX PR #19 made `prototype/rocket-assembly/src/main.js` the homepage of the
+Next.js app (https://spaxe-x.vercel.app) through a fixed React shell (`src/components/assembly/AssemblyStage.tsx`:
+canvas#scene, .brand hint, aside#detail, #hud/#hud-text, bar with build-all/explode/reset/sound). Only `src/` is
+deployed; the user forbids changes outside `src/` in the team repo (Vercel). Rules from now on:
+- main.js creates any DOM it needs that the shell lacks (Rockets button, lists, hint text) and never throws on a
+  missing element; index.html is a dev mirror only.
+- anim-demo keeps scripts/docs locally; only `src/` is synced to `prototype/rocket-assembly/src/`.
+- The team ported their #20 physics into the prototype (#23: ENGINE_FIT_FACTOR 0.62, sanitizeEngineCount,
+  "n engines don't fit" blocking warning); anim-demo takes that as the base.
+
+### Round 12 — user requests
+1. **Per-part opacity toggle.** Parts default OPAQUE (0.92); clicking a part toggles it TRANSPARENT (0.18) and
+   back; per part, per instance (reset/preset/swap restore opaque); key X toggles all.
+2. **Landing page.** NASA/Apple/Tesla simple: a large procedural Earth, the title, one button "Build a rocket";
+   entering flies the camera from the planet down to the pad in one move. Skipped by ?build/?story/?skip.
+3. **Ending on a planet.** After orbit: Earth missions end orbiting above a rendered Earth; Moon/Mars missions
+   show a short transfer and the payload descending and touching down (landers/capsules) or entering orbit
+   (satellites/telescopes); NO-GO stays stranded in Earth orbit with the shortfall. Success = injection Δv met;
+   the spacecraft's own propulsion does the rest (stated). ≤ 8 s.
+4. **Faster launch.** ≤ 18 s wall time to the outcome (real time 2.5 s after liftoff, then compressed); story
+   mode ≤ 45 s.
+Owners: UI 3 (shell robustness, toggle, fast launch, landing overlay + transition, ending choreography),
+UI4 (src/planet.js: Earth/Moon/Mars, surface patch, dust puff), UI 2 (port #23, src/arrival.js).

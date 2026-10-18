@@ -9,20 +9,21 @@
 //   - engine and tank propellants differ
 //   - vacuum-only engine on stage 0
 //   - the engine is wider than its tank (d_engine > D_tank): even a single engine cannot sit under the stage.
-//     The app's packing rule floor(0.6 * (D_tank / d_engine)^2) is a cluster rule and is NOT used for this:
-//     it returns 0 for real flown pairs (Merlin Vacuum 3.3 m on the 3.66 m Falcon 9 second stage:
-//     0.6 * (3.66 / 3.3)^2 = 0.74 -> 0; RD-180 3.2 m on the 3.81 m Atlas V booster: 0.85 -> 0) and only works in the app because
-//     physics.maxEngineCount / clampEngineCount take max(1, ...). Here it only drives engine counts, through
-//     catalog.applyOption and the "count reduced to n to fit" label below.
+//     The app's packing rule floor(RULES.ENGINE_FIT_FACTOR * (D_tank / d_engine)^2) (factor 0.62 since #20) is
+//     a cluster rule and is NOT used for this: it returns 0 for real flown pairs (Merlin Vacuum 3.3 m on the
+//     3.66 m Falcon 9 second stage: 0.62 * (3.66 / 3.3)^2 = 0.76 -> 0; RD-180 3.2 m on the 3.81 m Atlas V
+//     booster: 0.88 -> 0) and only works in the app because physics.maxEngineCount takes max(1, ...).
+//   - more engines than the tank fits (that packing rule): the app's verdict blocks it since #20, and
+//     catalog.applyOption keeps the count, so the option is incompatible with the verdict's own words
+//     ("9 RD-191 engines don't fit a 3.66 m wide Falcon 9 Block 5 first-stage tank: max 1").
 //   - tank more than 1.6x as wide as the stage below; payload more than 1.6x as wide as the top tank
 // UNUSUAL (allowed, labelled):
 //   - sea-level engine on an upper stage
 //   - tank more than 1.15x as wide as the stage below
 //   - upper stage carries more propellant than the stage below
-//   - choosing the record lowers the stage's engine count (fit rule, via catalog.applyOption)
 // The 1.6 / 1.15 width ratios and the sea-level test below are design thresholds for this check, not
 // real-world data.
-import { isVacuumOnly } from "./physics.js";
+import { isVacuumOnly, maxEngineCount, tooManyEnginesWarning } from "./physics.js";
 import { applyOption, optionsFor } from "./data/catalog.js";
 
 const WIDER_INCOMPATIBLE = 1.6;
@@ -45,6 +46,10 @@ const tooWide = (tank, engine) => tank.diameter_m > 0 && engine.diameter_m > tan
 // visuals.json says when an engine's diameter is its overall envelope (RD-180, RD-191, RS-68A), not a bell.
 const engineNoun = (catalog, e) => (catalog.visuals?.engines?.[e.id]?.diameterKind === "overall" ? "engine" : "bell");
 const noFit = (catalog, tank, engine) => `${m(engine.diameter_m)} m ${engineNoun(catalog, engine)} does not fit under a ${m(tank.diameter_m)} m tank`;
+
+// Engine count over the packing rule (whole counts only; physics flags fractional counts separately).
+const tooMany = (stage, e, t) => Number.isInteger(stage.engineCount) && stage.engineCount > maxEngineCount(t.diameter_m, e.diameter_m);
+const tooManyReason = (stage, e, t) => tooManyEnginesWarning(stage.engineCount, e, t, maxEngineCount(t.diameter_m, e.diameter_m));
 
 function resolve(build, catalog, i) {
   const s = build.stages[i];
@@ -70,12 +75,14 @@ function slotIssues(build, catalog, kind, i, { relationOnly = false } = {}) {
     if (e && t && e.propellant !== t.propellant) add("incompatible", `${e.propellant} engine on a ${t.propellant} tank`);
     if (i === 0 && e && isVacuumOnly(e)) add("incompatible", "vacuum engine cannot light at sea level");
     if (e && t && tooWide(t, e)) add("incompatible", noFit(catalog, t, e));
+    else if (e && t && tooMany(r.stage, e, t)) add("incompatible", tooManyReason(r.stage, e, t));
     if (i > 0 && e && isSeaLevelEngine(e)) add("unusual", "sea-level engine used in vacuum");
     return out;
   }
   // tank
   if (!relationOnly && e && t && e.propellant !== t.propellant) add("incompatible", `${t.propellant} tank for a ${e.propellant} engine`);
   if (!relationOnly && e && t && tooWide(t, e)) add("incompatible", noFit(catalog, t, e));
+  else if (!relationOnly && e && t && tooMany(r.stage, e, t)) add("incompatible", tooManyReason(r.stage, e, t));
   const below = i > 0 ? resolve(build, catalog, i - 1).tank : undefined;
   if (t && below) {
     const ratio = t.diameter_m / below.diameter_m;
@@ -95,8 +102,8 @@ function summarize(issues) {
 }
 
 // What choosing `record` for the slot would mean. The candidate build is made with catalog.applyOption (the
-// same call the UI makes), so the engine count it predicts is the one the user will get; re-choosing the
-// current record changes nothing and reports the slot as it is. Only the slots the choice touches are judged:
+// same call the UI makes, which keeps the engine count); re-choosing the current record changes nothing and
+// reports the slot as it is. Only the slots the choice touches are judged:
 // an engine choice -> that engine; a tank choice -> that tank, plus the stage above it and, for the top stage,
 // the payload; a payload choice -> the payload.
 export function checkOption(build, catalog, kind, stageIndex, record) {
@@ -120,9 +127,6 @@ export function checkOption(build, catalog, kind, stageIndex, record) {
       issues.push(...slotIssues(next, catalog, "payload", null));
     }
   }
-  const before = build.stages[stageIndex]?.engineCount;
-  const after = next.stages[stageIndex].engineCount;
-  if (Number.isFinite(before) && after < before) issues.push({ level: "unusual", reason: `count reduced to ${after} to fit` });
   return summarize(issues);
 }
 

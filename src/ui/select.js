@@ -1,5 +1,8 @@
 // Click-to-select on the 3D stack, without stealing orbit drags.
-//   createSelector({ canvas, camera, parts, onSelect(part|null), onGhostClick(part), onHover?(hit|null), resolve?(part) })
+//   createSelector({ canvas, camera, parts, onSelect(part|null), onGhostClick(part), onHover?(hit|null), resolve?(part),
+//                    onPick?(part) })
+//   onPick fires for every real click on a part (also on the already selected one; main toggles its look),
+//   never for select() calls from code.
 //   resolve maps a clicked part to the part to select (main: the closed fairing selects the payload inside).
 //     -> { setParts(parts), select(part), clear(), refresh(), hit(x, y), get selected(), dispose() }
 // - A click is a pointerup less than 5 px from its pointerdown (same pointer, no second finger in between),
@@ -17,7 +20,7 @@ import * as THREE from "three";
 const CLICK_PX = 5;
 const HOVER_MS = 40;
 
-export function createSelector({ canvas, camera, parts, onSelect, onGhostClick, onHover, resolve = (p) => p }) {
+export function createSelector({ canvas, camera, parts, onSelect, onGhostClick, onHover, onPick, resolve = (p) => p }) {
   const raycaster = new THREE.Raycaster();
   const ndc = new THREE.Vector2();
   let list = parts;
@@ -84,15 +87,15 @@ export function createSelector({ canvas, camera, parts, onSelect, onGhostClick, 
     return part ? { part, ghost: false } : null;
   }
 
-  // X-ray click-through: shells are see-through, so a click lands on what is seen through them. When the
-  // first hit is a shell of part A, or any piece of a wrapper (interstage, fairing: their stringers and rings
-  // sit at the wall), a hit on another part inside A's bounding box wins (engines inside an interstage, a
-  // payload inside a fairing); otherwise A keeps it.
+  // X-ray click-through, only through parts in the clear look (an opaque shell is what you see, so it is what
+  // you click): when the first hit is a shell of a clear part A, or any piece of a clear wrapper (interstage,
+  // fairing: their stringers and rings sit at the wall), a hit on another part inside A's bounding box wins
+  // (engines inside an interstage, a payload inside a fairing); otherwise A keeps it.
   const WRAPPERS = new Set(["interstage", "fairing"]);
   const enclosing = new THREE.Box3();
   function xray(hits) {
     const first = partOf(hits[0].object);
-    if (!first || (hits[0].object.userData.kind !== "shell" && !WRAPPERS.has(first.kind))) return first;
+    if (!first || first.look !== "clear" || (hits[0].object.userData.kind !== "shell" && !WRAPPERS.has(first.kind))) return first;
     enclosing.setFromObject(first.group).expandByScalar(1e-3);
     for (const h of hits) {
       const p = partOf(h.object);
@@ -145,6 +148,7 @@ export function createSelector({ canvas, camera, parts, onSelect, onGhostClick, 
       onGhostClick?.(hit.part);
       return;
     }
+    if (hit?.part) onPick?.(hit.part);
     select(hit?.part ?? null);
     if (e.pointerType !== "touch") {
       lastMove = { x: e.clientX, y: e.clientY };

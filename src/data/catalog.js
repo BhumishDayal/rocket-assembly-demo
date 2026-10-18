@@ -12,7 +12,7 @@ import referenceRockets from "./reference-rockets.json";
 import visuals from "./visuals.json";
 import presets from "./presets.json";
 import gcat from "./gcat-rockets.json";
-import { clampEngineCount, evaluateBuild, isVacuumOnly, rocketDistance } from "../physics.js";
+import { evaluateBuild, isVacuumOnly, rocketDistance, sanitizeEngineCount } from "../physics.js";
 
 export const catalog = {
   engines,
@@ -72,10 +72,11 @@ export function optionsFor(kind, build, stageIndex) {
   }
 }
 
-// A NEW BuildState with recordId swapped into the slot. The stage's engineCount is kept, clamped with
-// physics.clampEngineCount for the new engine/tank pair (the app's fit rule). Picking the record that is
-// already there returns an unchanged copy, so re-selecting never clamps a real vehicle (e.g. 5 F-1 on the
-// S-IC, where the fit rule allows 4). Unknown record ids or stage indices also return an unchanged copy.
+// A NEW BuildState with recordId swapped into the slot. The stage's engineCount is kept (only cleaned by
+// physics.sanitizeEngineCount), as the team app's applySuggestion does since #20: if more engines than the new
+// engine/tank pair fits remain, the verdict blocks the build with the "engines don't fit" warning, and compat.js
+// marks that option incompatible with the same words. Picking the record that is already there returns an
+// unchanged copy. Unknown record ids or stage indices also return an unchanged copy.
 export function applyOption(build, kind, stageIndex, recordId) {
   const next = {
     ...build,
@@ -92,11 +93,7 @@ export function applyOption(build, kind, stageIndex, recordId) {
   const field = k === "engines" ? "engineId" : "tankId";
   if (stage[field] === recordId || !byId(k === "engines" ? catalog.engines : catalog.tanks, recordId)) return next;
   stage[field] = recordId;
-  stage.engineCount = clampEngineCount(
-    stage.engineCount,
-    byId(catalog.tanks, stage.tankId),
-    byId(catalog.engines, stage.engineId),
-  );
+  stage.engineCount = sanitizeEngineCount(stage.engineCount);
   return next;
 }
 

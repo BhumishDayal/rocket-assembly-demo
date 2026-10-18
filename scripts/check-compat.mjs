@@ -44,7 +44,7 @@ const cases = [
   ["propellant (engine option)", build([["merlin-1d", 9, "falcon9-s1-tank"]]), "engines", 0, "rs-25", "incompatible", "hydrolox engine on a kerolox tank"],
   ["propellant (tank option)", build([["merlin-1d", 9, "falcon9-s1-tank"]]), "tank", 0, "sls-core-tank", "incompatible", "hydrolox tank for a kerolox engine"],
   ["vacuum-only on stage 0", build([["merlin-1d", 9, "falcon9-s1-tank"]]), "engines", 0, "merlin-1d-vac", "incompatible", "vacuum engine cannot light at sea level"],
-  // J-2 under Centaur fits: 0.6 * (3.05 / 1.956)^2 = 1.46 -> 1 engine.
+  // J-2 under Centaur fits: 0.62 * (3.05 / 1.956)^2 = 1.51 -> 1 engine.
   ["J-2 fits under Centaur", build([["rd-180", 1, "atlas-v-ccb-tank"], ["rl10c-1", 1, "centaur-iii-tank"]]), "engines", 1, "j-2", "ok", ""],
   ["bell wider than the tank (F-1 under Centaur)", build([["rd-180", 1, "atlas-v-ccb-tank"], ["j-2", 1, "centaur-iii-tank"]]), "engines", 1, "f-1", "incompatible", "3.53 m bell does not fit under a 3.05 m tank"],
   ["overall-diameter engine says engine", build([["rd-180", 1, "atlas-v-ccb-tank"], ["rl10c-1", 1, "centaur-iii-tank"]]), "engines", 1, "rd-180", "incompatible", "3.2 m engine does not fit under a 3.05 m tank"],
@@ -57,7 +57,9 @@ const cases = [
   ["sea-level engine on an upper stage", build([["merlin-1d", 9, "falcon9-s1-tank"], ["merlin-1d-vac", 1, "falcon9-s2-tank"]]), "engines", 1, "merlin-1d", "unusual", "sea-level engine used in vacuum"],
   ["stage wider than below", build([["merlin-1d", 9, "falcon9-s1-tank"], ["rl10b-2", 1, "falcon9-s2-tank"]], "jwst"), "tank", 1, "dcss-5m-tank", "unusual", "wider than the stage below"],
   ["upper stage heavier", build([["rd-180", 1, "atlas-v-ccb-tank"], ["merlin-1d", 1, "centaur-iii-tank"]]), "tank", 1, "falcon9-s1-tank", "unusual", "upper stage heavier than the stage below"],
-  ["count reduced by the fit rule", build([["merlin-1d", 9, "falcon9-s1-tank"]]), "engines", 0, "rd-191", "unusual", "count reduced to 1 to fit"],
+  // applyOption keeps the count (#20): 9 RD-191 on the F9 tank exceeds the packing rule, so the verdict blocks it.
+  ["too many engines for the tank (engine option)", build([["merlin-1d", 9, "falcon9-s1-tank"]]), "engines", 0, "rd-191", "incompatible", "9 RD-191 engines don't fit a 3.66 m wide Falcon 9 Block 5 first-stage tank: max 1"],
+  ["too many engines for the tank (tank option)", build([["merlin-1d", 9, "falcon9-s1-tank"]]), "tank", 0, "centaur-iii-tank", "incompatible", "9 Merlin 1D engines don't fit a 3.05 m wide Centaur III (single-engine) tank: max 6"],
   ["re-choosing the current record changes nothing", build([["f-1", 5, "saturn-v-s-ic-tank"]]), "engines", 0, "f-1", "ok", ""],
   ["tank choice judges the stage above", build([["rl10c-1", 1, "centaur-iii-tank"], ["rl10b-2", 1, "dcss-5m-tank"]]), "tank", 0, "icps-tank", "ok", ""],
   ["tank choice under a wide stage above", build([["rs-68a", 1, "delta-iv-cbc-tank"], ["rl10b-2", 1, "sls-core-tank"]]), "tank", 0, "delta-iv-cbc-tank", "incompatible", "stage 2: 8.4 m stage on a 5.0 m stage"],
