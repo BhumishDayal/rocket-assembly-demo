@@ -587,3 +587,52 @@ Decisions:
    <ending>.mp4 in a video overlay when present; the real-time sequence is the fallback. Not generated here.
 Owners: UI4 (assets, planet shaders, terrain, ocean, PBR materials), UI 2 (powered-descent profiles, lighting
 geometry per body), UI 3 (scroll landing, look switch, DoF/sky, landing direction, clip hook).
+
+### Round 16 — "it's not a story, it has gaps": ONE continuous flight, no cuts (user, 2026-10-18 ~01:00)
+Problem: the launch is a chain of separately staged scenes (pad → tracker → look-down → onboard → booster clock →
+Earth backdrop → planet backdrop → descent) joined by fades. The user wants one linear journey: leave Earth, climb
+through the atmosphere into space, shed stages where needed, coast/transfer, arrive, enter the destination's
+atmosphere, descend and land on a real surface, continuous, with the world as a real environment (not a backdrop
+swapped behind the rocket). Mars/Moon surfaces must be the terrain, not a sphere behind the lander.
+Architecture:
+1. Two render layers sharing orientation: NEAR (vehicle, pad, effects, local terrain under 5 km, floating origin
+   that keeps the vehicle near 0) and FAR (scaled space: photoreal Earth at the origin, Moon at its real distance,
+   Mars placed along the transfer line, stars, sun; 1 unit = 10 km; far camera = vehicle geocentric position /
+   scale, same rotation). Sky dome colour from altitude on the current body; atmosphere limb from the far layer.
+2. One continuous timeline: UI 2 stitches ascent → orbit → departure burn → transfer → arrival burn → descent →
+   touchdown (plus the booster branch) into geocentric samples per body with a monotonic screen-time map
+   (piecewise-smooth compression: real time near events, fast through coasts; no discontinuities).
+3. One camera: a chase camera whose framing eases between phase rules (pad low angle → rising with the vehicle →
+   gentle look-backs → side view at staging with the spent stage falling away in frame → orbit with Earth below →
+   pull back during the transfer so Earth shrinks and the destination grows → follow the lander down to the terrain).
+   No black fades anywhere in the flight. Double-click skip still works (jumps the timeline).
+4. Earth missions: after SECO and payload deploy, the camera tilts down and descends (compressed) to meet the
+   booster on its entry burn and follows it to the drone ship; that is the "lands on the planet" ending for Earth.
+   Vehicles without legs: payload deployed above Earth (continuous) and end.
+5. Terrain: fades in under the lander below ~5 km, aligned to the far planet's surface, same albedo as the
+   planet's texture at that spot; dust and shadow as built.
+Owners: UI 2 src/flight.js (unified timeline + screen-time map + geocentric helpers); UI4 src/world.js (far layer,
+scaled bodies, sky/atmosphere/terrain alignment helpers); UI 3 flight director rewrite in choreo.js/main.js.
+Pre-rendered clips remain an optional hook (needs the team's Grok Imagine key); the continuous real-time world
+is the deliverable.
+
+### Round 17 — simplify the flight story (user, ~01:10)
+- The builder is the core of the project; the flight is a secondary show driven by the physics. Focus on the
+  LAUNCH. Story = launch from Earth → space → land at the destination. Nothing else.
+- No yellow/twilight sky: night launch, dark sky with stars; at most a thin blue horizon haze at low altitude.
+- Spent stages/fairing: detach, fall out of frame, disposed. No booster return, no payload deploy epilogue.
+- Moon/Mars missions: continuous transfer and landing on the terrain (round 16 world). Earth-orbit missions:
+  insertion, a short pass above Earth, end "In orbit", vehicle intact. NO-GO: honest end state.
+- Everything else from round 16 stands (one world, one camera, no cuts, terrain under the lander).
+
+### Round 18 — sub-part density + a real launch complex (user, ~01:20)
+- "You made four supports for one part; anime.js has hundreds of sub-parts": every part gets ~3× the animated
+  sub-pieces (engine ~28, vacuum ~20, tank ~60, interstage ~24, fairing ~16, payloads ×2) plus instanced static
+  fine detail (rivet rows, bolt circles, clamps) riding on pieces; budgets raised to 900 meshes + 300 lines; all
+  piece rules/APIs unchanged. Owner: density coding agent (parts.js, layout.js minimal, check-budget limits).
+- "The plain background is too empty; use a proper launch pad": src/complex.js, Kennedy-style complex (fixed
+  service tower with crane and the umbilical arms, hinged rotating service structure, water tower with down pipe,
+  four lightning towers with catenary wires and floodlights, hardstand + ramp + crawlerway, extended trench,
+  propellant farm behind a berm with pipe racks, perimeter fence, service buildings, 1.5 km apron), painted PBR
+  with x-ray twins, ≤ 110 draws, same API shape as createAnchors plus rss/waterTower/setLook. Owner: complex
+  coding agent; UI 3 swaps it in.

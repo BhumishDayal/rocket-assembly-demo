@@ -512,6 +512,8 @@ const MAP_URLS = {
   mars_bump: new URL("./assets/planets/mars_bump.jpg", import.meta.url).href,
 };
 export const PLANET_MAPS = MAP_URLS;
+// The shared map textures by name (see MAP_URLS), e.g. for world.js; 1×1 placeholders outside a browser.
+export const planetTexture = (name, opts) => planetMap(name, opts);
 
 // Textures load once in the browser and are shared; outside a browser (node checks) a 1×1 placeholder stands in.
 const texCache = new Map();
@@ -955,7 +957,7 @@ function detailMaps(body) {
   return out;
 }
 
-// createTerrain({ body: "moon" | "mars", size_u, seed, padRadius_u, sunDir })
+// createTerrain({ body: "moon" | "mars", size_u, seed, padRadius_u, sunDir, tint })
 //   -> { object3d, sun, heightAt(x, z), padRadius_u, dispose() }
 // A displaced plane (240 × 240 segments): craters (bowls with raised rims and bright fresh ejecta, power-law
 // sizes) and rolling noise on the Moon; dunes and soft sand-filled craters on Mars; a flat landing spot of
@@ -965,7 +967,7 @@ function detailMaps(body) {
 // `sun` is a shadow-casting DirectionalLight aimed at the landing spot, already inside object3d; its direction
 // defaults to lightingFor(body).sunDir (site frame: +x east, +y up, +z south). For the lander's
 // own shadow call enableShadowCasting(landerGroup). Draws: ground, boulders, pebbles = 3 (+ shadow passes).
-export function createTerrain({ body = "moon", size_u = 60, seed = 7, padRadius_u = 2, sunDir = new THREE.Vector3(...lightingFor(body).sunDir) } = {}) {
+export function createTerrain({ body = "moon", size_u = 60, seed = 7, padRadius_u = 2, sunDir = new THREE.Vector3(...lightingFor(body).sunDir), tint: tintIn = null } = {}) {
   const mars = body === "mars";
   const S = size_u;
   const rand = rng(seed);
@@ -1020,7 +1022,7 @@ export function createTerrain({ body = "moon", size_u = 60, seed = 7, padRadius_
   const geo = new THREE.PlaneGeometry(S, S, SEG, SEG).rotateX(-Math.PI / 2);
   const pos = geo.attributes.position;
   const col = new Float32Array(pos.count * 3);
-  const tint = mars ? [0.62, 0.36, 0.22] : [0.56, 0.55, 0.53];
+  const tint = tintIn ?? (mars ? [0.62, 0.36, 0.22] : [0.56, 0.55, 0.53]); // tint: linear rgb, e.g. world.surfaceColourAt
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i);
     const z = pos.getZ(i);

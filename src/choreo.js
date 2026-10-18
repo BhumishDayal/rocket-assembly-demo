@@ -27,7 +27,7 @@ import { createBoltFlash } from "./fx/flash.js";
 import { COLORS, LOOK, applyDeploy, deployables, padLayout, setShellOpacity as setShell } from "./parts.js";
 import { createVents, createDeluge, createTrenchJet, createSteamCloud, createCondensationHalo, createColdGasPuffs, createIgnitionFlash } from "./fx/launchfx.js";
 import { attachPlumes, createPadLight, createPlume, P0 } from "./plume.js";
-import { createPlanet, createSurfacePatch, createDustPuff, createSkyDome, skyAt } from "./planet.js";
+import { createPlanet, createSurfacePatch, createDustPuff, createSkyDome } from "./planet.js";
 import { createDroneShip } from "./anchors.js";
 
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -1085,7 +1085,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   function retarget() {
     const { lo, hi } = flyingSpan();
     L.trackLocalY = (lo + hi) / 2;
-    L.trackDist = Math.max(controls.minDistance, fitDist(hi - lo, stackRadius(), 0.72));
+    L.trackDist = Math.max(controls.minDistance, fitDist(hi - lo, stackRadius(), 0.72, THREE.MathUtils.degToRad(6))); // the chase's side view
   }
 
   function ignite(stage, t) {
@@ -1100,7 +1100,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     }
   }
   // A spent stage (or the fairing) leaves the flight group and drifts back and down in world space, tumbling.
-  // drift: seconds of a slow push-off (~1 m/s, the stage-separation pushers) before it falls behind.
+  // A dropped part (spent stage, fairing half) falls back out of frame and is hidden after ~2 s (rounds 16–17).
   function drop(part, { spread = false, drift = 0 } = {}) {
     L.gone.add(part);
     root.attach(part.group);
@@ -1115,8 +1115,8 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       if (!d.part.group.visible) continue;
       d.t += dt;
       const fall = Math.max(0, d.t - d.drift);
-      d.part.group.position.addScaledVector(d.down, dt * (d.t < d.drift ? 1 * scale : 0.4 + fall * 1.6));
-      d.part.group.rotateOnWorldAxis(d.axis, dt * (d.t < d.drift ? 0.04 : 0.25));
+      d.part.group.position.addScaledVector(d.down, dt * (d.t < d.drift ? 1 * scale : 0.6 + fall * 6));
+      d.part.group.rotateOnWorldAxis(d.axis, dt * (d.t < d.drift ? 0.04 : 0.35));
       if (d.spread) {
         for (const piece of d.part.pieces) {
           if (Math.abs(piece.explode.dir.x) < 0.3) continue; // fairing halves and their doors swing out
@@ -1124,7 +1124,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
           piece.mesh.rotateZ(Math.sign(piece.explode.dir.x) * dt * -0.5);
         }
       }
-      if (d.t > 4 + d.drift) d.part.group.visible = false;
+      if (d.t > 2.2 + d.drift) d.part.group.visible = false; // out of frame: gone
     }
   }
 
@@ -1163,30 +1163,6 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     for (const x of due) x.fn();
   }
 
-  // The onboard view after first-stage separation: a camera on the upper stage, just above the separation plane
-  // and off to the side, looking back down the vehicle at the booster drifting off (the Earth below, as the
-  // camera-relative backdrop). Held 2 s, then a cut back to the tracker.
-  function toOnboard() {
-    L.cam = "onboard";
-    L.onboardUntil = L.real + 2;
-    onboardCam();
-  }
-  const obEye = new THREE.Vector3();
-  const obAim = new THREE.Vector3();
-  function onboardCam() {
-    const r = stackRadius();
-    const sepY = L.sepPart ? L.sepPart.slotY + L.sepPart.height - L.pivotY : 0; // the plane in flight-local units
-    const side = new THREE.Vector3(Math.sin(0.58), 0, Math.cos(0.58));
-    L.flight.localToWorld(obEye.set(side.x * r * 3.4, sepY + r * 4.5, side.z * r * 3.4));
-    if (L.sepPart?.group.visible) L.sepPart.group.localToWorld(obAim.set(0, L.sepPart.height * 0.3, 0));
-    else L.flight.localToWorld(obAim.set(0, sepY - r * 8, 0));
-    camera.position.copy(obEye);
-    controls.target.copy(obAim);
-    camera.lookAt(obAim);
-    framedR = r * 3;
-    framedMode = "focus";
-  }
-
   function onEvent(e) {
     L.label = EVENT_LABEL[e.type] ?? e.type.toUpperCase();
     L.labelUntil = L.real + 1.5;
@@ -1213,19 +1189,15 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         flashAt(e.stage, "meco");
         break;
       case "sep": {
+        // Rounds 16–17: the spent stage detaches and falls out of frame within ~2 s (then it is gone); the chase
+        // camera eases out and down for a beat so it falls through the frame.
         const spent = parts.filter((p) => p.stageIndex === e.stage && !L.gone.has(p));
-        const drift = L.cam === "launch" ? 0 : 1.5; // the story keeps the quick fall
-        for (const part of spent) drop(part, { drift });
+        for (const part of spent) drop(part);
         sfx.play("clunk", { rate: 0.8, gain: 0.8 });
         retarget();
-        // Cold-gas thrusters at the top of the spent stage start turning it around (its flip comes later).
         const top = spent.reduce((a, b) => (!a || b.slotY > a.slotY ? b : a), null);
-        if (top && drift) puffsOn(top, [0.15, 0.55, 0.95, 1.35]);
-        // The onboard view: a camera on the upper stage looking back at the booster (and the Earth) for 2 s.
-        if (e.stage === 0 && L.cam === "track" && !L.cut && top) {
-          L.sepPart = top;
-          L.cut = { t: 0, up: 0, fired: false, hold: 0, fn: toOnboard };
-        }
+        if (top) puffsOn(top, [0.1, 0.45]); // cold-gas push-off from its top ring
+        L.chase.sep0 = L.real;
         break;
       }
       case "tea-teb":
@@ -1252,7 +1224,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         break;
       }
       case "seco":
-        for (const pl of L.plumes) pl.dead = true;
+        for (const pl of L.plumes) if (!pl.dead) pl.flicker = L.real + 0.3; // sputters out like MECO
         break;
     }
   }
@@ -1346,85 +1318,121 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     const d = Math.max(controls.minDistance, H * 1.9);
     return { position: new THREE.Vector3(Math.sin(az) * d, Math.max(0.5, H * 0.12), Math.cos(az) * d), target: new THREE.Vector3(0, H * 0.39, 0) };
   }
-  const aim = new THREE.Vector3();
-  function padCam(dt) {
-    if (L.cam !== "pad" || !L.padCam || L.cut) return; // held while fading to the tracker
-    const padY = L.pad ? L.pad.position.y : 0;
-    const k = L.padCam.k.v;
-    camera.position.lerpVectors(L.padCam.from, L.padCam.pose.position, k).y += padY * k;
-    // Aim: the stack's middle on the pad, then the climbing vehicle (eased, so the tilt up is smooth).
-    L.flight.localToWorld(aim.set(0, L.trackLocalY ?? 0, 0));
-    aim.y = Math.max(aim.y, L.padCam.pose.target.y + padY);
-    L.padCam.aim.lerp(aim, 1 - Math.exp(-dt * 3));
-    controls.target.lerpVectors(L.padCam.fromTarget, L.padCam.aim, k);
-    camera.lookAt(controls.target);
+  // ---------- the chase camera (design rounds 16–17): one camera for the whole flight, no cuts ----------
+  // Phase rules set goals and the camera eases toward them (first-order, ~1 s), so pad → climb → look-back →
+  // staging → orbit is one continuous move. anchor 0 ties the camera to the pad (the low pad camera rides down
+  // with the deck as it drops away under the climbing vehicle), 1 ties it to the vehicle (azimuth, elevation and
+  // distance around the look point). The look point is the vehicle's middle plus an eased offset (down toward
+  // the receding pad in the look-back, toward a falling stage at separation).
+  //   pad (T−10 → liftoff): low beside the tower, looking up; the vehicle pitches over in the plane across the view
+  //   rise (liftoff → tower clear + 1.5 s): lifts off the deck with the vehicle (anchor 0 → 1), elevation → 6°
+  //   look-back (4.5 s after that): swings up and round to look down past the engines at the pad and ground
+  //   staging (3 s after each separation): eases out and down so the spent stage falls through the frame
+  //   orbit (after the ascent): 14° above, a little farther, a slow drift round the vehicle
+  const TAU = { ang: 0.9, dist: 1.1, anchor: 0.9, look: 0.5 };
+  const bump = (u) => (u <= 0 || u >= 1 ? 0 : Math.sin(Math.PI * u) ** 2);
+  const ease1 = (x, goal, dt, tau) => x + (goal - x) * (1 - Math.exp(-dt / tau));
+  const chaseV = new THREE.Vector3();
+  const chaseT = new THREE.Vector3();
+  const chaseLook = new THREE.Vector3();
+  const chaseDown = new THREE.Vector3();
+  function padCamPose() {
+    const H = stackHeight();
+    const tw = L.anchors?.tower?.position;
+    const phiT = tw ? Math.atan2(tw.x, tw.z) : 0.58 + 2.4;
+    const opts = [phiT - 1.15, phiT + 1.15];
+    const near = (a) => Math.abs(Math.atan2(Math.sin(a - 0.58), Math.cos(a - 0.58)));
+    const az = near(opts[0]) < near(opts[1]) ? opts[0] : opts[1];
+    // Low (12 % of the stack's height) and 1.9 heights out: the base and the deck sit ~20 % up the frame, clear of
+    // the button bar, with the nose still in.
+    const d = Math.max(controls.minDistance, H * 1.9);
+    return { az, position: new THREE.Vector3(Math.sin(az) * d, Math.max(0.5, H * 0.12), Math.cos(az) * d), target: new THREE.Vector3(0, H * 0.39, 0) };
   }
-  // The cut's black frame: the tracker, side-on from the home side, a little above the vehicle.
-  function toTracker() {
-    L.cam = "track";
-    const el = THREE.MathUtils.degToRad(8);
-    const dir = new THREE.Vector3(Math.sin(0.58) * Math.cos(el), Math.sin(el), Math.cos(0.58) * Math.cos(el));
-    const place = () => {
-      const goal = L.flight.localToWorld(new THREE.Vector3(0, L.trackLocalY, 0));
-      controls.target.copy(goal);
-      camera.position.copy(goal).addScaledVector(dir, L.trackDist);
-      camera.lookAt(goal);
-    };
-    place(); // the tracker's direction first: retarget sizes the distance for the camera's pitch
-    retarget();
-    place();
-    L.tracking = true;
-    if (!L.lookedDown) {
-      L.lookedDown = true;
-      later(0.6, () => L.cam === "track" && !L.cut && (L.cut = { t: 0, up: 0, fired: false, hold: 0, fn: toLookDown }));
+  function chaseGoals(t, done) {
+    const c = L.chase;
+    const tc = L.towerClear;
+    const g = { anchor: 1, az: c.azSide, el: THREE.MathUtils.degToRad(6), dist: L.trackDist, look: 0 /* metres down, as × dist */, lookUp: 0 };
+    if (!done) {
+      // pad → rise: off the deck with the vehicle by tower clear + 1.5 s (sim time; real time in the opening)
+      g.anchor = t <= 0 ? 0 : THREE.MathUtils.smoothstep(t, 0.35 * tc, tc + 1.5);
+      g.el = THREE.MathUtils.lerp(c.elPad, THREE.MathUtils.degToRad(6), g.anchor);
+      g.dist = THREE.MathUtils.lerp(c.distPad, L.trackDist, g.anchor);
+      g.lookUp = (1 - g.anchor) * c.lookPad; // the pad shot aims a little below the vehicle's middle
+      if (g.anchor > 0.98 && c.sweep0 == null) c.sweep0 = L.real;
     }
+    // look-back: up and round, looking down past the engines at the receding pad
+    if (c.sweep0 != null) {
+      const b = bump((L.real - c.sweep0) / 4.5);
+      g.az += THREE.MathUtils.degToRad(35) * b;
+      g.el += THREE.MathUtils.degToRad(34) * b;
+      g.dist *= 1 + 0.35 * b;
+      g.look += 0.22 * b; // the vehicle stays in frame, the ground beyond it
+    }
+    // staging: ease out and look down so the spent stage falls through the frame
+    if (c.sep0 != null) {
+      const b = bump((L.real - c.sep0) / 3);
+      g.dist *= 1 + 0.35 * b;
+      g.look += 0.25 * b;
+    }
+    if (done) {
+      g.el = THREE.MathUtils.degToRad(14);
+      g.dist = L.trackDist * 1.25;
+      c.drift += 0; // the drift is applied in chaseCam
+    }
+    return g;
   }
-  // The look-down (design round 14 C): a camera beside the engines looking down past the plume at the pad,
-  // the coastline and the ground map shrinking away; 1.5 s, then back to the tracker (before Max-Q).
-  function toLookDown() {
-    L.cam = "down";
-    L.downUntil = L.real + 1.5;
-    lookDownCam();
-  }
-  function lookDownCam() {
-    const r = stackRadius();
-    const base = parts[0] ? parts[0].slotY - L.pivotY : -L.pivotY;
-    const side = new THREE.Vector3(Math.sin(0.58), 0, Math.cos(0.58));
-    L.flight.localToWorld(obEye.set(side.x * r * 3.2, base + r * 6, side.z * r * 3.2)); // out of the plume's glow
-    // Straight down at the ground (the pad is always right below: the scene drops the pad instead of flying
-    // downrange); the plume trails back at the pitch angle, mostly out of frame. A small horizontal lean keeps
-    // lookAt's roll steady. The DoF focuses on the ground.
-    const padY = L.pad ? L.pad.getWorldPosition(obAim).y : obEye.y - 60;
-    obAim.set(obEye.x * 0.85, padY, obEye.z * 0.85);
-    camera.position.copy(obEye);
-    controls.target.copy(obAim);
-    camera.lookAt(obAim);
-    framedR = r * 3;
-    framedMode = "focus";
+  function chaseCam(dt, t, done = false) {
+    const c = L.chase;
+    const g = chaseGoals(t, done);
+    if (done) c.azDrift += dt * 0.04;
+    let dAz = g.az + c.azDrift - c.az;
+    dAz = Math.atan2(Math.sin(dAz), Math.cos(dAz));
+    c.az += dAz * (1 - Math.exp(-dt / TAU.ang));
+    c.el = ease1(c.el, g.el, dt, TAU.ang);
+    c.dist = ease1(c.dist, g.dist, dt, TAU.dist);
+    c.anchor = ease1(c.anchor, g.anchor, dt, TAU.anchor);
+    c.look = ease1(c.look, g.look, dt, TAU.look);
+    c.lookUp = ease1(c.lookUp, g.lookUp, dt, TAU.look);
+    c.trackY = ease1(c.trackY ?? L.trackLocalY, L.trackLocalY, dt, TAU.dist); // the middle moves up at each drop
+    // Look point: the vehicle's middle, lowered for the pad shot, pulled down toward the ground / falling stage.
+    L.flight.localToWorld(chaseT.set(0, c.trackY, 0));
+    chaseT.y -= c.lookUp;
+    chaseDown.set(0, -1, 0);
+    chaseLook.copy(chaseT).addScaledVector(chaseDown, c.look * c.dist);
+    // Vehicle-anchored position, and the pad-anchored one riding down with the deck.
+    chaseV.set(Math.sin(c.az) * Math.cos(c.el), Math.sin(c.el), Math.cos(c.az) * Math.cos(c.el)).multiplyScalar(c.dist).add(chaseT);
+    const padY = L.pad ? L.pad.position.y : 0;
+    const p = L.padCam.pose.position;
+    camera.position.set(p.x, p.y + padY, p.z).lerp(chaseV, c.anchor);
+    // The first 1.8 s: from wherever the builder's camera was into the pad shot.
+    const k = L.padCam.k.v;
+    if (k < 1) camera.position.lerpVectors(L.padCam.from, camera.position, k);
+    controls.target.copy(k < 1 ? chaseLook.clone().lerp(L.padCam.fromTarget, 1 - k) : chaseLook);
+    camera.lookAt(controls.target);
+    framedR = stackRadius() * 3;
+    framedMode = "stack";
   }
 
-  // ---------- sky during a launch (design rounds 14 C, 15 (3)) ----------
-  // UI4's sky dome at the vehicle's altitude (skyAt: dusk blue at the pad, black by ~60 km, with a sunset band
-  // low on the horizon), faded in from the builder's dark background over the first 2 s of the countdown. main
-  // blends state.sky into the page: the stars thicken as the sky darkens, and the fog takes the horizon's colour
-  // and opens with the climb so the pad and ground map fall away into the haze.
-  const SKY_SUN = new THREE.Vector3(-0.85, -0.075, -0.2).normalize(); // just set, behind the pad: deep blue twilight
-  const SKY_HORIZON_K = 0.55; // the orange band kept low-key: the page's light UI text stays readable over it
+  // ---------- sky during a launch (round 17: a night launch) ----------
+  // The dome keeps the builder's near-black sky with every star; a thin deep-blue haze band sits on the horizon
+  // at the pad and fades out by ~30 km (and on the Moon there is none). main blends state.sky into the page: the
+  // fog takes the haze and opens with the climb so the pad and ground fall away into the dark.
+  const NIGHT_HAZE = new THREE.Color(0.012, 0.026, 0.06); // linear: a thin band, the sky above stays black
   const skyZ = new THREE.Color();
   const skyH = new THREE.Color();
   const skyF = new THREE.Color();
+  const SUN_DOWN = new THREE.Vector3(0, -1, 0); // the dome's sun glow stays out of sight
   function updateSky(dt, alt_m, body = "earth") {
     if (!L?.sky) return;
     L.skyW = Math.min(1, L.skyW + dt / 2);
-    const sky = skyAt(Math.max(0, alt_m), SKY_SUN, body);
-    skyZ.copy(L.bg0).lerp(sky.zenith, L.skyW);
-    skyH.copy(L.bg0).lerp(sky.horizon.multiplyScalar(SKY_HORIZON_K), L.skyW);
-    L.sky.set({ zenith: skyZ, horizon: skyH }, SKY_SUN);
+    const haze = body === "moon" ? 0 : 1 - THREE.MathUtils.smoothstep(Math.max(0, alt_m), 0, 30000);
+    skyZ.copy(L.bg0);
+    skyH.copy(L.bg0).lerp(NIGHT_HAZE, haze * L.skyW);
+    L.sky.set({ zenith: skyZ, horizon: skyH }, SUN_DOWN);
     L.sky.update(camera);
     const dist = camera.position.distanceTo(controls.target);
     const below = L.pad ? Math.max(0, -L.pad.position.y) : 0;
-    // Fog: between zenith and horizon (the distant haze, not the horizon's glow).
-    state.sky = { w: L.skyW, horizon: skyF.copy(skyZ).lerp(skyH, 0.45), stars: sky.stars, near: dist + 5, far: dist + 300 + below * 1.5 };
+    state.sky = { w: L.skyW, horizon: skyF.copy(L.bg0).lerp(NIGHT_HAZE, 0.5 * haze), stars: 1, near: dist + 5, far: dist + 300 + below * 1.5 };
   }
   // The sky's altitude after the ascent: the booster's on its way down, the destination's on a landing, else orbit.
   function endingSky() {
@@ -1442,7 +1450,10 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     if (L.done) {
       if (L.drifting) L.flight.rotateY(dt * 0.15); // slow roll in orbit; the outcome line stays in the HUD
       updateDebris(dt);
+      runTimers();
+      for (const p of L.fx?.puffs ?? []) p.update(dt);
       if (E) endingUpdate(dt);
+      else chaseCam(dt, Infinity, true); // in orbit: one short pass above Earth, then hold
       if (L) updateSky(dt, ...endingSky());
       return;
     }
@@ -1451,7 +1462,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     padSequence(t, dt);
     if (t < 0) {
       L.onTelemetry({ countdown: Math.ceil(-t), label: L.real < L.labelUntil ? L.label : "" });
-      padCam(dt);
+      chaseCam(dt, t);
       updateSky(dt, 0);
       return;
     }
@@ -1491,29 +1502,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       setBackdrop(L.earth, 2500, craftR() * 4.5);
     }
 
-    // Camera: the low pad camera until the vehicle clears the tower (then a cut through black to the tracker);
-    // without it (story), tracking once the rocket leaves the launch frame.
-    if (L.cam === "onboard" || L.cam === "down") {
-      if (L.cam === "onboard") onboardCam();
-      else lookDownCam();
-      if (L.real >= (L.cam === "onboard" ? L.onboardUntil : L.downUntil) && !L.cut) L.cut = { t: 0, up: 0, fired: false, hold: 0, fn: toTracker };
-    } else if (L.cam === "pad") {
-      padCam(dt);
-      // The fade starts inside the real-time opening (the compressed climb after it would drag the pad along).
-      if (t >= L.towerClear - 0.25 && !L.cut) L.cut = { t: 0, up: 0, fired: false, hold: 0, fn: toTracker };
-    } else if (below > 0 || L.tracking) {
-      if (!L.tracking) {
-        L.tracking = true;
-        camAnim?.cancel();
-        retarget();
-      }
-      const goal = L.flight.localToWorld(new THREE.Vector3(0, L.trackLocalY, 0));
-      const k = 1 - Math.exp(-dt * 2.5);
-      controls.target.lerp(goal, k);
-      const d = camera.position.distanceTo(controls.target);
-      camDir.copy(camera.position).sub(controls.target).normalize();
-      camera.position.copy(controls.target).addScaledVector(camDir, d + (L.trackDist - d) * k);
-    }
+    chaseCam(dt, t);
 
     L.onTelemetry({
       t,
@@ -1528,7 +1517,10 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
 
   function finishLaunch(s) {
     L.done = true;
-    for (const pl of L.plumes) pl.dead = true;
+    for (const pl of L.plumes) {
+      pl.dead = true;
+      pl.plume.update(0, { throttle: 0, ambientPressure_Pa: 0, cameraDistance: 10 }); // no plume left lit (SECO can land on this frame)
+    }
     const types = new Set(L.events.map((e) => e.type));
     const summary = L.sim.summary;
     const inOrbit = types.has("orbit");
@@ -1538,24 +1530,13 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     state.busy--;
     state.launch = "done";
     L.onTelemetry({ final: true, outcome: summary.outcome, inOrbit, summary, alt_m: s.alt_m });
-    if (inOrbit && L.arrival?.legs?.length) {
-      startEnding(L.arrival); // the planet ending (≤ 8 s): orbit, transfer, arrival, landing
+    const away = L.arrival?.body && L.arrival.body !== "earth";
+    if (inOrbit && away && L.arrival?.legs?.length) {
+      startEnding(L.arrival); // Moon / Mars: on to the destination (flight.js takes this over)
     } else if (inOrbit) {
-      // In orbit: frame the payload, orbit it slowly, unfold its hinges (fairing is long gone).
-      const payload = parts.find((p) => p.kind === "payload" && !L.gone.has(p));
-      controls.autoRotate = true;
-      controls.autoRotateSpeed = payload ? 0.6 : 0.35;
-      if (payload && deployables(payload).length) {
-        const gen = state.gen;
-        state.deploying = true;
-        L.drifting = false; // hold the roll while the camera orbits the payload
-        frameWorldPart(payload);
-        wait(D(900))
-          .then(() => (gen === state.gen ? deploy(payload) : false))
-          .finally(() => {
-            if (gen === state.gen) state.deploying = false;
-          });
-      }
+      // Earth orbit (round 17): the vehicle stays intact on one short pass above Earth, then holds on the honest
+      // end line (in orbit, or stranded when the Δv falls short).
+      L.onTelemetry({ ending: true, final: true, arrival: L.arrival, booster: null });
     } else if (maxAlt < 50) {
       // Pad abort: thrust below weight, the engines shut down and it stays on the pad.
       state.shake = 0.3;
@@ -1612,8 +1593,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       real: -countdown,
       countdown,
       clampArms: clamps,
-      cam: opening == null ? "launch" : "pad",
-      towerClear: opening ?? Infinity,
+      towerClear: opening ?? 2.5, // the chase camera is off the deck by tower clear + 1.5 s
       ignited: false,
       said: {},
       cut: null,
@@ -1674,14 +1654,29 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     L.earth.R = PLANET_R.earth;
     L.earth.object3d.visible = false;
     scene.add(L.earth.object3d);
-    if (L.cam === "pad") {
-      camAnim?.cancel();
-      const pose = padCamPose();
-      L.padCam = { from: camera.position.clone(), fromTarget: controls.target.clone(), pose, aim: pose.target.clone(), k: { v: 0 } };
-      framedR = stackRadius() * 3;
-      framedMode = "stack";
-      run(L.padCam.k, { v: 1, duration: D(1800), ease: "inOutCubic" });
-    } else frameSpan(0, H + L.riseMax, stackRadius(), 0.85, { pitch: HERO_PITCH, mode: "stack" });
+    // The chase camera starts on the pad shot (eased in from the builder's view over 1.8 s); the vehicle pitches
+    // over in the plane across that view, so the climb's side view needs no swing round.
+    camAnim?.cancel();
+    const pose = padCamPose();
+    L.padCam = { from: camera.position.clone(), fromTarget: controls.target.clone(), pose, k: { v: 0 } };
+    run(L.padCam.k, { v: 1, duration: D(1800), ease: "inOutCubic" });
+    L.tiltAxis.set(-Math.sin(pose.az), 0, -Math.cos(pose.az));
+    const toCam = pose.position.clone().sub(pose.target);
+    L.chase = {
+      azSide: pose.az,
+      elPad: Math.asin(toCam.y / toCam.length()),
+      distPad: toCam.length(),
+      lookPad: L.flight.localToWorld(new THREE.Vector3(0, L.trackLocalY, 0)).y - pose.target.y,
+      az: pose.az,
+      el: Math.asin(toCam.y / toCam.length()),
+      dist: toCam.length(),
+      anchor: 0,
+      look: 0,
+      lookUp: L.flight.localToWorld(new THREE.Vector3(0, L.trackLocalY, 0)).y - pose.target.y,
+      azDrift: 0,
+      sweep0: null,
+      sep0: null,
+    };
     changed();
     return new Promise((resolve) => (L.resolve = resolve));
   }
@@ -1855,7 +1850,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     if (!arrival.body || arrival.body === "earth") {
       E.legs = [];
       if (booster?.returns && booster.samples?.length) E.legs.push({ type: "booster", seconds: 4.4 });
-      E.legs.push({ type: arrival.success ? "earth-payload" : "stranded", seconds: 3.4, body: "earth" });
+      E.legs.push({ type: arrival.success ? "earth-payload" : "stranded", seconds: arrival.success ? 5 : 3.4, body: "earth" });
     }
     state.ending = true;
     controls.autoRotate = false;
@@ -1875,6 +1870,12 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         B.outer.quaternion.identity();
         for (const plume of B.plumes) plume.update(0, { throttle: 0, ambientPressure_Pa: P0, cameraDistance: 10 });
         B.touched = true;
+      }
+      if (leg?.type === "earth-payload" && E.release) {
+        if (!E.release.done) release();
+        E.release.payload.group.position.addScaledVector(E.release.dir, 1.2 * scale);
+        for (const piece of deployables(E.release.payload)) applyDeploy(piece, 1);
+        E.release = null; // its deploy promise finds it gone
       }
       if (leg?.type === "descent" && E.lander) {
         E.lander.part.group.position.y = E.lander.touchY;
@@ -1947,8 +1948,10 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         E.origin = planet;
         frameCraft(5.5, 18, 1); // on the black frame of the cut
         setBackdrop(planet, 0, E.r * 4.5);
+        // Payload release (design round 14 E): the stack rolls slowly over the limb, the payload springs off at
+        // ~1 m/s along the vehicle axis, the spent stage backs away, then the payload unfolds.
         const payload = parts.find((p) => p.kind === "payload" && !L.gone.has(p));
-        if (leg.type === "earth-payload" && payload && deployables(payload).length) deploy(payload, { gap: 500 });
+        if (leg.type === "earth-payload" && payload) E.release = { at: 0.6, payload, done: false };
         break;
       }
     }
@@ -2153,6 +2156,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       }
     }
     if (leg?.type === "booster" && E.booster && !E.booster.ended) boosterUpdate(dt);
+    if (leg?.type === "earth-payload" && E.release) releaseUpdate(dt);
     if (leg?.type === "descent" && E.lander) {
       const q = Math.min(1, E.legT / Math.max(0.1, leg.seconds));
       const ease = 1 - (1 - q) ** 3;
@@ -2162,6 +2166,27 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     E.patch?.update?.(E.legT);
     E.dust.update(dt);
     if (leg && E.legT >= leg.seconds && !E.cut) nextLeg();
+  }
+  const SPRING_MS = 1; // payload separation speed, m/s (springs)
+  function release() {
+    const r = E.release;
+    r.done = true;
+    r.dir = new THREE.Vector3(0, 1, 0).applyQuaternion(L.flight.getWorldQuaternion(tmpQ2)).normalize();
+    root.attach(r.payload.group);
+    L.gone.add(r.payload);
+    L.onTelemetry({ ending: true, leg: { type: "payload release" } });
+    sfx.play("clunk", { rate: 1.4, gain: 0.4 });
+    if (deployables(r.payload).length) r.deploy = wait(D(400)).then(() => (E?.release === r ? deploy(r.payload, { gap: 500 }) : false));
+  }
+  function releaseUpdate(dt) {
+    const r = E.release;
+    if (!r.done) {
+      if (E.legT >= r.at) release();
+      return;
+    }
+    r.payload.group.position.addScaledVector(r.dir, SPRING_MS * scale * dt);
+    r.payload.group.rotateOnWorldAxis(r.dir, dt * 0.05);
+    L.flight.position.addScaledVector(r.dir, -0.5 * SPRING_MS * scale * dt); // the stage backs off
   }
   function finishEnding() {
     state.ending = false;
@@ -2393,11 +2418,8 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     if (L && !L.done) {
       L.real = Math.max(L.real, L.keys[L.keys.length - 1][1] + 0.01);
       L.skipEnding = true;
-      if (L.cut || L.cam === "pad" || L.cam === "onboard") {
-        L.cut = null;
-        state.cut = 0;
-        if (L.cam !== "track" && L.cam !== "launch") toTracker();
-      }
+      L.cut = null;
+      state.cut = 0;
       return "launch";
     }
     if (E && state.ending) {
@@ -2469,7 +2491,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         createDroneShip({ size_u: 0.5 }).object3d,
         ...(() => {
           const layout = padLayout({ baseRadius_u: 0.5 });
-          return [createVents([{ position: new THREE.Vector3() }], { scale_u: 0.2 }), createDeluge({ layout }), createTrenchJet({ layout }), createSteamCloud({ layout }), createCondensationHalo({}), createSkyDome({ radius_u: 1 })].map((fx) => fx.object3d);
+          return [createVents([{ position: new THREE.Vector3() }], { scale_u: 0.2 }), createDeluge({ layout }), createTrenchJet({ layout }), createSteamCloud({ layout }), createCondensationHalo({}), createSkyDome({ radius_u: 1 }), createIgnitionFlash({}), createColdGasPuffs({})].map((fx) => fx.object3d);
         })(),
       );
       warmFx.position.set(0, -50, 0);
