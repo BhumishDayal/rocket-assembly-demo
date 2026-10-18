@@ -831,6 +831,7 @@ function cloneMat(src) {
 }
 
 const scaled = new WeakSet();
+const probeOf = new WeakMap(); // lander leg mesh → its contact-probe geometry (drawn on the landerOf copy only)
 function toUnits(geo) {
   if (!scaled.has(geo)) {
     geo.scale(S, S, S);
@@ -844,7 +845,7 @@ function toUnits(geo) {
 //   sym  = axisymmetric piece on the axis (own alternating spin); off-axis pieces share the part's spin so a
 //          ring of shells / a cluster rotates rigidly in the exploded view (see assignSpins)
 //   kind = "shell" | "interior" | "detail"; engine = engine index or null
-function piece(geo, material, { x = 0, y = 0, z = 0, ry = 0, order = 0, dir = UP, dist = 0.4, side, ax = null, sym = false, kind = "detail", engine = null, edges = kind === "shell", lineGeo = null, fineGeo = null, deploy = null, follow = null, lander = null, landerLeg = null, dock = false } = {}) {
+function piece(geo, material, { x = 0, y = 0, z = 0, ry = 0, order = 0, dir = UP, dist = 0.4, side, ax = null, sym = false, kind = "detail", engine = null, edges = kind === "shell", lineGeo = null, fineGeo = null, deploy = null, follow = null, lander = null, landerLeg = null, dock = false, probe = null } = {}) {
   const g = toUnits(geo);
   g.computeBoundingBox();
   const xrayShell = XRAY && kind === "shell";
@@ -886,6 +887,7 @@ function piece(geo, material, { x = 0, y = 0, z = 0, ry = 0, order = 0, dir = UP
   // Landable sub-part (landerOf): lander = "descent" | "ascent" | "leg"; a leg's hinge is landerLeg, kept out of
   // `deploy` so the payload's own deploy (the SLA petals) does not swing it; dock marks the docking apex.
   if (lander) mesh.userData.lander = lander;
+  if (probe) probeOf.set(mesh, toUnits(probe));
   if (dock) mesh.userData.dock = true;
   // follow points are given like the deploy pivot (metres, the geometry's own frame).
   let fol = null;
@@ -966,8 +968,11 @@ export function bellExits(spec) {
 //              one turbopump                                                                     = 15 pieces
 // Entry: { geo, mat, ax: [side, rank] around the chamber core, sym, ds (double-sided) }.
 const kitCache = new Map();
-function engineKit({ exitD_m, L, vacuum, chambers = 1, overall = false }) {
-  const key = [exitD_m, L, vacuum, chambers, overall].join("|");
+// extFrac: a sourced nozzle extension (visuals.engines[id].extension.startRadiusFraction): the bell splits
+// where its radius reaches extFrac × the exit radius, and the extension below is a smooth film-cooled shell
+// (no tubes, darker steel), as on the F-1.
+function engineKit({ exitD_m, L, vacuum, chambers = 1, overall = false, extFrac = 0 }) {
+  const key = [exitD_m, L, vacuum, chambers, overall, extFrac].join("|");
   if (kitCache.has(key)) return kitCache.get(key);
   const { Re, off, twin } = bellGeometry(exitD_m, chambers, overall);
   // Visual proportions of the engine length (no data): bell share, converging section, chamber, dome.
@@ -986,12 +991,24 @@ function engineKit({ exitD_m, L, vacuum, chambers = 1, overall = false }) {
   // Bell split into the nozzle extension (lower) and the regeneratively cooled bell (upper), joined by a
   // bolted flange; a stiffener lip at the exit. Dark steel (darker niobium-like extension on vacuum engines),
   // faint warm tint toward the throat, lighter machined flanges. uv.x repeats the one-ridge texture.
-  const ySplit = (vacuum ? 0.62 : 0.5) * bellL;
+  // the first point down the bell (from the throat) where r ≥ extFrac · Re; radius falls with height
+  const bisect = (target) => {
+    let lo = 0;
+    let hi = bellL;
+    for (let i = 0; i < 40; i++) {
+      const mid = (lo + hi) / 2;
+      if (rAtBell(mid) >= target) lo = mid;
+      else hi = mid;
+    }
+    return lo;
+  };
+  const filmCooled = extFrac > 0 && extFrac < 1;
+  const ySplit = filmCooled ? bisect(extFrac * Re) : (vacuum ? 0.62 : 0.5) * bellL;
   const rs = rAtBell(ySplit);
   const fl = 0.012 * L;
   const ext = [[Re * 1.025, 0.014 * L], [Re * 1.025, 0], ...prof.bell.filter((p) => p[1] > 0 && p[1] < ySplit), [rs, ySplit], [rs * 1.07, ySplit], [rs * 1.07, ySplit - fl]];
   const regen = [[rs * 1.07, ySplit], [rs * 1.07, ySplit + fl], [rAtBell(ySplit + fl), ySplit + fl], ...prof.bell.filter((p) => p[1] > ySplit + fl)];
-  const steel = vacuum ? [0.13, 0.112, 0.095] : [0.15, 0.15, 0.16]; // vacuum: niobium bronze-grey extension
+  const steel = vacuum ? [0.13, 0.112, 0.095] : filmCooled ? [0.1, 0.1, 0.108] : [0.15, 0.15, 0.16]; // vacuum: niobium bronze-grey; film-cooled: darker stainless
   const regenBase = [0.15, 0.15, 0.16];
   const heat = [0.4, 0.25, 0.15];
   const flange = [0.48, 0.48, 0.5];
@@ -1003,8 +1020,8 @@ function engineKit({ exitD_m, L, vacuum, chambers = 1, overall = false }) {
   };
   for (const z of zs) {
     const ge = colorLathe(lathe(ext, 48), ext.length, (j) => (j < 2 || j >= ext.length - 2 ? flange : steel));
-    // a radiatively cooled vacuum extension has no cooling tubes: flat uv.x, so no ridges
-    const extUV = vacuum ? (g) => (g.attributes.uv.array.forEach((_, i, a) => i % 2 === 0 && (a[i] = 0.5)), g) : ridgeUV;
+    // a radiatively cooled vacuum extension or a film-cooled one has no cooling tubes: flat uv.x, so no ridges
+    const extUV = vacuum || filmCooled ? (g) => (g.attributes.uv.array.forEach((_, i, a) => i % 2 === 0 && (a[i] = 0.5)), g) : ridgeUV;
     kit.push({ geo: extUV(ge).translate(0, 0, z), mat: "engine", ax: [-1, 1], sym: !twin, ds: true, kind: "shell" });
     const gr = colorLathe(lathe(regen, 48), regen.length, (j, y) => {
       if (j < 2) return flange;
@@ -1131,7 +1148,7 @@ function heatShieldSectors(g, holeR, innerR, Rout, y, t) {
 function buildEngines(spec, mats) {
   const g = spec.geom;
   const L = g.engineLength_m;
-  const kit = engineKit({ exitD_m: g.exitD_m, L, vacuum: g.vacuum, chambers: g.chambers, overall: g.diameterKind === "overall" });
+  const kit = engineKit({ exitD_m: g.exitD_m, L, vacuum: g.vacuum, chambers: g.chambers, overall: g.diameterKind === "overall", extFrac: g.extension?.startRadiusFraction ?? 0 });
   const { radiusAt, bellL, rc, off } = kit;
   const out = [];
   // Exploded view: each engine's sub-pieces stack along the axis (axisOffset, group "e<i>") and the whole
@@ -1850,15 +1867,15 @@ function capsule(P, mats, g, y0) {
     const pad = lathe([[0.001, -0.05 * dH], [0.13 * dR, -0.05 * dH], [0.14 * dR, -0.03 * dH], [0.06 * dR, -0.012 * dH], [0.001, -0.012 * dH]], 20)
       .applyQuaternion(new THREE.Quaternion().setFromUnitVectors(UP, padUp))
       .translate(tip.x, tip.y, tip.z);
-    const probe = rod(tip.clone().addScaledVector(padUp, -0.05 * dH), tip.clone().addScaledVector(padUp, -0.11 * dH), 0.006 * dR, 1); // contact probe (short: feetY_u includes it)
+    // contact probe below the pad: only on the landerOf copy (a child of the leg, hideable once it has bent)
+    const probe = tint(indexed(rod(tip.clone().addScaledVector(padUp, -0.05 * dH), tip.clone().addScaledVector(padUp, -0.35 * dH), 0.006 * dR, 1)), FOIL.silver);
     const legGeo = merge([
       tint(indexed(rod(hinge, tip, 0.03 * dR)), FOIL.gold),
       tint(indexed(rod(hinge.clone().addScaledVector(tan, 0.12 * dR), tip.clone().lerp(hinge, 0.35), 0.015 * dR, 1)), FOIL.gold),
       tint(indexed(rod(hinge.clone().addScaledVector(tan, -0.12 * dR), tip.clone().lerp(hinge, 0.35), 0.015 * dR, 1)), FOIL.gold),
       tint(indexed(pad), FOIL.silver),
-      tint(indexed(probe), FOIL.silver),
     ]);
-    P(projectUV(legGeo), mats.foil, { order: 0.92 + i * 0.005, dist: 0.25, ax: [-1, 2], kind: "interior", lander: "leg", landerLeg: { axis, pivot: hinge, angle: legAngle, order: 0 } });
+    P(projectUV(legGeo), mats.foil, { order: 0.92 + i * 0.005, dist: 0.25, ax: [-1, 2], kind: "interior", lander: "leg", landerLeg: { axis, pivot: hinge, angle: legAngle, order: 0 }, probe: projectUV(probe) });
   }
   // ascent stage: faceted cabin, black front facets, silver elsewhere; docking tunnel on top
   const aH = lmTop - yAsc;
@@ -2155,8 +2172,10 @@ export function applyDeploy(piece, k) {
 // separate group made of copies of those pieces (shared geometry, own materials, both looks) with its origin
 // at the centre of the descent stage's base:
 //   { group, pieces: [{ mesh, rest, deploy }], deployables (the legs; applyDeploy, same hinge formula),
-//     footprint_u (radius of the deployed footpads), feetY_u (lowest point, legs out, group frame: put the
-//     group at ground − feetY_u), height_u, restPose (where it sits inside the adapter, part frame),
+//     footprint_u (radius of the deployed footpads), feetY_u (underside of the pads, legs out, group frame: put
+//     the group at ground − feetY_u to land), height_u, probes (a contact probe under each pad, children of
+//     the legs) with probeLength_u (they touch first, that far below the pads: cut the engine then, and hide
+//     them with setProbesVisible(false) once landed, as they bend), restPose (inside the adapter, part frame),
 //     detachPose (after transposition: turned over and docked nose to nose on the command module's apex, part
 //     frame; the escape tower is gone by then in reality, hide it), setPartLanderVisible(on) (hides or shows the
 //     original pieces in the payload when the copy takes over) }.
@@ -2183,22 +2202,32 @@ export function landerOf(part) {
     mesh.quaternion.copy(p.rest.quaternion);
     group.add(mesh);
     const deploy = p.landerLeg ? { ...p.landerLeg, pivot: p.landerLeg.pivot.clone().sub(base), axis: p.landerLeg.axis.clone() } : null;
-    return { mesh, rest: { position: mesh.position.clone(), quaternion: mesh.quaternion.clone() }, deploy };
+    return { mesh, rest: { position: mesh.position.clone(), quaternion: mesh.quaternion.clone() }, deploy, probeGeo: probeOf.get(p.mesh) ?? null };
   });
   const deployables = pieces.filter((p) => p.deploy);
-  // Measure with the legs out, then fold them back.
+  // Measure with the legs out (pads only: their undersides are the feet), then fold them back and add the
+  // probes, children of their legs, hanging below the pads.
   for (const d of deployables) applyDeploy(d, 1);
   group.updateMatrixWorld(true);
-  const all = new THREE.Box3().setFromObject(group);
+  const all = new THREE.Box3().setFromObject(group, true); // precise: vertices, not rotated bounding boxes
   let footprint = 0;
   for (const d of deployables) {
-    const b = new THREE.Box3().setFromObject(d.mesh);
+    const b = new THREE.Box3().setFromObject(d.mesh, true);
     for (const x of [b.min.x, b.max.x]) for (const z of [b.min.z, b.max.z]) footprint = Math.max(footprint, Math.hypot(x, z));
   }
   for (const d of deployables) applyDeploy(d, 0);
   group.updateMatrixWorld(true);
-  const folded = new THREE.Box3().setFromObject(group);
+  const folded = new THREE.Box3().setFromObject(group, true);
   const height = folded.max.y - folded.min.y;
+  const probes = pieces
+    .filter((p) => p.probeGeo)
+    .map((p) => {
+      const pr = new THREE.Mesh(p.probeGeo, cloneMat(p.mesh.material));
+      pr.name = `${p.mesh.name}:probe`;
+      p.mesh.add(pr);
+      return pr;
+    });
+  const probeLen = probes.length ? (probes[0].geometry.computeBoundingBox(), probes[0].geometry.boundingBox.getSize(new THREE.Vector3()).length()) : 0;
   const dockP = part.pieces.find((p) => p.mesh.userData.dock);
   const apex = dockP ? dockP.topY : folded.max.y + base.y;
   return {
@@ -2208,6 +2237,11 @@ export function landerOf(part) {
     footprint_u: footprint,
     feetY_u: all.min.y,
     height_u: height,
+    probes,
+    probeLength_u: probeLen,
+    setProbesVisible(on) {
+      for (const pr of probes) pr.visible = !!on;
+    },
     restPose: { position: base.clone(), quaternion: new THREE.Quaternion() },
     detachPose: { position: new THREE.Vector3(base.x, apex + folded.max.y, base.z), quaternion: new THREE.Quaternion().setFromAxisAngle(v3(1, 0, 0), Math.PI) },
     setPartLanderVisible(on) {

@@ -25,7 +25,7 @@ import { animate, spring } from "animejs";
 import { createHologramMaterial } from "./fx/hologram.js";
 import { createBoltFlash } from "./fx/flash.js";
 import { COLORS, LOOK, applyDeploy, deployables, padLayout, setShellOpacity as setShell } from "./parts.js";
-import { createVents, createDeluge, createTrenchJet, createSteamCloud, createCondensationHalo } from "./fx/launchfx.js";
+import { createVents, createDeluge, createTrenchJet, createSteamCloud, createCondensationHalo, createColdGasPuffs, createIgnitionFlash } from "./fx/launchfx.js";
 import { attachPlumes, createPadLight, createPlume, P0 } from "./plume.js";
 import { createPlanet, createSurfacePatch, createDustPuff, createSkyDome, skyAt } from "./planet.js";
 import { createDroneShip } from "./anchors.js";
@@ -1100,20 +1100,23 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     }
   }
   // A spent stage (or the fairing) leaves the flight group and drifts back and down in world space, tumbling.
-  function drop(part, { spread = false } = {}) {
+  // drift: seconds of a slow push-off (~1 m/s, the stage-separation pushers) before it falls behind.
+  function drop(part, { spread = false, drift = 0 } = {}) {
     L.gone.add(part);
     root.attach(part.group);
     const down = new THREE.Vector3(0, -1, 0).applyQuaternion(L.flight.quaternion);
     const axis = new THREE.Vector3().crossVectors(down, L.tiltAxis).normalize();
-    const d = { part, t: 0, down, axis: axis.lengthSq() ? axis : L.tiltAxis.clone(), spread };
+    const d = { part, t: 0, down, axis: axis.lengthSq() ? axis : L.tiltAxis.clone(), spread, drift };
     L.debris.push(d);
+    return d;
   }
   function updateDebris(dt) {
     for (const d of L.debris) {
       if (!d.part.group.visible) continue;
       d.t += dt;
-      d.part.group.position.addScaledVector(d.down, dt * (0.4 + d.t * 1.6));
-      d.part.group.rotateOnWorldAxis(d.axis, dt * 0.25);
+      const fall = Math.max(0, d.t - d.drift);
+      d.part.group.position.addScaledVector(d.down, dt * (d.t < d.drift ? 1 * scale : 0.4 + fall * 1.6));
+      d.part.group.rotateOnWorldAxis(d.axis, dt * (d.t < d.drift ? 0.04 : 0.25));
       if (d.spread) {
         for (const piece of d.part.pieces) {
           if (Math.abs(piece.explode.dir.x) < 0.3) continue; // fairing halves and their doors swing out
@@ -1121,8 +1124,67 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
           piece.mesh.rotateZ(Math.sign(piece.explode.dir.x) * dt * -0.5);
         }
       }
-      if (d.t > 4) d.part.group.visible = false;
+      if (d.t > 4 + d.drift) d.part.group.visible = false;
     }
+  }
+
+  // Staging effects (design round 14 D). flashAt: UI4's ignition flash at a stage's engines (sparks at MECO, the
+  // green TEA-TEB flash, a warm igniter flash). puffsOn: cold-gas puffs from the top ring of a part at the given
+  // seconds from now, aimed out and a little up.
+  function flashAt(stage, kind) {
+    const eng = parts.find((p) => p.kind === "engines" && p.stageIndex === stage);
+    if (!eng) return;
+    L.fx ??= {};
+    const key = kind === "igniter" ? "igniterFlash" : "flash";
+    L.fx[key] ??= createIgnitionFlash(kind === "igniter" ? { color: [1.0, 0.72, 0.4] } : {});
+    eng.group.add(L.fx[key].object3d);
+    L.fx[key].fire({ position: new THREE.Vector3(0, 0, 0), kind: kind === "meco" ? "meco" : "tea-teb", scale_u: eng.radius * 1.2 });
+  }
+  function puffsOn(part, times, { atTop = true } = {}) {
+    L.fx ??= {};
+    const puffs = createColdGasPuffs({ scale_u: part.radius * 0.5 });
+    part.group.add(puffs.object3d);
+    (L.fx.puffs ??= []).push(puffs);
+    const y = atTop ? part.height * 0.92 : part.height * 0.08;
+    times.forEach((dt, i) => {
+      const a = i * 2.1 + 0.4;
+      const dir = new THREE.Vector3(Math.sin(a), 0.35, Math.cos(a)).normalize();
+      later(dt, () => puffs.fire({ position: new THREE.Vector3(Math.sin(a) * part.radius, y, Math.cos(a) * part.radius), dir }));
+    });
+  }
+  // Real-time scheduling inside a launch (paused with it, dropped with it).
+  function later(sec, fn) {
+    (L.timers ??= []).push({ at: L.real + sec, fn });
+  }
+  function runTimers() {
+    if (!L?.timers?.length) return;
+    const due = L.timers.filter((x) => L.real >= x.at);
+    L.timers = L.timers.filter((x) => L.real < x.at);
+    for (const x of due) x.fn();
+  }
+
+  // The onboard view after first-stage separation: a camera on the upper stage, just above the separation plane
+  // and off to the side, looking back down the vehicle at the booster drifting off (the Earth below, as the
+  // camera-relative backdrop). Held 2 s, then a cut back to the tracker.
+  function toOnboard() {
+    L.cam = "onboard";
+    L.onboardUntil = L.real + 2;
+    onboardCam();
+  }
+  const obEye = new THREE.Vector3();
+  const obAim = new THREE.Vector3();
+  function onboardCam() {
+    const r = stackRadius();
+    const sepY = L.sepPart ? L.sepPart.slotY + L.sepPart.height - L.pivotY : 0; // the plane in flight-local units
+    const side = new THREE.Vector3(Math.sin(0.58), 0, Math.cos(0.58));
+    L.flight.localToWorld(obEye.set(side.x * r * 3.4, sepY + r * 4.5, side.z * r * 3.4));
+    if (L.sepPart?.group.visible) L.sepPart.group.localToWorld(obAim.set(0, L.sepPart.height * 0.3, 0));
+    else L.flight.localToWorld(obAim.set(0, sepY - r * 8, 0));
+    camera.position.copy(obEye);
+    controls.target.copy(obAim);
+    camera.lookAt(obAim);
+    framedR = r * 3;
+    framedMode = "focus";
   }
 
   function onEvent(e) {
@@ -1146,13 +1208,31 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         L.vibUntil = L.real + 0.6;
         break;
       case "meco":
-        for (const pl of L.plumes) if (pl.stage === e.stage) pl.dead = true;
+        // The engines cut with a brief flicker and a shower of sparks (UI4's flash, "meco" kind).
+        for (const pl of L.plumes) if (pl.stage === e.stage) pl.flicker = L.real + 0.35;
+        flashAt(e.stage, "meco");
         break;
       case "sep": {
         const spent = parts.filter((p) => p.stageIndex === e.stage && !L.gone.has(p));
-        for (const part of spent) drop(part);
+        const drift = L.cam === "launch" ? 0 : 1.5; // the story keeps the quick fall
+        for (const part of spent) drop(part, { drift });
         sfx.play("clunk", { rate: 0.8, gain: 0.8 });
         retarget();
+        // Cold-gas thrusters at the top of the spent stage start turning it around (its flip comes later).
+        const top = spent.reduce((a, b) => (!a || b.slotY > a.slotY ? b : a), null);
+        if (top && drift) puffsOn(top, [0.15, 0.55, 0.95, 1.35]);
+        // The onboard view: a camera on the upper stage looking back at the booster (and the Earth) for 2 s.
+        if (e.stage === 0 && L.cam === "track" && !L.cut && top) {
+          L.sepPart = top;
+          L.cut = { t: 0, up: 0, fired: false, hold: 0, fn: toOnboard };
+        }
+        break;
+      }
+      case "tea-teb":
+      case "igniter": {
+        // A beat before the upper stage lights: TEA-TEB's green flash (Merlin Vacuum), or the igniter's.
+        const next = e.stage ?? Math.max(-1, ...[...L.gone].map((p) => p.stageIndex ?? -1)) + 1;
+        flashAt(next, e.type === "tea-teb" ? "tea-teb" : "igniter");
         break;
       }
       case "ignition2": {
@@ -1163,7 +1243,10 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       }
       case "fairing": {
         const fairing = parts.find((p) => p.kind === "fairing" && !L.gone.has(p));
-        if (fairing) drop(fairing, { spread: true });
+        if (fairing) {
+          drop(fairing, { spread: true });
+          puffsOn(fairing, [0.1, 0.4], { atTop: true }); // the halves' push-off jets
+        }
         sfx.play("whoosh", { rate: 1.3, gain: 0.6 });
         retarget();
         break;
@@ -1181,8 +1264,10 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     const camD = camera.position.distanceTo(controls.target);
     let padThrottle = 0;
     for (const pl of L.plumes) {
+      if (pl.flicker && L.real >= pl.flicker) pl.dead = true;
       const ramp = THREE.MathUtils.clamp((t - pl.ignite) / 0.25, 0, 1);
-      const thr = pl.dead ? 0 : ramp * (s.stage === pl.stage || t < 1 ? Math.max(0.4, s.throttle ?? 1) : 0);
+      let thr = pl.dead ? 0 : ramp * (s.stage === pl.stage || t < 1 ? Math.max(0.4, s.throttle ?? 1) : 0);
+      if (pl.flicker && !pl.dead) thr *= (0.25 + 0.75 * Math.random()) * ((pl.flicker - L.real) / 0.35); // MECO: sputter out
       pl.plume.update(dt, { throttle: thr, ambientPressure_Pa: ambient, cameraDistance: camD });
       if (pl.stage === 0) padThrottle = Math.max(padThrottle, thr);
     }
@@ -1289,6 +1374,33 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     retarget();
     place();
     L.tracking = true;
+    if (!L.lookedDown) {
+      L.lookedDown = true;
+      later(0.6, () => L.cam === "track" && !L.cut && (L.cut = { t: 0, up: 0, fired: false, hold: 0, fn: toLookDown }));
+    }
+  }
+  // The look-down (design round 14 C): a camera beside the engines looking down past the plume at the pad,
+  // the coastline and the ground map shrinking away; 1.5 s, then back to the tracker (before Max-Q).
+  function toLookDown() {
+    L.cam = "down";
+    L.downUntil = L.real + 1.5;
+    lookDownCam();
+  }
+  function lookDownCam() {
+    const r = stackRadius();
+    const base = parts[0] ? parts[0].slotY - L.pivotY : -L.pivotY;
+    const side = new THREE.Vector3(Math.sin(0.58), 0, Math.cos(0.58));
+    L.flight.localToWorld(obEye.set(side.x * r * 3.2, base + r * 6, side.z * r * 3.2)); // out of the plume's glow
+    // Straight down at the ground (the pad is always right below: the scene drops the pad instead of flying
+    // downrange); the plume trails back at the pitch angle, mostly out of frame. A small horizontal lean keeps
+    // lookAt's roll steady. The DoF focuses on the ground.
+    const padY = L.pad ? L.pad.getWorldPosition(obAim).y : obEye.y - 60;
+    obAim.set(obEye.x * 0.85, padY, obEye.z * 0.85);
+    camera.position.copy(obEye);
+    controls.target.copy(obAim);
+    camera.lookAt(obAim);
+    framedR = r * 3;
+    framedMode = "focus";
   }
 
   // ---------- sky during a launch (design rounds 14 C, 15 (3)) ----------
@@ -1354,7 +1466,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     L.flight.position.y = L.pivotY + rise;
     L.flight.quaternion.setFromAxisAngle(L.tiltAxis, THREE.MathUtils.degToRad(90 - (s.gamma_deg ?? 90)) * L.tiltSign);
     if (L.pad) {
-      if (below > 300) L.padGone = true; // far downrange: never comes back under a falling stage
+      if (below > 5000) L.padGone = true; // ~20 km down (the look-down shot sees it shrink): never comes back
       L.pad.position.y = -below;
       L.pad.visible = !L.padGone;
     }
@@ -1366,7 +1478,11 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     padEffects(dt, t, padThrottle, Math.max(0, s.alt_m));
     updateDebris(dt);
     updateSky(dt, s.alt_m);
+    runTimers();
     L.fx?.halo?.update(dt);
+    L.fx?.flash?.update(dt);
+    L.fx?.igniterFlash?.update(dt);
+    for (const p of L.fx?.puffs ?? []) p.update(dt);
     if (L.real < (L.vibUntil ?? 0)) state.shake = Math.max(state.shake, 0.55); // Max-Q buffeting
     // The Earth's curve comes up under the vehicle once it is in near-space.
     if (L.earth && !L.earthUp && s.alt_m > 55000) {
@@ -1377,7 +1493,11 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
 
     // Camera: the low pad camera until the vehicle clears the tower (then a cut through black to the tracker);
     // without it (story), tracking once the rocket leaves the launch frame.
-    if (L.cam === "pad") {
+    if (L.cam === "onboard" || L.cam === "down") {
+      if (L.cam === "onboard") onboardCam();
+      else lookDownCam();
+      if (L.real >= (L.cam === "onboard" ? L.onboardUntil : L.downUntil) && !L.cut) L.cut = { t: 0, up: 0, fired: false, hold: 0, fn: toTracker };
+    } else if (L.cam === "pad") {
       padCam(dt);
       // The fade starts inside the real-time opening (the compressed climb after it would drag the pad along).
       if (t >= L.towerClear - 0.25 && !L.cut) L.cut = { t: 0, up: 0, fired: false, hold: 0, fn: toTracker };
@@ -1518,10 +1638,12 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       arms0: (anchors?.arms ?? []).map((a) => a.mesh.rotation.y),
       tower0: anchors?.tower?.rotation.z ?? 0,
       maxPolar0: controls.maxPolarAngle,
+      maxDist0: controls.maxDistance,
     };
     retarget();
     controls.autoRotate = false;
     controls.maxPolarAngle = Math.PI * 0.95; // the pad camera looks up from near the deck
+    controls.maxDistance = Infinity; // the look-down aims at a pad kilometres below
     sfx.play("launch-swell");
     // Pad effects: vents at the umbilical ports (where the arms meet the vehicle), deluge, trench jet, steam.
     if (pad) {
@@ -2098,11 +2220,12 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     if (L.anchors?.tower) L.anchors.tower.rotation.z = L.tower0;
     if (L.clamps) L.clamps.mesh.position.y = L.clamps.y0;
     for (const c of L.clampArms ?? []) applyDeploy(c, 0);
-    for (const fx of Object.values(L.fx ?? {})) {
+    for (const fx of Object.values(L.fx ?? {}).flat()) {
       fx.object3d.removeFromParent();
       fx.dispose();
     }
     controls.maxPolarAngle = L.maxPolar0;
+    controls.maxDistance = L.maxDist0;
     if (L.cut) state.cut = 0;
     if (L.sky) {
       scene.remove(L.sky.object3d);
@@ -2270,10 +2393,10 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     if (L && !L.done) {
       L.real = Math.max(L.real, L.keys[L.keys.length - 1][1] + 0.01);
       L.skipEnding = true;
-      if (L.cut || L.cam === "pad") {
+      if (L.cut || L.cam === "pad" || L.cam === "onboard") {
         L.cut = null;
         state.cut = 0;
-        if (L.cam === "pad") toTracker();
+        if (L.cam !== "track" && L.cam !== "launch") toTracker();
       }
       return "launch";
     }

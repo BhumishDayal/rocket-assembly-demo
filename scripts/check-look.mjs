@@ -116,6 +116,37 @@ for (const preset of catalog.presets) {
 }
 expect(sooty > 0, "no soot anywhere");
 
+// Sourced nozzle extension (F-1): the bell splits where its radius is extension.startRadiusFraction × the exit
+// radius; the extension piece is the band below, without cooling tubes (flat uv.x).
+{
+  const spec = buildManifest(presetToBuild(catalog.presets.find((p) => p.id === "saturn-v")), catalog).find((s) => s.id === "s0-engines");
+  const f = spec.geom.extension?.startRadiusFraction;
+  const part = createPart(spec, createMaterials());
+  const ext = part.pieces.find((p) => p.engine === 0 && p.mesh.userData.role === "engine" && p.kind === "shell");
+  if (!f || !ext) failures.push(`F-1 extension: fraction ${f}, piece ${!!ext}`);
+  else {
+    const pos = ext.mesh.geometry.attributes.position;
+    let yTop = -Infinity;
+    let rExit = 0;
+    for (let i = 0; i < pos.count; i++) yTop = Math.max(yTop, pos.getY(i));
+    const c = new THREE.Vector3();
+    ext.mesh.geometry.computeBoundingBox();
+    ext.mesh.geometry.boundingBox.getCenter(c);
+    let rTop = Infinity;
+    for (let i = 0; i < pos.count; i++) {
+      const r = Math.hypot(pos.getX(i) - c.x, pos.getZ(i) - c.z);
+      rExit = Math.max(rExit, r);
+      if (Math.abs(pos.getY(i) - yTop) < 1e-6) rTop = Math.min(rTop, r);
+    }
+    const Re = rExit / 1.025; // the exit lip is 2.5 % proud of the bell
+    expect(Math.abs(rTop / Re - f) < 0.01, `F-1 extension starts at r ${(rTop / Re).toFixed(4)} × exit, want ${f}`);
+    const uv = ext.mesh.geometry.attributes.uv;
+    let flat = true;
+    for (let i = 0; i < uv.count; i++) if (Math.abs(uv.getX(i) - 0.5) > 1e-6) flat = false;
+    expect(flat, "F-1 extension should have no tube ridges");
+  }
+}
+
 // Ablative bells: visuals.engines[id].bellFinish "ablative" draws the bells in the tan matte composite (both
 // looks), still glowing. Tested by setting it on the Delta IV first-stage engine for this check.
 {

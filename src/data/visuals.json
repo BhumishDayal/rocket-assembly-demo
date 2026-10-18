@@ -34,8 +34,15 @@
       "length_m": 5.7912,
       "nozzleExitDiameter_m": 3.5306,
       "diameterKind": "nozzle-exit",
-      "source": "https://web.archive.org/web/20051221114403/http://history.msfc.nasa.gov/saturn_apollo/documents/F-1_Engine.pdf (\"LENGTH 19 ft.\"; \"MAXIMUM NOZZLE EXIT DIAMETER 11 ft. 7 in.\"); bellFinish: https://en.wikipedia.org/w/index.php?title=Rocketdyne_F-1&oldid=1363029414 (\"One notable challenge in the construction of the F-1 was regenerative cooling of the thrust chamber.\" (the lower nozzle extension was cooled by turbine exhaust: same page, \"the turbine exhaust mid-nozzle and the \\\"curtain\\\" cooling manifold\"))",
-      "bellFinish": "regen"
+      "source": "https://web.archive.org/web/20051221114403/http://history.msfc.nasa.gov/saturn_apollo/documents/F-1_Engine.pdf (\"LENGTH 19 ft.\"; \"MAXIMUM NOZZLE EXIT DIAMETER 11 ft. 7 in.\"); bellFinish: https://web.archive.org/web/20051221114403/http://history.msfc.nasa.gov/saturn_apollo/documents/F-1_Engine.pdf (p.3-2: \"The thrust chamber is tubular-walled and regeneratively fuel-cooled, and the nozzle is bell-shaped.\"); extension: https://web.archive.org/web/20051221114403/http://history.msfc.nasa.gov/saturn_apollo/documents/F-1_Engine.pdf (p.3-2: \"The thrust chamber nozzle extension increases the expansion ratio of the thrust chamber from 10:1 to 16:1.\" \"The interior of the nozzle extension is protected from the engine exhaust gas environment (5800 Fahrenheit) by film cooling, using the turbine exhaust gases (1200 Fahrenheit) as the coolant.\" \"The nozzle extension is made of high strength stainless steel.\" Fact table: \"EXPANSION AREA RATIO 16:1 with nozzle extension 10:1 without nozzle extension\". startRadiusFraction = sqrt(10/16) (derived): the extension starts where the bell radius is that share of the exit radius.)",
+      "bellFinish": "regen",
+      "extension": {
+        "fromAreaRatio": 10,
+        "toAreaRatio": 16,
+        "startRadiusFraction": 0.7906,
+        "cooling": "turbine-exhaust film",
+        "material": "stainless steel"
+      }
     },
     "j-2": {
       "length_m": 3.3782,

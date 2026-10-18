@@ -147,6 +147,23 @@ for (const preset of catalog.presets) {
     expect(Math.max(-restBox.min.x, restBox.max.x, -restBox.min.z, restBox.max.z) < Rb && restBox.min.y >= -1e-6, `${id}: folded LM outside the adapter`);
     const dock = part.pieces.find((p) => p.mesh.userData.dock);
     expect(dock && lm.detachPose.position.y > dock.topY && Math.abs(Math.abs(lm.detachPose.quaternion.x) - 1) < 1e-9, `${id}: detach pose should be inverted above the CM apex`);
+    // feet = pad undersides; the probes (children of the legs) reach below them with the legs out
+    expect(lm.probes.length === 4 && lm.probes.every((pr) => lm.deployables.some((d) => d.mesh === pr.parent)) && lm.probeLength_u > 0, `${id}: four probes on the legs`);
+    for (const d of lm.deployables) applyDeploy(d, 1);
+    lm.group.updateMatrixWorld(true);
+    const ownLow = (m) => {
+      const p = m.geometry.attributes.position;
+      const v = new THREE.Vector3();
+      let lo = Infinity;
+      for (let i = 0; i < p.count; i++) lo = Math.min(lo, v.fromBufferAttribute(p, i).applyMatrix4(m.matrixWorld).y);
+      return lo;
+    };
+    const legsLow = Math.min(...lm.deployables.map((d) => ownLow(d.mesh))); // the leg's own vertices, not its probe
+    const probesLow = Math.min(...lm.probes.map((pr) => new THREE.Box3().setFromObject(pr, true).min.y));
+    expect(Math.abs(legsLow - lm.feetY_u) < 1e-6 && probesLow < lm.feetY_u - 0.5 * lm.probeLength_u, `${id}: feetY ${lm.feetY_u.toFixed(4)} should be the pads (${legsLow.toFixed(4)}), probes below (${probesLow.toFixed(4)})`);
+    for (const d of lm.deployables) applyDeploy(d, 0);
+    lm.setProbesVisible(false);
+    expect(lm.probes.every((pr) => !pr.visible), `${id}: setProbesVisible(false)`);
     lm.setPartLanderVisible(false);
     expect(part.pieces.filter((p) => p.mesh.userData.lander).every((p) => !p.mesh.visible), `${id}: setPartLanderVisible(false)`);
   }
