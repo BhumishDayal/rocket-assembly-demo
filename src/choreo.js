@@ -204,10 +204,11 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     leaving.delete(part);
     if (ghostPart === part) ghostPart = null;
     root.remove(part.group, part.ghost);
-    // Pieces and everything under them (edge-line children carry their own geometry and material).
+    // Pieces and everything under them (edge-line children carry their own geometry and material; each piece
+    // also keeps its inactive look, painted or x-ray, in userData.looks).
     part.group.traverse((o) => {
       o.geometry?.dispose();
-      for (const m of [].concat(o.material ?? [])) m.dispose();
+      for (const m of new Set([].concat(o.material ?? [], Object.values(o.userData.looks ?? {})))) m.dispose();
     });
     part.holoGhost?.dispose();
   }
@@ -1401,13 +1402,29 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     tmpV.copy(backdrop.off).multiplyScalar(R);
     tmpV.y -= (1 - b.k.v) * 0.9 * R; // rising into place
     b.planet.object3d.position.copy(tmpV.applyQuaternion(camera.quaternion).add(camera.position));
+    b.planet.object3d.getObjectByName("planet-atmosphere")?.material.uniforms.uCenter?.value.copy(b.planet.object3d.position); // this frame's, not update()'s
     b.planet.setSunDir(tmpV.copy(backdrop.sun).applyQuaternion(camera.quaternion));
     tmpQ.setFromAxisAngle(Y, (performance.now() - b.t0) * 5e-5); // 0.05 rad/s
     b.planet.object3d.quaternion.copy(camera.quaternion).multiply(backdrop.q).multiply(tmpQ);
   }
+  // Scale a planet as a whole: the mesh, and the lengths its shaders use (UI4's photoreal scattering radius and
+  // scale height, bump relief), which otherwise stay at the built radius.
+  function scalePlanet(planet, s) {
+    planet.object3d.scale.setScalar(s);
+    planet.lengths ??= [];
+    if (!planet.lengths.length) {
+      planet.object3d.traverse((o) => {
+        for (const k of ["uRadius", "uR", "uH"]) {
+          const u = o.material?.uniforms?.[k];
+          if (u && typeof u.value === "number") planet.lengths.push({ u, v0: u.value });
+        }
+      });
+    }
+    for (const { u, v0 } of planet.lengths) u.value = v0 * s;
+  }
   function setBackdrop(planet, ms) {
     planet.object3d.visible = true;
-    planet.object3d.scale.setScalar(Math.max(2, E.r * 4.5) / planet.R);
+    scalePlanet(planet, Math.max(2, E.r * 4.5) / planet.R);
     E.backdrop = { planet, k: { v: ms ? 0 : 1 }, t0: performance.now() };
     if (ms) run(E.backdrop.k, { v: 1, duration: D(ms), ease: "outCubic" });
     placeBackdrop();
@@ -1461,7 +1478,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   function bringPlanet(planet, ms) {
     const target = E.F.clone().add(new THREE.Vector3(0, -(planet.R + E.r * 2.6), 0));
     planet.object3d.visible = true;
-    planet.object3d.scale.setScalar(1);
+    scalePlanet(planet, 1);
     const from = target.clone().add(new THREE.Vector3(0, -planet.R * 0.9, 0));
     planet.object3d.position.copy(from);
     const k = { v: 0 };
@@ -1781,7 +1798,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       const q = Math.min(1, E.legT / Math.max(0.1, leg.seconds));
       if (E.from) {
         E.from.object3d.position.y -= dt * E.from.R * E.fromScale * 0.6;
-        E.from.object3d.scale.setScalar(E.fromScale * (1 - 0.6 * q));
+        scalePlanet(E.from, E.fromScale * (1 - 0.6 * q));
       }
       if (E.to && q > 0.5 && !E.to.object3d.visible) bringPlanet(E.to, leg.seconds * 450);
       const lastStage = Math.max(...L.plumes.map((pl) => pl.stage));
@@ -2092,6 +2109,13 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     });
     return () => (warmFx.visible = false);
   }
+  // Their textures (UI4's planet maps) arrive after the warm-up; main calls this when loading finishes.
+  function uploadWarmTextures() {
+    if (!warmRenderer || !warmFx) return;
+    warmFx.traverse((o) => {
+      for (const m of [].concat(o.material ?? [])) for (const u of Object.values(m.uniforms ?? {})) if (u.value?.isTexture) warmRenderer.initTexture(u.value);
+    });
+  }
   const warmTarget = new THREE.WebGLRenderTarget(4, 4);
   function prewarm(renderer) {
     warmRenderer = renderer;
@@ -2102,11 +2126,20 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       m.visible = true;
       m.frustumCulled = false;
     }
-    renderer.compile(scene, camera);
     const prevTarget = renderer.getRenderTarget();
-    renderer.setRenderTarget(warmTarget);
-    renderer.render(scene, camera);
-    renderer.setRenderTarget(prevTarget);
+    // Both looks of every piece (UI4's painted and x-ray materials): the first clear click or X compiles nothing.
+    const swaps = meshes.filter((m) => m.userData.looks).map((m) => [m, m.material]);
+    for (let pass = 0; pass < 2; pass++) {
+      renderer.compile(scene, camera);
+      renderer.setRenderTarget(warmTarget);
+      renderer.render(scene, camera);
+      renderer.setRenderTarget(prevTarget);
+      for (const [m] of swaps) {
+        const { painted, xray } = m.userData.looks;
+        m.material = m.material === painted ? xray : painted;
+      }
+    }
+    // (two swaps: every mesh is back on its own material)
     for (const m of meshes) m.frustumCulled = true;
     unwarm();
     for (const part of parts) {
@@ -2182,6 +2215,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     skip,
     setBounds,
     prewarm,
+    uploadWarmTextures,
     update,
     postUpdate,
     landingView,

@@ -432,7 +432,8 @@ kbd {
   text-overflow: ellipsis;
 }
 
-/* Landing page: a big title and one button over the planet; the rest of the UI waits (body.landing). */
+/* Landing page: a big title and one button over the planet; the rest of the UI waits (body.landing, until the
+   dive passes 0.98). */
 .brand,
 .hud,
 .bar {
@@ -447,7 +448,16 @@ body.landing .detail {
   pointer-events: none;
 }
 
-.landing {
+/* The atmosphere's glow during the landing dive (opacity from ui/landing.js); over the canvas, under the UI. */
+.landing-glow {
+  position: fixed;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  background: linear-gradient(to bottom, rgba(96, 140, 210, 0.42) 0%, rgba(60, 96, 160, 0.22) 45%, rgba(30, 50, 90, 0.1) 100%);
+}
+
+.landing-page {
   position: fixed;
   inset: 0;
   display: grid;
@@ -455,15 +465,10 @@ body.landing .detail {
   justify-items: center;
   padding: 16vh 16px 0;
   text-align: center;
-  pointer-events: none;
-  transition: opacity 500ms ease;
+  pointer-events: none; /* its opacity follows the scroll progress (ui/landing.js) */
 }
 
-.landing.leaving {
-  opacity: 0;
-}
-
-.landing h1 {
+.landing-page h1 {
   margin: 0;
   font-size: clamp(44px, 7.5vw, 104px);
   font-weight: 650;

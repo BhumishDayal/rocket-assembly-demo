@@ -14,7 +14,6 @@ import { simulateAscent } from "./ascent.js";
 import { arrivalTimeline } from "./arrival.js";
 import { createSilhouette } from "./silhouette.js";
 import { createAnchors } from "./anchors.js";
-import { createPlanet } from "./planet.js";
 import { animate, spring } from "animejs";
 import { SCALE, buildManifest, sceneBounds } from "./layout.js";
 import { createMaterials, createPart, createPad, createStars, setShellOpacity, LOOK } from "./parts.js";
@@ -24,6 +23,8 @@ import { createSelector } from "./ui/select.js";
 import { createCard } from "./ui/card.js";
 import { createScrub } from "./ui/scrub.js";
 import { ensureShell } from "./ui/shell.js";
+import { createLanding } from "./ui/landing.js";
+import { createGroundMap } from "./fx/launchfx.js";
 import * as f from "./ui/format.js";
 
 const query = new URLSearchParams(location.search);
@@ -66,7 +67,7 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0b0d12);
 scene.fog = new THREE.Fog(0x0b0d12, 45, 130);
 
-const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 400);
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 6000); // far: the star shell
 camera.position.set(9.5, 6.8, 14.5);
 
 const controls = new OrbitControls(camera, canvas);
@@ -101,12 +102,17 @@ const root = new THREE.Group(); // shakes on lock
 scene.add(root);
 let pad = null;
 let anchors = null; // scale anchors (UI4): person, tower, trench, masts at true size, on the pad
-scene.add(createStars());
+// UI4's star field is a 90–130 u shell; pushed out ×30 (as in UI4's world harness) so no star sits in front of a
+// globe, with the points scaled to keep their size on screen.
+const stars = createStars();
+stars.scale.setScalar(30);
+stars.material.size *= 30;
+scene.add(stars);
 
 function disposeTree(obj) {
   obj.traverse((o) => {
     o.geometry?.dispose();
-    for (const m of [].concat(o.material ?? [])) m.dispose();
+    for (const m of new Set([].concat(o.material ?? [], Object.values(o.userData.looks ?? {})))) m.dispose(); // both looks of a piece
   });
 }
 
@@ -154,6 +160,10 @@ function applyBounds(b) {
       disposeTree(pad.group);
     }
     pad = { ...createPad({ baseRadius_u: b.baseRadius_u }), baseRadius_u: b.baseRadius_u };
+    // UI4's line-art ground (coastline, 1 km grid, the pad mark) just under the hardstand; it hangs on the pad,
+    // so it drops away with it in flight.
+    pad.ground = createGroundMap({ y_u: -pad.layout.plinthH - 0.01 });
+    pad.group.add(pad.ground.object3d);
     root.add(pad.group);
   }
   // Anchors are sized from the stack height too, so they follow every preset/option change. They hang on the
@@ -251,7 +261,7 @@ const selector = createSelector({
   // Nothing to inspect in flight. A fairing in the clear look shows its payload, so a click there selects the
   // payload; an opaque fairing is what you see and click.
   resolve: (part) =>
-    choreo.state.launch || landing
+    choreo.state.launch || landingOn()
       ? null
       : part?.kind === "fairing" && part.look === "clear" && !choreo.state.exploded
         ? parts.find((p) => p.kind === "payload" && p.built) ?? part
@@ -259,7 +269,7 @@ const selector = createSelector({
   // Every click on a part flips its look (opaque ↔ clear); empty space only deselects.
   onPick: (part) => choreo.toggleLook(part),
   onGhostClick(part) {
-    if (landing) return;
+    if (landingOn()) return;
     if (choreo.canBuild(part)) choreo.build(part);
   },
   onHover(hit) {
@@ -946,13 +956,13 @@ function skipNow() {
   if (what) syncUi();
 }
 canvas.addEventListener("dblclick", (e) => {
-  if (landing) return;
+  if (landingOn()) return;
   e.preventDefault();
   skipNow();
 });
 let lastTap = null; // double-tap: two touch taps within 320 ms and 30 px
 canvas.addEventListener("pointerup", (e) => {
-  if (e.pointerType !== "touch" || landing) return;
+  if (e.pointerType !== "touch" || landingOn()) return;
   const now = performance.now();
   if (lastTap && now - lastTap.t < 320 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 30) {
     lastTap = null;
@@ -972,12 +982,12 @@ function onPartKey(part) {
 
 addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
-  if (landing) {
+  if (landingOn()) {
     if (!e.repeat && !["Shift", "Control", "Alt", "Meta", "Tab"].includes(e.key)) {
       e.preventDefault();
-      enterFromLanding(); // any key enters
+      landing.enter(); // any key flies the rest of the way down
     }
-    return; // nothing else until the user has entered
+    return; // nothing else until the builder has taken over
   }
   if (e.target.closest?.("input, textarea, select")) return;
   if (e.key === "Escape" && !rocketsEl.hidden) return setRocketsOpen(false);
@@ -1006,79 +1016,45 @@ addEventListener("keydown", (e) => {
 });
 
 // ---------- landing page (first load without ?build / ?story / ?skip / ?demo) ----------
-// The Earth (UI4's planet.js) large in the lower half, a big title and one button; bar, HUD and hint hidden.
-// The globe sits right under the pad, so "Build a rocket" is one continuous descent from orbit to the home
-// shot: the pad group appears once the camera is above the deck, the planet sinks away under the ground, and
-// the UI fades in. The landing DOM is created here and removed after entering.
-const LANDING_R = 40;
-const LANDING_AZ = choreo.landingView.az; // the home view's azimuth (the ending's Earth reuses this shot)
+// The scroll-driven dive from orbit to the pad (ui/landing.js): scroll or drag to descend, click or any key to
+// fly the whole way. Once it hands over, the builder runs as usual; scrolling up with nothing built (at rest)
+// takes it back up. `landing` stays null when the page opens straight into the builder.
 let landing = null;
+const landingOn = () => Boolean(landing?.on);
 function startLanding() {
-  document.body.classList.add("landing");
-  const planet = createPlanet({ kind: "earth", radius_u: LANDING_R });
-  planet.object3d.position.set(0, -LANDING_R - 0.2, 0); // the pad stands on its north pole
-  planet.setSunDir?.(choreo.landingView.sun);
-  scene.add(planet.object3d);
-  root.visible = false;
-  controls.enabled = false;
-  const c = planet.object3d.position;
-  const v = choreo.landingView;
-  const off = new THREE.Vector3(0, v.up * LANDING_R, v.back * LANDING_R).applyAxisAngle(new THREE.Vector3(0, 1, 0), LANDING_AZ);
-  camera.position.copy(c).add(off);
-  controls.target.set(c.x, c.y + v.aim * LANDING_R, c.z);
-  camera.lookAt(controls.target);
-  const el = document.createElement("div");
-  el.className = "landing";
-  el.innerHTML = `<h1>Rocket Assembly</h1><button type="button" class="landing-go">Build a rocket</button>`;
-  document.body.appendChild(el);
-  el.querySelector(".landing-go").addEventListener("click", enterFromLanding);
-  // Any click, touch or wheel enters too (keys: see the keydown handler).
-  addEventListener("pointerdown", enterFromLanding, { capture: true });
-  addEventListener("wheel", enterFromLanding, { capture: true, passive: true });
-  landing = { planet, el, entering: false, y0: planet.object3d.position.y };
-}
-function enterFromLanding() {
-  if (!landing || landing.entering) return;
-  landing.entering = true;
-  removeEventListener("pointerdown", enterFromLanding, { capture: true });
-  removeEventListener("wheel", enterFromLanding, { capture: true });
-  sfx.unlock();
-  sfx.play("whoosh", { rate: 0.6, gain: 0.8 });
-  const { planet, el, y0 } = landing;
-  el.style.transition = "none"; // the title and button fade with the move itself (first 40 %)
-  el.querySelector(".landing-go").disabled = true;
-  const p0 = camera.position.clone();
-  const t0 = controls.target.clone();
-  const { position: p1, target: t1 } = choreo.homePose(LANDING_AZ);
-  const smooth = (x) => (x <= 0 ? 0 : x >= 1 ? 1 : x * x * (3 - 2 * x));
-  const prog = { v: 0 };
-  animate(prog, {
-    v: 1,
-    duration: 3200,
-    ease: "inOutCubic",
-    onUpdate: () => {
-      const e = prog.v;
-      camera.position.lerpVectors(p0, p1, e);
-      controls.target.lerpVectors(t0, t1, e);
-      camera.lookAt(controls.target);
-      // The planet sinks away well before the deck shows (globe top and ground disc are almost coplanar).
-      planet.object3d.position.y = y0 - smooth((e - 0.2) / 0.4) * LANDING_R * 1.5;
-      if (!root.visible && camera.position.y > -0.5 && e > 0.45) root.visible = true; // the deck is one-sided
-      root.position.y = -2.5 * (1 - smooth((e - 0.55) / 0.35)); // the pad (and its ghost) rise into view
-      el.style.opacity = String(1 - smooth(e / 0.4));
-      if (e > 0.72 && document.body.classList.contains("landing")) document.body.classList.remove("landing"); // bar, HUD, hint fade in
-    },
-    onComplete: () => {
-      planet.dispose();
-      el.remove();
-      root.visible = true;
-      root.position.y = 0;
-      controls.enabled = true;
-      landing = null;
-      syncUi();
+  landing = createLanding({
+    scene,
+    camera,
+    controls,
+    root,
+    stars,
+    canvas,
+    groundY: () => -pad.layout.plinthH,
+    groundMap: () => pad.ground,
+    endPose: () => choreo.homePose(choreo.landingView.az),
+    view: choreo.landingView,
+    onState: (on) => {
+      if (on) {
+        selector.clear();
+        setRocketsOpen(false);
+      } else syncUi();
     },
   });
 }
+// Back up to the landing: a scroll up over the canvas while the builder is at rest with nothing built.
+const canLeaveBuilder = () =>
+  landing && !landing.on && !story.active && rocketsEl.hidden && !choreo.state.busy && !choreo.state.auto && !choreo.state.launch && !choreo.state.exploded && parts.every((p) => !p.built);
+addEventListener(
+  "wheel",
+  (e) => {
+    if (e.ctrlKey || e.deltaY >= 0 || e.target !== canvas || !canLeaveBuilder()) return;
+    e.preventDefault();
+    e.stopPropagation(); // OrbitControls would zoom in
+    landing.resume();
+    landing.feed(landing.wheelPx(e));
+  },
+  { capture: true, passive: false },
+);
 
 const unlock = () => {
   sfx.unlock();
@@ -1090,6 +1066,12 @@ addEventListener("keydown", unlock);
 
 // ---------- loop ----------
 choreo.prewarm(renderer);
+// The planets' maps load after the warm-up: upload them as soon as they arrive, not on the frame they first show.
+const loaded = THREE.DefaultLoadingManager.onLoad;
+THREE.DefaultLoadingManager.onLoad = () => {
+  loaded?.();
+  choreo.uploadWarmTextures();
+};
 const landingMode = !["build", "story", "skip", "demo"].some((k) => query.has(k));
 if (landingMode) startLanding();
 else choreo.home();
@@ -1102,7 +1084,7 @@ const perf = { gtaoOk: true, sum: 0, n: 0, windows: 0 };
 const pieceCount = () => parts.reduce((n, p) => n + p.pieces.length, 0);
 function gtaoBudget(rawDt) {
   if (!gtao) return;
-  gtao.enabled = perf.gtaoOk && choreo.state.busy === 0 && !choreo.state.launch && !landing && pieceCount() <= GTAO_MAX_PIECES;
+  gtao.enabled = perf.gtaoOk && choreo.state.busy === 0 && !choreo.state.launch && !landingOn() && pieceCount() <= GTAO_MAX_PIECES;
   if (!gtao.enabled) {
     perf.sum = perf.n = 0;
     return;
@@ -1127,7 +1109,8 @@ function frame() {
   const t = clock.elapsedTime;
   gtaoBudget(rawDt);
   choreo.update(dt, t);
-  controls.update();
+  landing?.update(dt, t);
+  if (!landingOn()) controls.update(); // its polar/distance clamps would bend the dive's path
   choreo.postUpdate();
   // Depth cue: fog (background colour) in a band around the orbit target, sized by what is framed, so the far
   // side of the rocket and its far lines fade toward black while the near silhouette stays bright.
@@ -1141,13 +1124,13 @@ function frame() {
   band.near = band.near == null ? goalNear : band.near + (goalNear - band.near) * kb;
   band.far = band.far == null ? goalFar : band.far + (goalFar - band.far) * kb;
   const dist = camera.position.distanceTo(controls.target);
-  scene.fog.near = Math.max(0.1, dist - band.near);
-  scene.fog.far = dist + band.far;
+  const open = landing?.fogOpen ?? 0; // the landing's dive opens the band wide (ground map, cloud deck)
+  scene.fog.near = Math.max(0.1, THREE.MathUtils.lerp(dist - band.near, dist * 0.5, open));
+  scene.fog.far = THREE.MathUtils.lerp(dist + band.far, dist * 8, open);
   placeShadow(dt, black);
   if (cutEl.style.opacity !== String(choreo.state.cut)) cutEl.style.opacity = String(choreo.state.cut);
   if (pad?.ringMat) pad.ringMat.opacity = 0.55 + 0.3 * (0.5 + 0.5 * Math.sin(t * 1.6));
   twin?.sil?.update(camera);
-  landing?.planet.update(t, camera);
   anchors?.update(t);
   if (composer) composer.render();
   else renderer.render(scene, camera);
