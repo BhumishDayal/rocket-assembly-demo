@@ -554,6 +554,16 @@ function colorLathe(geo, nPts, colorOf) {
 
 // ---------- piece factory ----------
 
+// Material clone that keeps a shader hook (Material.copy drops onBeforeCompile / customProgramCacheKey).
+function cloneMat(src) {
+  const m = src.clone();
+  if (src.onBeforeCompile !== THREE.Material.prototype.onBeforeCompile) {
+    m.onBeforeCompile = src.onBeforeCompile;
+    m.customProgramCacheKey = src.customProgramCacheKey;
+  }
+  return m;
+}
+
 const scaled = new WeakSet();
 function toUnits(geo) {
   if (!scaled.has(geo)) {
@@ -573,11 +583,7 @@ function piece(geo, material, { x = 0, y = 0, z = 0, ry = 0, order = 0, dir = UP
   g.computeBoundingBox();
   const xrayShell = XRAY && kind === "shell";
   const src = xrayShell && material.asShell ? material.asShell : material;
-  const mat = src.clone();
-  if (src.onBeforeCompile !== THREE.Material.prototype.onBeforeCompile) {
-    mat.onBeforeCompile = src.onBeforeCompile; // Material.copy does not carry the shader hook
-    mat.customProgramCacheKey = src.customProgramCacheKey;
-  }
+  const mat = cloneMat(src);
   if (side !== undefined && !xrayShell) mat.side = side; // x-ray shells stay front-side
   const mesh = new THREE.Mesh(g, mat);
   mesh.position.set(x * S, y * S, z * S);
@@ -871,7 +877,14 @@ function buildEngines(spec, mats) {
     out.push(piece(geo, mats.heatShield, { ry, order: n + 0.1 + k * 0.01, dir: radial(mid, -0.15), dist: 0.12 + 0.35 * Rm * S, ax: ["top", 1, 0], kind: "shell" })),
   );
   if (thrustSection) {
-    const skirt = latheUV(lathe([[Rm, yHs], [Rm, L + mountH]], 64), { H: spec.height / S, R: Rm });
+    // Thrust-section skin with 12 raised longerons (edges draw the ribs and the rims).
+    const ribD = 0.012 * g.mountD_m;
+    const ribs = [];
+    for (let k = 0; k < 12; k++) {
+      const o = radialPhi((k * TAU) / 12);
+      ribs.push(strut(o.clone().multiplyScalar(Rm + ribD / 2).setY(yHs), o.clone().multiplyScalar(Rm + ribD / 2).setY(L + mountH), 0.016 * g.mountD_m, ribD, o));
+    }
+    const skirt = merge([latheUV(lathe([[Rm, yHs], [Rm, L + mountH]], 64), { H: spec.height / S, R: Rm }), projectUV(merge(ribs))]);
     out.push(piece(skirt, plainFinish(mats, g.finish), { order: n + 0.3, dir: UP, dist: 0.3, side: DS, ax: ["top", 1, 1], sym: true, kind: "shell" }));
   }
   const mb = 0.06 * mountH + 0.004 * Rm;
@@ -921,7 +934,8 @@ function buildTank(spec, mats) {
   const inner = 0.15 + 0.2 * R * S;
   const tb = Math.max(0.02, 0.006 * D); // bolt head size (visual)
   const ringBolts = (y) => boltRing(R * 1.011, y, 24, tb, tb, tb * 0.8);
-  const skirtRing = machinedRing(R * 0.985, R * 1.008, skirtH);
+  // The first stage's thrust-skirt flange is a little wider and taller (relief at the base).
+  const skirtRing = g.stageIndex === 0 ? machinedRing(R * 0.985, R * 1.025, skirtH * 1.3) : machinedRing(R * 0.985, R * 1.008, skirtH);
   out.push(piece(merge([skirtRing.clone(), ringBolts(skirtH * 0.5)]), mats.skirt, { order: 0, dir: DOWN, dist: 0.15, ax: T(-1, 0), sym: true, edges: true, lineGeo: skirtRing }));
   out.push(piece(projectUV(lathe(domePoints(R * 0.985, domeH, false), 36).translate(0, inset + domeH, 0)), mats.interior, { order: 0.1, dir: DOWN, dist: inner, side: DS, sym: true, kind: "interior", edges: true }));
   out.push(piece(cyl(0.045 * D, 0.045 * D, yMid - inset, 16, 0, inset), mats.interior, { order: 0.2, dir: DOWN, dist: 0.05, sym: true, kind: "interior" }));
@@ -974,9 +988,11 @@ function buildTank(spec, mats) {
     str.push(box(0.012 * D, 0.94 * H, 0.01 * D).rotateY(phi - Math.PI / 2).translate(Math.sin(phi) * r, H / 2, Math.cos(phi) * r));
   }
   const strGeo = merge(str);
-  const quarterGeo = latheUV(lathe(shellProfile, 24, 0, Math.PI / 2), { phiStart: 0, phiLength: Math.PI / 2, H, R });
+  // Raised panel seam strip on each quarter's leading edge (phi = 0, so four quarters give four seams).
+  const seamStrip = projectUV(box(0.012 * D, y1s - y0s, 0.006 * D, 0, (y0s + y1s) / 2, R + 0.003 * D));
+  const quarterGeo = merge([latheUV(lathe(shellProfile, 24, 0, Math.PI / 2), { phiStart: 0, phiLength: Math.PI / 2, H, R }), seamStrip.clone()]);
   const plain = lathe([[R, y0s], [R, y1s]], 24, 0, Math.PI / 2); // its boundary = the panel seams
-  const seamWeldGeo = merge([plain, ...welds.map((y) => lathe([[R, y - ww], [R * 1.004, y - ww], [R * 1.004, y + ww], [R, y + ww]], 24, 0, Math.PI / 2))]);
+  const seamWeldGeo = merge([plain, seamStrip, ...welds.map((y) => lathe([[R, y - ww], [R * 1.004, y - ww], [R * 1.004, y + ww], [R, y + ww]], 24, 0, Math.PI / 2))]);
   for (let q = 0; q < 4; q++) {
     const ry = (q * Math.PI) / 2;
     out.push(piece(strGeo, mats.interior, { ry, order: 1 + q * 0.02, dir: radialPhi(ry + Math.PI / 4), dist: shellDist * 0.7, kind: "interior" }));
@@ -990,7 +1006,15 @@ function buildTank(spec, mats) {
     const rwA = Math.PI / 2;
     const rwD = 0.03 * D;
     const rwH = H - skirtH - fwdH - 0.01 * H;
-    const duct = box(rwD, rwH, 0.07 * D, R + rwD / 2, skirtH + rwH / 2, 0);
+    // The raceway as a run of cover plates (~2 m each with a small joint), structural lines on the plates.
+    const plates = [];
+    const pl = 2;
+    const nP = Math.max(1, Math.floor(rwH / pl));
+    for (let i = 0; i < nP; i++) {
+      const len = rwH / nP - 0.12;
+      plates.push(box(rwD, len, 0.07 * D, R + rwD / 2, skirtH + (i + 0.5) * (rwH / nP), 0));
+    }
+    const duct = merge(plates);
     const clamps = [];
     for (let y = skirtH + 1.5; y < skirtH + rwH - 0.5; y += 3) clamps.push(box(rwD * 1.7, 0.12, 0.07 * D * 1.5, R + rwD * 0.85, y, 0)); // every ~3 m
     const clampGeo = clamps.length ? merge(clamps) : null;
@@ -1001,7 +1025,10 @@ function buildTank(spec, mats) {
       const uy = skirtH + 0.02 * H + 0.2 * D;
       const port = (z) => new THREE.CylinderGeometry(0.035 * D, 0.035 * D, 0.05 * D, 10).rotateZ(Math.PI / 2).translate(R + 0.045 * D, uy, z);
       const umb = merge([box(0.03 * D, 0.32 * D, 0.24 * D, R + 0.015 * D, uy, 0), port(-0.06 * D), port(0.06 * D)]);
-      out.push(piece(projectUV(umb), mats.steelDark, { ry: -ua, order: 2.2, dir: radial(ua), dist: shellDist * 1.1 }));
+      // a bolt ring around each port on the plate face (ring built flat, turned to face +X)
+      const ub = 0.01 * D;
+      const portBolts = [-0.06, 0.06].map((zf) => boltRing(0.055 * D, 0, 8, ub).rotateZ(Math.PI / 2).translate(R + 0.03 * D + ub / 2, uy, zf * D));
+      out.push(piece(projectUV(merge([umb.clone(), ...portBolts])), mats.steelDark, { ry: -ua, order: 2.2, dir: radial(ua), dist: shellDist * 1.1, edges: true, lineGeo: umb }));
     }
   }
   const fwdRing = machinedRing(R * 0.985, R * 1.008, fwdH, H - fwdH);
@@ -1126,9 +1153,19 @@ function buildInterstage(spec, mats) {
   out.push(piece(merge(pushers), mats.actuator, { order: 0.4, dir: UP, dist: 0.08, ax: ["i", 1, 1] }));
   const mat = finishMat(mats, g.finish);
   const iq = latheUV(lathe([[rAt(ringH * 0.5), ringH * 0.5], [rAt(H - ringH * 0.5), H - ringH * 0.5]], 24, 0, Math.PI / 2), { phiStart: 0, phiLength: Math.PI / 2, H, R: (Rb + Rt) / 2 });
+  // 12 raised external longerons (3 per quarter), drawn as structural lines; the panel seams stay fine.
+  const ribD = 0.012 * D;
+  const ribs = [];
+  for (let j = 0; j < 3; j++) {
+    const o = radialPhi(((j + 0.5) * (Math.PI / 2)) / 3);
+    const at = (y) => o.clone().multiplyScalar(rAt(y) + ribD / 2).setY(y);
+    ribs.push(strut(at(ringH), at(H - ringH), 0.016 * D, ribD, o));
+  }
+  const ribGeo = projectUV(merge(ribs));
+  const iqRibbed = merge([iq.clone(), ribGeo.clone()]);
   for (let q = 0; q < 4; q++) {
     const ry = (q * Math.PI) / 2;
-    out.push(piece(iq, mat, { ry, order: 1 + q * 0.02, dir: radialPhi(ry + Math.PI / 4), dist: shellDist, side: DS, kind: "shell", lineGeo: false, fineGeo: iq }));
+    out.push(piece(iqRibbed, mat, { ry, order: 1 + q * 0.02, dir: radialPhi(ry + Math.PI / 4), dist: shellDist, side: DS, kind: "shell", lineGeo: ribGeo, fineGeo: iq }));
   }
   const [topGeo, topLines] = jointRing(Rt, H - ringH, false);
   out.push(piece(topGeo, mats.machined, { order: 2, dir: UP, dist: 0.1, ax: ["i", 1, 0], sym: true, edges: true, lineGeo: topLines }));
@@ -1502,59 +1539,171 @@ export function setShellOpacity(part, value) {
 // Radius of the launch-pad deck for a stack base radius (scene units); anchors.js lines up with it.
 export const padRadius = (baseRadius_u) => Math.max(2.4, baseRadius_u * 3.4);
 
-// Launch pad sized from the stack's base radius (scene units): deck, exhaust opening, holo rings, hold-down
-// clamps between the engines, ground disc and polar grid.
-export function createPad({ baseRadius_u = 1 } = {}) {
-  const b = baseRadius_u;
-  const g = new THREE.Group();
+// Pad layout shared with anchors.js (scene units; azimuth phi from +Z toward +X like the lathes; the home
+// camera sits near phi 0.58). The deck top is y = 0 (the rocket's base); the ground is at y = −plinthH.
+// Sizes are visual proportions of the base radius, not data.
+export function padLayout({ baseRadius_u = 1, cameraAzimuth = 0.58 } = {}) {
+  const b = Math.max(0.05, baseRadius_u);
   const padR = padRadius(b);
-  const disc = new THREE.Mesh(new THREE.CylinderGeometry(padR, padR * 1.06, 0.18, 96), new THREE.MeshStandardMaterial({ color: 0x171a21, metalness: 0.6, roughness: 0.7 }));
-  disc.position.y = -0.09;
-  disc.receiveShadow = true;
-  g.add(disc);
-  const hole = new THREE.Mesh(new THREE.CircleGeometry(b * 1.04, 64).rotateX(-Math.PI / 2), new THREE.MeshStandardMaterial({ color: 0x07080b, metalness: 0.2, roughness: 0.95 }));
-  hole.position.y = 0.003;
-  hole.receiveShadow = true;
-  g.add(hole);
+  return {
+    b,
+    padR,
+    plinthH: Math.max(0.6, 0.8 * b), // raised hardstand
+    deckT: Math.max(0.05, 0.03 * padR),
+    holeR: 1.25 * b, // deck opening over the flame trench
+    mountR: 1.4 * b, // launch-mount ring outer radius
+    trenchPhi: cameraAzimuth + Math.PI / 2, // trench runs out to the right of the home view
+    railPhi: cameraAzimuth + Math.PI, // transporter-erector rails come in from behind
+  };
+}
 
+// Materials and edge lines for the static props (pad, anchors, drone ship): one material set, cloned per mesh.
+let propMats = null;
+export function propMaterials() {
+  propMats ??= createMaterials();
+  return propMats;
+}
+export const propMaterial = (m) => cloneMat(m);
+export const LINE_PROP = 0.35;
+// Peach edge lines on a prop mesh (x-ray look only); geo defaults to the mesh's own geometry.
+export function addLines(mesh, opacity = LINE_PROP, geo = mesh.geometry) {
+  return XRAY ? lineChild(mesh, geo, opacity, "edges") : null;
+}
+
+// Launch pad as a structure (x-ray style: dark see-through deck and plinth, opaque steel inside, peach edges):
+// a raised hardstand with a deck of 8 plates (expansion joints between them) around an opening over the flame
+// trench; the trench as a recessed channel with side and back walls and a deflector wedge under the engines,
+// exiting through the plinth wall; the launch-mount ring with struts; four hold-down clamps with bolt rings;
+// the transporter-erector rails coming up a ramp; the holo rings, ground disc and polar grid.
+// Static; 16 draws; only the deck casts and receives shadows (and the ground receives).
+export function createPad({ baseRadius_u = 1, cameraAzimuth = 0.58 } = {}) {
+  const L = padLayout({ baseRadius_u, cameraAzimuth });
+  const { b, padR, plinthH: P, deckT, holeR, mountR, trenchPhi, railPhi } = L;
+  const mats = propMaterials();
+  const g = new THREE.Group();
+  g.name = "pad";
+  const add = (geo, mat, { shadows = false, lineGeo = null, ry = 0, name, opacity = null } = {}) => {
+    const m = new THREE.Mesh(geo, cloneMat(mat));
+    if (opacity !== null && m.material.transparent) m.material.opacity = opacity;
+    m.rotation.y = ry;
+    m.castShadow = m.receiveShadow = shadows;
+    m.name = name;
+    m.raycast = () => {};
+    addLines(m, LINE_PROP, lineGeo ?? geo);
+    g.add(m);
+    return m;
+  };
+
+  // Deck: 8 plates around the trench opening, separated by expansion joints.
+  const joint = 0.012 * padR;
+  const plates = [];
+  for (let k = 0; k < 8; k++) {
+    const a0 = (k * TAU) / 8;
+    const a1 = ((k + 1) * TAU) / 8;
+    const shape = new THREE.Shape();
+    shape.absarc(0, 0, padR, a0 + joint / (2 * padR), a1 - joint / (2 * padR), false);
+    shape.absarc(0, 0, holeR, a1 - joint / (2 * holeR), a0 + joint / (2 * holeR), true);
+    plates.push(new THREE.ExtrudeGeometry(shape, { depth: deckT, bevelEnabled: false, curveSegments: 12 }));
+  }
+  add(merge(plates).rotateX(-Math.PI / 2).translate(0, -deckT, 0), mats.body, { shadows: true, name: "pad-deck", opacity: 0.75 });
+
+  // Plinth wall: open ring under the deck with a gap where the trench comes out.
+  const gapHalf = Math.asin(Math.min(0.95, (holeR + 0.1 * b) / padR));
+  add(lathe([[padR, -P], [padR, -deckT]], 96, trenchPhi + gapHalf, TAU - 2 * gapHalf), mats.body, { name: "pad-plinth" });
+
+  // Flame trench (local +X runs out along trenchPhi): floor, side and back walls, deflector wedge.
+  const hw = holeR;
+  const wt = 0.05 * b + 0.02;
+  const depth = P - deckT;
+  const x0 = -holeR * 1.05;
+  const x1 = padR * 1.02;
+  const len = x1 - x0;
+  const wedge = new THREE.Shape();
+  wedge.moveTo(-0.95 * holeR, -deckT - 0.04 * P);
+  wedge.lineTo(1.15 * holeR, -P + 0.04);
+  wedge.lineTo(-0.95 * holeR, -P + 0.04);
+  wedge.closePath();
+  const trench = merge([
+    box(len, 0.04, 2 * hw + 2 * wt, (x0 + x1) / 2, -P + 0.02, 0),
+    box(len, depth, wt, (x0 + x1) / 2, -P + depth / 2, hw + wt / 2),
+    box(len, depth, wt, (x0 + x1) / 2, -P + depth / 2, -hw - wt / 2),
+    box(wt, depth, 2 * hw + 2 * wt, x0 - wt / 2, -P + depth / 2, 0),
+    new THREE.ExtrudeGeometry(wedge, { depth: 1.92 * hw, bevelEnabled: false }).translate(0, 0, -0.96 * hw),
+  ]);
+  add(trench, mats.steelDark, { ry: trenchPhi - Math.PI / 2, name: "pad-trench" });
+
+  // Launch-mount ring around the opening, braced by 8 struts down to the deck.
+  const mh = 0.05 * b + 0.03;
+  const mountRing = machinedRing(holeR * 1.01, mountR, mh, 0);
+  const struts = [];
+  for (let k = 0; k < 8; k++) {
+    const phi = ((k + 0.5) * TAU) / 8;
+    const o = radialPhi(phi);
+    const t = new THREE.Vector3(Math.cos(phi), 0, -Math.sin(phi));
+    struts.push(strut(o.clone().multiplyScalar(mountR * 0.96).setY(mh), o.clone().multiplyScalar(mountR * 1.55).setY(0), 0.05 * b, 0.04 * b, t));
+  }
+  add(merge([mountRing.clone(), ...struts]), mats.machined, { name: "pad-mount" });
+
+  // Hold-down clamps at 0/90/180/270° (layout azimuths, clear of S-IC style fins at 45°): base plate with a
+  // bolt ring on the mount ring, an upright arm and a jaw against the vehicle's base.
+  const ch = 0.45 * b + 0.05;
+  const clamps = [];
+  const clampLines = [];
+  for (let k = 0; k < 4; k++) {
+    const a = (k * TAU) / 4;
+    const bs = 0.025 * b + 0.004;
+    const xb = (holeR * 1.01 + mountR) / 2;
+    const body = merge([box(0.3 * b, 0.03, 0.3 * b, xb, mh + 0.015, 0), box(0.09 * b, ch, 0.14 * b, b * 1.1, mh + ch / 2, 0), box(0.1 * b, 0.07 * b, 0.16 * b, b * 1.05, mh + ch - 0.035 * b, 0)]);
+    const bolts = boltRing(0.1 * b, mh + 0.03 + bs / 2, 8, bs).translate(xb, 0, 0);
+    clamps.push(merge([body.clone(), bolts]).rotateY(-a));
+    clampLines.push(body.rotateY(-a));
+  }
+  add(merge(clamps), mats.steelDark, { name: "pad-clamps", lineGeo: merge(clampLines) });
+
+  // Transporter-erector rails (local +X runs out along railPhi): a ramp from the deck down to the ground,
+  // rails on the ramp and on the ground, sleepers on the flat part.
+  const gauge = 0.5 * b + 0.15;
+  const rampLen = 4 * P;
+  const r0 = padR * 0.98;
+  const r1 = r0 + rampLen;
+  const r2 = r1 + 2.2 * padR;
+  const slope = Math.atan2(P, rampLen);
+  const rampL = Math.hypot(rampLen, P);
+  const onRamp = (geo, yOff) => geo.rotateZ(-slope).translate((r0 + r1) / 2, -P / 2 + yOff, 0);
+  const rails = [
+    onRamp(new THREE.BoxGeometry(rampL, 0.04, 2 * gauge + 0.3 * b), -0.02),
+    onRamp(new THREE.BoxGeometry(rampL, 0.03, 0.03), 0.015).translate(0, 0, gauge / 2),
+    onRamp(new THREE.BoxGeometry(rampL, 0.03, 0.03), 0.015).translate(0, 0, -gauge / 2),
+    box(r2 - r1, 0.03, 0.03, (r1 + r2) / 2, -P + 0.015, gauge / 2),
+    box(r2 - r1, 0.03, 0.03, (r1 + r2) / 2, -P + 0.015, -gauge / 2),
+  ];
+  for (let x = r1 + 0.15; x < r2; x += 0.3) rails.push(box(0.05, 0.012, gauge + 0.15, x, -P + 0.006, 0));
+  add(merge(rails), mats.steelDark, { ry: railPhi - Math.PI / 2, name: "pad-rails" });
+
+  // Holo rings on the deck (main pulses ringMat), ground and grid at the foot of the hardstand.
   const ringMat = new THREE.MeshBasicMaterial({ color: COLORS.holo, transparent: true, opacity: 0.85 });
   const ring1 = new THREE.Mesh(new THREE.TorusGeometry(padR * 0.8, 0.022, 8, 160), ringMat);
   ring1.rotation.x = Math.PI / 2;
   ring1.position.y = 0.012;
-  g.add(ring1);
-  const ring2 = new THREE.Mesh(new THREE.TorusGeometry(b * 1.45, 0.014, 8, 120), ringMat);
+  const ring2 = new THREE.Mesh(new THREE.TorusGeometry(b * 1.45 + 0.1 * b, 0.014, 8, 120), ringMat);
   ring2.rotation.x = Math.PI / 2;
   ring2.position.y = 0.012;
-  g.add(ring2);
-
-  // Hold-down clamps at 0/90/180/270° (between the outer engines and clear of S-IC style fins at 45°).
-  const cw = 0.04 + 0.06 * b;
-  const ch = 0.08 + 0.15 * b;
-  const clampGeo = new THREE.BoxGeometry(cw * 1.8, ch, cw);
-  const clampMat = new THREE.MeshStandardMaterial({ color: 0x3b3f48, metalness: 0.9, roughness: 0.4 });
-  for (let i = 0; i < 4; i++) {
-    const a = (i / 4) * TAU;
-    const c = new THREE.Mesh(clampGeo, clampMat);
-    c.position.set(Math.cos(a) * (b * 1.12 + cw), ch / 2, Math.sin(a) * (b * 1.12 + cw));
-    c.rotation.y = -a;
-    c.castShadow = true;
-    c.receiveShadow = true;
-    g.add(c);
-  }
+  g.add(ring1, ring2);
 
   const ground = new THREE.Mesh(new THREE.CircleGeometry(40, 64), new THREE.MeshStandardMaterial({ color: 0x0c0e14, metalness: 0.2, roughness: 0.95 }));
   ground.rotation.x = -Math.PI / 2;
-  ground.position.y = -0.18;
+  ground.position.y = -P;
   ground.receiveShadow = true;
+  ground.raycast = () => {};
   g.add(ground);
 
   const grid = new THREE.PolarGridHelper(Math.max(14, padR * 3), 16, 8, 96, 0x2a3140, 0x1a1f2a);
-  grid.position.y = -0.17;
+  grid.position.y = -P + 0.01;
   grid.material.transparent = true;
   grid.material.opacity = 0.55;
   g.add(grid);
 
-  return { group: g, ringMat };
+  return { group: g, ringMat, layout: L };
 }
 
 export function createStars(count = 1400) {

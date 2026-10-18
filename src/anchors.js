@@ -1,53 +1,109 @@
-// Scale anchors (design doc §7, C9): faint peach line-art around the pad so the rocket reads at its true size.
-//   createAnchors({ baseRadius_u, stackHeight_u, scale, cameraAzimuth }) -> { object3d, human, tower, trench,
-//                                                    masts, towerHeight_u, setVisible(bool), update(t), dispose() }
-// (1) a 1.8 m person (12 line segments) standing at the pad edge, facing the rocket;
-// (2) a strongback/service tower beside the pad, 1.08 × the stack tall, with cross-braced bays and a top boom
-//     reaching toward the vehicle;
-// (3) the flame trench as a rectangular cut in the deck, running out past the pad edge;
-// (4) four 25 m floodlight masts around the pad, each with a small lit sprite.
-// Real sizes in metres (person, masts) go through `scale` (scene units per metre); the rest follows the
-// rocket. Lines use the shared peach line material (fog on, depth fade) at opacity 0.35 (tower 0.25), cast no shadows and
-// are not pickable. Placement assumes the default camera azimuth (about 0.58 rad, the home view): person in
-// front-right, tower to the left and slightly behind, trench to the right, masts out to the sides and behind
-// (none between the camera and the rocket).
+// Scale anchors and pad furniture (design doc §7 C9, round 13): x-ray style structures around the pad, sized
+// in real metres or from the rocket, so the vehicle reads at its true size and the pad has depth.
+//   createAnchors({ baseRadius_u, stackHeight_u, manifest, scale, cameraAzimuth })
+//     -> { object3d, human, tower, towerFrame, arms, cableTray, masts, lamps, towerHeight_u, setVisible(bool),
+//          update(t), dispose() }
+//   (1) a 1.8 m person (12 line segments) at the deck edge, facing the rocket;
+//   (2) the strongback/service tower: a lattice column 1.08 × the stack tall (columns, girders, braces), with
+//       one umbilical arm per stage joint (each interstage) and at the payload adapter, reaching the vehicle;
+//       arms[i] = { mesh, y_u, reach_u, partId } with the mesh's origin on its hinge at the tower face, so
+//       retracting is mesh.rotation.y (UI 3);
+//   (3) a cable tray on the deck from the tower to the launch mount;
+//   (4) four 25 m lattice lightning masts (plus a 6 m air terminal) on the ground around the hardstand, each
+//       with a lamp sprite.
+//   createDroneShip({ size_u }) -> { object3d, deckY, length_u, width_u, dispose() }
+//     the booster landing barge: hull, landing circle with a cross, four corner thrusters.
+// Layout comes from padLayout() in parts.js (deck top y = 0, ground at −plinthH; placement around the home
+// camera azimuth: person front-right, tower left and slightly behind, masts at the sides and behind). Steel
+// meshes use the shared prop materials with peach edges; only the tower and its arms cast and receive
+// shadows; nothing is pickable.
 import * as THREE from "three";
 import { SCALE } from "./layout.js";
-import { padRadius, peachLineMaterial } from "./parts.js";
+import { addLines, padLayout, peachLineMaterial, propMaterial, propMaterials } from "./parts.js";
 
-const OPACITY = 0.35;
-const TOWER_OPACITY = 0.25; // the tower is tall and close to the rocket, so it sits quieter
-const HUMAN_M = 1.8; // a person, for scale
-const MAST_M = 25; // floodlight mast height
+const OPACITY = 0.35; // person line art
+const TOWER_LINES = 0.25; // the tower is tall and close to the rocket, so it sits quieter
+const ARM_LINES = 0.35;
+const MAST_LINES = 0.3;
+const MAST_M = 25; // lightning-mast lattice height
+const ROD_M = 6; // air terminal on top
 const TOWER_SHARE = 1.08; // tower height / stack height
 // Visual sizes (shape only).
-const TOWER_MIN_W_M = 4; // tower width, at least this
-const TOWER_W_SHARE = 0.06; // or this share of its height
-const TOWER_CLEAR_M = 4; // gap between the vehicle's widest radius and the tower
-const MAST_MIN_DIST_M = 40; // masts stand at least this far from the vehicle axis
+const TOWER_MIN_W_M = 4;
+const TOWER_W_SHARE = 0.06;
+const TOWER_CLEAR_M = 4;
+const MAST_MIN_DIST_M = 40;
 const BAYS = 6;
 
-// Lathe-style azimuth used everywhere in the demo: phi from +Z toward +X.
 const at = (phi, r, y = 0) => new THREE.Vector3(Math.sin(phi) * r, y, Math.cos(phi) * r);
+const v = (x, y, z = 0) => new THREE.Vector3(x, y, z);
+const noPick = (o) => ((o.raycast = () => {}), o);
 
+// Merge indexed geometries (boxes, cylinders) on position + normal into one.
+function mergeSolid(geos) {
+  const pos = [];
+  const nrm = [];
+  const idx = [];
+  let base = 0;
+  for (const g of geos) {
+    const p = g.attributes.position;
+    const n = g.attributes.normal;
+    for (let i = 0; i < p.count; i++) pos.push(p.getX(i), p.getY(i), p.getZ(i)), nrm.push(n.getX(i), n.getY(i), n.getZ(i));
+    for (const i of g.index.array) idx.push(i + base);
+    base += p.count;
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  out.setAttribute("normal", new THREE.Float32BufferAttribute(nrm, 3));
+  out.setIndex(idx);
+  out.computeBoundingSphere();
+  return out;
+}
+const box = (w, h, d, x = 0, y = 0, z = 0) => new THREE.BoxGeometry(w, h, d).translate(x, y, z);
+// Box from a to b (long axis), w × d cross-section, thin side facing `out`.
+function strut(a, b, w, d, out) {
+  const yAxis = b.clone().sub(a);
+  const len = yAxis.length();
+  yAxis.normalize();
+  const zAxis = new THREE.Vector3().crossVectors(out, yAxis).normalize();
+  const xAxis = new THREE.Vector3().crossVectors(yAxis, zAxis).normalize();
+  return new THREE.BoxGeometry(d, len, w).applyMatrix4(new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis)).translate((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2);
+}
+function steelMesh(geo, name, { shadows = false, lines = OPACITY } = {}) {
+  const mesh = noPick(new THREE.Mesh(geo, propMaterial(propMaterials().steelDark)));
+  mesh.name = name;
+  mesh.castShadow = mesh.receiveShadow = shadows;
+  addLines(mesh, lines);
+  return mesh;
+}
 function lineSet(name, segments, opacity = OPACITY) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.Float32BufferAttribute(segments.flatMap(([a, b]) => [a.x, a.y, a.z, b.x, b.y, b.z]), 3));
   geo.computeBoundingSphere();
-  const lines = new THREE.LineSegments(geo, peachLineMaterial(opacity));
+  const lines = noPick(new THREE.LineSegments(geo, peachLineMaterial(opacity)));
   lines.name = name;
-  lines.raycast = () => {};
-  lines.castShadow = false;
-  lines.receiveShadow = false;
   return lines;
 }
 
-export function createAnchors({ baseRadius_u = 1, stackHeight_u = 10, scale = SCALE, cameraAzimuth = 0.58 } = {}) {
-  const b = Math.max(0.05, baseRadius_u);
+// Umbilical arm heights from the manifest: the middle of every interstage (the stage joints) and the payload
+// adapter; each arm reaches to the widest part at that height (plus a small gap).
+function armSpecs(manifest, scale) {
+  if (!Array.isArray(manifest)) return [];
+  const widest = (y) => Math.max(0, ...manifest.filter((s) => s.kind !== "engines" && y >= s.slotY - 1e-9 && y <= s.slotY + s.height + 1e-9).map((s) => s.radius));
+  const out = [];
+  for (const s of manifest) {
+    if (s.kind === "interstage") out.push({ y: s.slotY + s.height / 2, id: s.id });
+    if (s.kind === "payload") out.push({ y: s.slotY + Math.max(0.5 * (s.geom?.adapterH_m ?? 0) * scale, 0.02), id: s.id });
+  }
+  return out.map((a) => ({ ...a, r: widest(a.y) }));
+}
+
+export function createAnchors({ baseRadius_u = 1, stackHeight_u = 10, manifest = null, scale = SCALE, cameraAzimuth = 0.58 } = {}) {
+  const L = padLayout({ baseRadius_u, cameraAzimuth });
+  const { b, padR } = L;
   const H = Math.max(0.1, stackHeight_u);
   const m = (metres) => metres * scale;
-  const padR = padRadius(b);
-  const v = (x, y, z = 0) => new THREE.Vector3(x, y, z);
+  const groundY = -L.plinthH;
   const object3d = new THREE.Group();
   object3d.name = "scale-anchors";
 
@@ -59,86 +115,112 @@ export function createAnchors({ baseRadius_u = 1, stackHeight_u = 10, scale = SC
     const a1 = ((i + 1) / 6) * Math.PI * 2;
     humanSegs.push([p(Math.sin(a0) * 0.11, 1.69 + Math.cos(a0) * 0.11), p(Math.sin(a1) * 0.11, 1.69 + Math.cos(a1) * 0.11)]);
   }
-  humanSegs.push(
-    [p(0, 1.58), p(0, 0.95)],
-    [p(-0.2, 1.45), p(0.2, 1.45)],
-    [p(-0.2, 1.45), p(-0.27, 0.82)],
-    [p(0.2, 1.45), p(0.27, 0.82)],
-    [p(0, 0.95), p(-0.14, 0)],
-    [p(0, 0.95), p(0.14, 0)],
-  );
+  humanSegs.push([p(0, 1.58), p(0, 0.95)], [p(-0.2, 1.45), p(0.2, 1.45)], [p(-0.2, 1.45), p(-0.27, 0.82)], [p(0.2, 1.45), p(0.27, 0.82)], [p(0, 0.95), p(-0.14, 0)], [p(0, 0.95), p(0.14, 0)]);
   const human = lineSet("anchor-human", humanSegs);
   const phiH = cameraAzimuth + 0.35;
   human.position.copy(at(phiH, padR * 0.88));
   human.rotation.y = phiH + Math.PI; // the figure's plane faces the rocket axis
 
-  // (2) Tower: square truss column, horizontal frames at every bay, X-braces on the face toward the rocket,
-  // a top boom reaching toward the vehicle with a diagonal strut. Local +X points away from the rocket.
+  // (2) Tower (local +X points away from the rocket; base on the deck at y = 0).
   const tH = TOWER_SHARE * H;
   const w = Math.max(m(TOWER_MIN_W_M), TOWER_W_SHARE * tH);
-  const dT = b + m(TOWER_CLEAR_M) + w / 2;
   const hw = w / 2;
-  const towerSegs = [];
-  const corners = [v(-hw, 0, -hw), v(hw, 0, -hw), v(hw, 0, hw), v(-hw, 0, hw)];
-  for (const c of corners) towerSegs.push([c.clone(), c.clone().setY(tH)]);
+  const dT = b + m(TOWER_CLEAR_M) + hw;
+  const cw = 0.07 * w; // column
+  const bw = 0.035 * w; // brace
+  const c = hw - cw / 2;
+  const frame = [];
+  for (const [x, z] of [[c, c], [-c, c], [-c, -c], [c, -c]]) frame.push(box(cw, tH, cw, x, tH / 2, z));
   for (let k = 0; k <= BAYS; k++) {
-    const y = (tH * k) / BAYS;
-    for (let i = 0; i < 4; i++) towerSegs.push([corners[i].clone().setY(y), corners[(i + 1) % 4].clone().setY(y)]);
+    const y = Math.max(cw / 2, Math.min(tH - cw / 2, (tH * k) / BAYS));
+    frame.push(box(cw * 0.8, cw * 0.8, w, c, y, 0), box(cw * 0.8, cw * 0.8, w, -c, y, 0), box(w, cw * 0.8, cw * 0.8, 0, y, c), box(w, cw * 0.8, cw * 0.8, 0, y, -c));
   }
   for (let k = 0; k < BAYS; k++) {
-    const y0 = (tH * k) / BAYS;
-    const y1 = (tH * (k + 1)) / BAYS;
-    towerSegs.push([v(-hw, y0, -hw), v(-hw, y1, hw)], [v(-hw, y0, hw), v(-hw, y1, -hw)]);
+    const y0 = (tH * k) / BAYS + bw; // brace ends inset so their cross-section stays inside the column height
+    const y1 = (tH * (k + 1)) / BAYS - bw;
+    // X-braces on the face toward the rocket, a zigzag diagonal on the other three faces.
+    frame.push(strut(v(-c, y0, -c), v(-c, y1, c), bw, bw, v(-1, 0, 0)), strut(v(-c, y0, c), v(-c, y1, -c), bw, bw, v(-1, 0, 0)));
+    const s = k % 2 ? 1 : -1;
+    frame.push(strut(v(c, y0, -c * s), v(c, y1, c * s), bw, bw, v(1, 0, 0)));
+    frame.push(strut(v(-c * s, y0, c), v(c * s, y1, c), bw, bw, v(0, 0, 1)), strut(v(-c * s, y0, -c), v(c * s, y1, -c), bw, bw, v(0, 0, -1)));
   }
-  const reach = dT - hw - b * 1.1; // boom ends just short of the vehicle
-  const boomH = Math.max(m(1.5), 0.012 * tH);
-  towerSegs.push(
-    [v(-hw, tH, -hw * 0.4), v(-hw - reach, tH, -hw * 0.4)],
-    [v(-hw, tH, hw * 0.4), v(-hw - reach, tH, hw * 0.4)],
-    [v(-hw - reach, tH, -hw * 0.4), v(-hw - reach, tH, hw * 0.4)],
-    [v(-hw, tH - boomH, 0), v(-hw - reach, tH, 0)],
-    [v(-hw, tH - 4 * boomH, 0), v(-hw - reach * 0.55, tH, 0)],
-  );
-  const tower = lineSet("anchor-tower", towerSegs, TOWER_OPACITY);
+  const towerFrame = steelMesh(mergeSolid(frame), "anchor-tower-frame", { shadows: true, lines: TOWER_LINES });
+  const tower = new THREE.Group();
+  tower.name = "anchor-tower";
   const phiT = cameraAzimuth - Math.PI / 2 - 0.35;
   tower.position.copy(at(phiT, dT));
   tower.rotation.y = phiT - Math.PI / 2; // local +X → radially outward
+  tower.add(towerFrame);
 
-  // (3) Flame trench: outer and inner rectangle on the deck, from under the engines out past the pad edge.
-  const tw = 1.1 * b;
-  const x0 = -1.1 * b;
-  const x1 = padR * 1.08;
-  const yT = 0.006;
-  const rect = (a, bb, z) => [
-    [v(a, yT, -z), v(bb, yT, -z)],
-    [v(bb, yT, -z), v(bb, yT, z)],
-    [v(bb, yT, z), v(a, yT, z)],
-    [v(a, yT, z), v(a, yT, -z)],
-  ];
-  const trench = lineSet("anchor-trench", [...rect(x0, x1, tw), ...rect(x0 + 0.15 * b, x1, tw * 0.82)]);
-  const phiTr = cameraAzimuth + Math.PI / 2;
-  trench.rotation.y = phiTr - Math.PI / 2; // local +X → along azimuth phiTr
+  // Umbilical arms: truss beams from a hinge block at the tower face to an umbilical plate at the vehicle.
+  const armH = Math.max(m(1.5), 0.03 * tH);
+  const armW = 0.35 * w;
+  const arms = armSpecs(manifest, scale).map((a) => {
+    const reach = Math.max(0.05, dT - hw - a.r - 0.03);
+    const parts = [
+      box(cw * 1.6, armH * 1.25, armW * 1.25, -cw * 0.8, 0, 0), // hinge block on the tower face
+      box(0.03, armH * 1.1, armW * 1.15, -reach, 0, 0), // umbilical plate at the tip
+    ];
+    for (const yy of [armH / 2, -armH / 2]) for (const zz of [armW / 2, -armW / 2]) parts.push(box(reach, bw, bw, -reach / 2, yy, zz));
+    const nSeg = Math.max(2, Math.ceil(reach / armH));
+    for (let i = 0; i < nSeg; i++) {
+      const xa = (-reach * i) / nSeg;
+      const xb = (-reach * (i + 1)) / nSeg;
+      const up = i % 2 ? 1 : -1;
+      for (const zz of [armW / 2, -armW / 2]) parts.push(strut(v(xa, (up * armH) / 2, zz), v(xb, (-up * armH) / 2, zz), bw * 0.8, bw * 0.8, v(0, 0, Math.sign(zz))));
+    }
+    const mesh = steelMesh(mergeSolid(parts), `anchor-arm:${a.id}`, { shadows: true, lines: ARM_LINES });
+    mesh.position.set(-hw, a.y, 0); // origin on the hinge
+    tower.add(mesh);
+    return { mesh, y_u: a.y, reach_u: reach, partId: a.id };
+  });
 
-  // (4) Floodlight masts on the diagonals: pole, lamp bar, tripod feet; one lit sprite per lamp bar.
+  // (3) Cable tray on the deck from the tower face to the launch mount.
+  const trayLen = Math.max(0.05, dT - hw - L.mountR * 1.02);
+  const trayW = 0.12 * b + 0.05;
+  const tray = mergeSolid([box(trayLen, 0.012, trayW, -hw - trayLen / 2, 0.006, 0), box(trayLen, 0.035, 0.012, -hw - trayLen / 2, 0.0175, trayW / 2), box(trayLen, 0.035, 0.012, -hw - trayLen / 2, 0.0175, -trayW / 2)]);
+  const cableTray = steelMesh(tray, "anchor-cable-tray");
+  tower.add(cableTray);
+
+  // (4) Lightning masts: tapered three-legged lattice with rings, zigzag bracing and an air terminal; one
+  // merged mesh for all four; a lamp sprite on each, on the side facing the pad.
   const mastH = m(MAST_M);
   const rM = Math.max(padR * 1.45, b + m(MAST_MIN_DIST_M));
-  const yG = -0.18; // ground level under the pad (createPad)
-  const mastSegs = [];
+  const rb = m(1.2);
+  const rt = m(0.4);
+  const mb = m(0.15);
+  const LEVELS = 7;
+  const mastGeos = [];
   const lamps = [];
-  for (const [k, off] of [1.25, -1.25, 2.5, -2.5].entries()) {
-    const phi = cameraAzimuth + off; // radians from the camera direction
-    const base = at(phi, rM, yG);
-    const top = base.clone().setY(yG + mastH);
-    const tangent = new THREE.Vector3(Math.cos(phi), 0, -Math.sin(phi)).multiplyScalar(m(1.5));
-    const inward = base.clone().setY(0).normalize().multiplyScalar(-m(0.6));
-    mastSegs.push([base, top], [top.clone().add(tangent), top.clone().sub(tangent)]);
-    for (let f = 0; f < 3; f++) {
-      const a = phi + (f * Math.PI * 2) / 3;
-      mastSegs.push([base.clone().add(new THREE.Vector3(Math.sin(a), 0, Math.cos(a)).multiplyScalar(m(2))), base.clone().setY(yG + m(3))]);
+  for (const off of [1.25, -1.25, 2.5, -2.5]) {
+    const phi = cameraAzimuth + off; // radians from the camera direction; none between the camera and the rocket
+    const base = at(phi, rM, groundY);
+    // y is clamped half a member above the ground so the tilted members' corners stay above it
+    const leg = (i, y) => {
+      y = Math.max(y, mb * 0.6);
+      const r = rb + ((rt - rb) * y) / mastH;
+      const a = (i * Math.PI * 2) / 3 + phi;
+      return base.clone().add(v(Math.cos(a) * r, y, Math.sin(a) * r));
+    };
+    for (let i = 0; i < 3; i++) mastGeos.push(strut(leg(i, 0), leg(i, mastH), mb, mb, leg(i, 0).sub(base).setY(0).normalize()));
+    for (let k = 0; k <= LEVELS; k++) {
+      const y = (mastH * k) / LEVELS;
+      for (let i = 0; i < 3; i++) mastGeos.push(strut(leg(i, y), leg((i + 1) % 3, y), mb * 0.7, mb * 0.7, v(0, 1, 0)));
+      if (k < LEVELS) {
+        const y1 = (mastH * (k + 1)) / LEVELS;
+        for (let i = 0; i < 3; i++) {
+          const a0 = k % 2 ? leg(i, y) : leg((i + 1) % 3, y);
+          const a1 = k % 2 ? leg((i + 1) % 3, y1) : leg(i, y1);
+          const mid = leg(i, y).add(leg((i + 1) % 3, y)).multiplyScalar(0.5).sub(base).setY(0).normalize();
+          mastGeos.push(strut(a0, a1, mb * 0.6, mb * 0.6, mid));
+        }
+      }
     }
-    lamps.push(top.clone().add(inward));
+    const top = base.clone().setY(groundY + mastH);
+    mastGeos.push(strut(top, top.clone().setY(groundY + mastH + m(ROD_M)), mb * 0.6, mb * 0.6, v(0, 0, 1)));
+    lamps.push(base.clone().setY(groundY + mastH * 0.85).add(base.clone().setY(0).normalize().multiplyScalar(-(rb + m(0.6)))));
   }
-  const masts = lineSet("anchor-masts", mastSegs);
+  const masts = steelMesh(mergeSolid(mastGeos), "anchor-masts", { lines: MAST_LINES });
   const lampTex = (() => {
     const n = 32;
     const data = new Uint8Array(n * n * 4);
@@ -156,36 +238,90 @@ export function createAnchors({ baseRadius_u = 1, stackHeight_u = 10, scale = SC
   const sprites = lamps.map((pos, k) => {
     // warm peach-white so the lamps sit in the palette
     const mat = new THREE.SpriteMaterial({ map: lampTex, color: new THREE.Color(1.0, 0.8, 0.62).multiplyScalar(1.3), blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, toneMapped: false, fog: false });
-    const s = new THREE.Sprite(mat);
+    const s = noPick(new THREE.Sprite(mat));
     s.name = `anchor-lamp-${k}`;
     s.position.copy(pos);
     const size = m(1.2);
     s.scale.set(size, size, 1);
-    s.raycast = () => {};
     return s;
   });
 
-  object3d.add(human, tower, trench, masts, ...sprites);
-  const all = [human, tower, trench, masts];
+  object3d.add(human, tower, masts, ...sprites);
   return {
     object3d,
     human,
     tower,
-    trench,
+    towerFrame,
+    arms,
+    cableTray,
     masts,
     lamps: sprites,
+    trench: null, // the flame trench is real geometry in createPad now
     towerHeight_u: tH,
     setVisible(on) {
       object3d.visible = !!on;
     },
-    // Floodlights shimmer very slightly (t in seconds).
+    // Lamps shimmer very slightly (t in seconds).
     update(t = 0) {
       sprites.forEach((s, k) => (s.material.opacity = 0.9 + 0.1 * Math.sin(t * 2.3 + k * 1.7)));
     },
     dispose() {
-      for (const l of all) (l.geometry.dispose(), l.material.dispose());
-      for (const s of sprites) s.material.dispose();
+      object3d.traverse((o) => {
+        o.geometry?.dispose();
+        o.material?.dispose();
+      });
       lampTex.dispose();
+      object3d.removeFromParent();
+    },
+  };
+}
+
+// Booster landing barge in the x-ray style: see-through hull (deck top at y = 0), a peach landing circle with a
+// cross, four azimuth thrusters under the corners. size_u = length; width 0.57 × length (visual ratio).
+export function createDroneShip({ size_u = 6 } = {}) {
+  const Lh = Math.max(0.1, size_u);
+  const W = 0.57 * Lh;
+  const D = 0.09 * Lh;
+  const mats = propMaterials();
+  const object3d = new THREE.Group();
+  object3d.name = "drone-ship";
+  const hull = noPick(new THREE.Mesh(new THREE.BoxGeometry(Lh, D, W).translate(0, -D / 2, 0), propMaterial(mats.body)));
+  hull.name = "drone-hull";
+  if (hull.material.transparent) hull.material.opacity = 0.75;
+  hull.castShadow = hull.receiveShadow = true;
+  addLines(hull, 0.4);
+  const thr = [];
+  for (const sx of [1, -1]) {
+    for (const sz of [1, -1]) {
+      const x = sx * 0.42 * Lh;
+      const z = sz * 0.38 * W;
+      thr.push(new THREE.CylinderGeometry(0.035 * Lh, 0.035 * Lh, 0.05 * Lh, 16).translate(x, -D - 0.025 * Lh, z), new THREE.CylinderGeometry(0.05 * Lh, 0.05 * Lh, 0.012 * Lh, 20).translate(x, -D - 0.05 * Lh, z));
+    }
+  }
+  const thrusters = noPick(new THREE.Mesh(mergeSolid(thr), propMaterial(mats.steelDark)));
+  thrusters.name = "drone-thrusters";
+  addLines(thrusters, 0.35);
+  const R = 0.38 * W;
+  const segs = [];
+  for (let i = 0; i < 64; i++) {
+    const a0 = (i / 64) * Math.PI * 2;
+    const a1 = ((i + 1) / 64) * Math.PI * 2;
+    segs.push([v(Math.cos(a0) * R, 0.004, Math.sin(a0) * R), v(Math.cos(a1) * R, 0.004, Math.sin(a1) * R)]);
+  }
+  const k = R * Math.SQRT1_2 * 0.8;
+  segs.push([v(-k, 0.004, -k), v(k, 0.004, k)], [v(-k, 0.004, k), v(k, 0.004, -k)]);
+  const circle = lineSet("drone-landing-circle", segs, 0.6);
+  object3d.add(hull, thrusters, circle);
+  return {
+    object3d,
+    deckY: 0,
+    length_u: Lh,
+    width_u: W,
+    dispose() {
+      object3d.traverse((o) => {
+        o.geometry?.dispose();
+        o.material?.dispose();
+      });
       object3d.removeFromParent();
     },
   };

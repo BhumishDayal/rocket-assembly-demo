@@ -1,5 +1,8 @@
-// Check for src/anchors.js: real sizes (1.8 m person, 25 m masts), tower = 1.08 × stack, everything scales with
-// its inputs, nothing collides with the vehicle, no NaN.
+// Check for the scene props: src/anchors.js (person, tower + umbilical arms, cable tray, lightning masts),
+// createPad in src/parts.js (deck, plinth, trench, mount, clamps, rails) and createDroneShip.
+// Real sizes (1.8 m person, 25 m masts + 6 m air terminal), tower = 1.08 × stack, one arm per interstage plus
+// the payload adapter reaching the vehicle without entering it, deck top at y = 0, ≤ 60 draws for pad +
+// anchors, shadows only on the deck, tower and arms, fog on every line, nothing pickable, no NaN.
 // Run: node scripts/check-anchors.mjs   (no deps; exits 1 on any failure)
 import { registerHooks } from "node:module";
 
@@ -10,20 +13,20 @@ registerHooks({
     return r.url.endsWith(".json") ? { ...r, importAttributes: { ...r.importAttributes, type: "json" } } : r;
   },
 });
+const THREE = await import("three");
 const { catalog, presetToBuild } = await import("../src/data/catalog.js");
 const { buildManifest, sceneBounds, SCALE } = await import("../src/layout.js");
-const { padRadius } = await import("../src/parts.js");
-const { createAnchors } = await import("../src/anchors.js");
-const THREE = await import("three");
+const { createPad, padLayout } = await import("../src/parts.js");
+const { createAnchors, createDroneShip } = await import("../src/anchors.js");
 
 const failures = [];
 const expect = (ok, msg) => {
   if (!ok) failures.push(msg);
 };
 const near = (a, b) => Math.abs(a - b) <= 1e-5 * Math.max(1, Math.abs(b)); // positions are float32
-// World-space extent of a line set (positions transformed by its object matrix).
+// World-space box and nearest horizontal distance to the axis of an object's own geometry.
 function extent(obj) {
-  obj.updateMatrixWorld(true);
+  obj.updateWorldMatrix(true, false);
   const box = new THREE.Box3();
   const pos = obj.geometry.attributes.position;
   const p = new THREE.Vector3();
@@ -36,36 +39,68 @@ function extent(obj) {
   }
   return { box, minR, h: box.max.y - box.min.y };
 }
+const draws = (...roots) => {
+  let n = 0;
+  for (const r of roots) r.traverseVisible((o) => (o.isMesh || o.isLine || o.isPoints || o.isSprite) && n++);
+  return n;
+};
 
 const cases = catalog.presets.map((preset) => {
-  const b = sceneBounds(buildManifest(presetToBuild(preset), catalog));
-  return { id: preset.id, baseRadius_u: b.baseRadius_u, stackHeight_u: b.height_u, radius_u: b.radius_u };
+  const manifest = buildManifest(presetToBuild(preset), catalog);
+  const b = sceneBounds(manifest);
+  return { id: preset.id, manifest, baseRadius_u: b.baseRadius_u, stackHeight_u: b.height_u };
 });
-cases.push({ ...cases[0], id: "falcon-9, stack ×2", stackHeight_u: cases[0].stackHeight_u * 2 }, { ...cases[0], id: "falcon-9, scale ×2", scale: SCALE * 2 });
+cases.push({ ...cases[0], id: "falcon-9, stack ×2", stackHeight_u: cases[0].stackHeight_u * 2, manifest: null });
 
 for (const c of cases) {
-  const scale = c.scale ?? SCALE;
-  const a = createAnchors({ baseRadius_u: c.baseRadius_u, stackHeight_u: c.stackHeight_u, scale });
-  const ex = Object.fromEntries(["human", "tower", "trench", "masts"].map((k) => [k, extent(a[k])]));
-  for (const [k, e] of Object.entries(ex)) expect(e, `${c.id}: NaN in ${k}`);
-  if (Object.values(ex).some((e) => !e)) continue;
-  expect(near(ex.human.h, 1.8 * scale), `${c.id}: person ${(ex.human.h / scale).toFixed(3)} m tall, want 1.8`);
-  expect(near(ex.human.box.min.y, 0), `${c.id}: person not standing on the deck`);
-  expect(ex.human.minR > c.baseRadius_u && ex.human.minR < padRadius(c.baseRadius_u), `${c.id}: person not on the pad edge`);
-  expect(near(a.towerHeight_u, 1.08 * c.stackHeight_u) && near(ex.tower.box.max.y, 1.08 * c.stackHeight_u), `${c.id}: tower height ${ex.tower.box.max.y.toFixed(3)} u, want ${(1.08 * c.stackHeight_u).toFixed(3)}`);
-  expect(ex.tower.minR >= c.baseRadius_u, `${c.id}: tower boom reaches inside the vehicle (${ex.tower.minR.toFixed(3)} < ${c.baseRadius_u.toFixed(3)})`);
-  expect(near(ex.masts.box.max.y - ex.masts.box.min.y, 25 * scale), `${c.id}: masts ${((ex.masts.box.max.y - ex.masts.box.min.y) / scale).toFixed(2)} m, want 25`);
-  expect(ex.masts.minR > padRadius(c.baseRadius_u), `${c.id}: a mast stands on the pad`);
-  expect(ex.trench.box.max.y < 0.01 && ex.trench.box.min.y > 0, `${c.id}: trench not on the deck`);
-  expect(a.lamps.length === 4 && a.lamps.every((s) => Number.isFinite(s.position.y)), `${c.id}: lamps`);
+  const scale = SCALE;
+  const L = padLayout({ baseRadius_u: c.baseRadius_u });
+  const pad = createPad({ baseRadius_u: c.baseRadius_u });
+  const a = createAnchors({ baseRadius_u: c.baseRadius_u, stackHeight_u: c.stackHeight_u, manifest: c.manifest });
+  const n = draws(pad.group, a.object3d);
+  expect(n <= 60, `${c.id}: ${n} draws for pad + anchors (budget 60)`);
+  // No NaN anywhere; shadows only on deck, tower and arms; fog on lines; nothing pickable but the ground.
+  for (const root of [pad.group, a.object3d]) {
+    root.traverse((o) => {
+      if (o.geometry?.attributes?.position && !extent(o)) failures.push(`${c.id}: NaN in ${o.name}`);
+      if (o.castShadow && !/^(pad-deck|anchor-tower-frame|anchor-arm:)/.test(o.name)) failures.push(`${c.id}: ${o.name} casts a shadow`);
+      if (o.isLineSegments && !o.material.fog) failures.push(`${c.id}: ${o.name || o.parent?.name} lines ignore fog`);
+    });
+  }
+  // Pad: deck top at y = 0, ground at −plinthH, trench below the deck.
+  const deck = extent(pad.group.getObjectByName("pad-deck"));
+  expect(near(deck.box.max.y, 0) && deck.box.max.x <= L.padR + 1e-6, `${c.id}: deck top ${deck.box.max.y}`);
+  const trench = extent(pad.group.getObjectByName("pad-trench"));
+  expect(trench.box.max.y <= 0 && near(trench.box.min.y, -L.plinthH), `${c.id}: trench not under the deck`);
+  expect(pad.ringMat && pad.layout, `${c.id}: createPad return shape`);
+  // Person 1.8 m on the deck.
+  const hu = extent(a.human);
+  expect(near(hu.h, 1.8 * scale) && near(hu.box.min.y, 0), `${c.id}: person ${(hu.h / scale).toFixed(3)} m, standing at y ${hu.box.min.y}`);
+  expect(hu.minR > c.baseRadius_u && hu.minR < L.padR, `${c.id}: person not on the deck`);
+  // Tower and arms.
+  const tw = extent(a.towerFrame);
+  expect(near(a.towerHeight_u, 1.08 * c.stackHeight_u) && near(tw.box.max.y, 1.08 * c.stackHeight_u), `${c.id}: tower height ${tw.box.max.y.toFixed(3)}`);
+  expect(tw.minR > c.baseRadius_u, `${c.id}: tower inside the vehicle radius`);
+  const wantArms = c.manifest ? c.manifest.filter((s) => s.kind === "interstage" || s.kind === "payload").length : 0;
+  expect(a.arms.length === wantArms, `${c.id}: ${a.arms.length} arms, want ${wantArms}`);
+  for (const arm of a.arms) {
+    const ex = extent(arm.mesh);
+    const at = c.manifest.filter((s) => s.kind !== "engines" && arm.y_u >= s.slotY && arm.y_u <= s.slotY + s.height);
+    const rv = Math.max(...at.map((s) => s.radius));
+    expect(ex.minR >= rv - 1e-6 && ex.minR < rv + 0.12, `${c.id}: arm ${arm.partId} stops at ${ex.minR.toFixed(3)} for vehicle radius ${rv.toFixed(3)}`);
+    expect(arm.y_u > 0 && arm.y_u < c.stackHeight_u, `${c.id}: arm ${arm.partId} height`);
+  }
+  // Masts: 25 m lattice + 6 m terminal on the ground, off the hardstand.
+  const ms = extent(a.masts);
+  // lattice extents differ from the nominal 25 + 6 m by at most one member (0.15 m)
+  const member = 0.15 * scale;
+  expect(Math.abs(ms.box.min.y + L.plinthH) <= member && Math.abs(ms.h - 31 * scale) <= member, `${c.id}: masts ${(ms.h / scale).toFixed(2)} m from y ${ms.box.min.y.toFixed(3)}`);
+  expect(ms.minR > L.padR, `${c.id}: a mast stands on the pad`);
+  expect(a.lamps.length === 4, `${c.id}: lamps`);
   a.update(1.23);
   expect(a.lamps.every((s) => Number.isFinite(s.material.opacity)), `${c.id}: lamp opacity NaN`);
   a.setVisible(false);
   expect(!a.object3d.visible, `${c.id}: setVisible(false) ignored`);
-  a.object3d.traverse((o) => {
-    if (o.castShadow) failures.push(`${c.id}: ${o.name} casts a shadow`);
-    if (o.isLineSegments && !o.material.fog) failures.push(`${c.id}: ${o.name} ignores fog`);
-  });
   a.dispose();
 }
 // Tower height scales with the stack.
@@ -73,7 +108,18 @@ const one = createAnchors({ baseRadius_u: 0.5, stackHeight_u: 10 });
 const two = createAnchors({ baseRadius_u: 0.5, stackHeight_u: 20 });
 expect(near(two.towerHeight_u, 2 * one.towerHeight_u), "tower height does not scale with the stack");
 
-console.log(`anchors checked: ${cases.length} cases`);
+// Drone ship: 5 draws, size follows size_u, deck top at y = 0.
+for (const size_u of [6, 12]) {
+  const ds = createDroneShip({ size_u });
+  expect(draws(ds.object3d) === 5, `drone ${size_u}: ${draws(ds.object3d)} draws`);
+  const hull = extent(ds.object3d.getObjectByName("drone-hull"));
+  expect(near(hull.box.max.x - hull.box.min.x, size_u) && near(hull.box.max.y, 0), `drone ${size_u}: hull ${hull.box.max.x - hull.box.min.x} long, top ${hull.box.max.y}`);
+  const circle = extent(ds.object3d.getObjectByName("drone-landing-circle"));
+  expect(circle && circle.box.max.x < size_u / 2, `drone ${size_u}: landing circle`);
+  ds.dispose();
+}
+
+console.log(`props checked: ${cases.length} pad/anchor cases, 2 drone ships`);
 if (failures.length) {
   console.log(`FAIL (${failures.length})\n  ` + failures.join("\n  "));
   process.exitCode = 1;

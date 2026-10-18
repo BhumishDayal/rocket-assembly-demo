@@ -524,3 +524,21 @@ deployed; the user forbids changes outside `src/` in the team repo (Vercel). Rul
    mode ≤ 45 s.
 Owners: UI 3 (shell robustness, toggle, fast launch, landing overlay + transition, ending choreography),
 UI4 (src/planet.js: Earth/Moon/Mars, surface patch, dust puff), UI 2 (port #23, src/arrival.js).
+
+### Round 13 — user requests (2026-10-17 ~22:50)
+1. Landing page: ANY interaction (click, key, scroll, touch) enters the builder, not only the button.
+2. Shortcut legend: no long one-line hint; a compact key/action grid at the left under the title, same font size.
+3. Skip: double-click / double-tap skips the running animation (build completes instantly, launch jumps to
+   its outcome, swap/explode finish instantly).
+4. Switching rockets ([ ], Rockets list): the new rocket APPEARS built (fast 0.6 s snap from the axial spread),
+   no part-by-part rebuild; with nothing built, choosing a rocket makes it appear built too.
+5. Compare: the user picks the second rocket: C opens a chooser (presets built beside at true scale, plus the
+   GCAT twin as a silhouette); HUD shows both names and heights.
+6. Depth: the pad/tower/trench as real 3D structures (deck plates, recessed trench with walls, hold-downs,
+   cable trays, lightning masts, rails) and more exterior relief on the rocket; AO on at idle, contact shadow
+   under the stack, optional DoF on focus.
+7. Sound: an ORIGINAL heroic orchestral-style assemble cue (synthesized, no copyrighted Marvel audio), played on
+   Build all with a stinger at the final lock; MUSIC_URL hook for a licensed track.
+8. Ending: the rocket must land on a planet, not float: Earth missions end with the Falcon booster landing
+   (drone ship / pad) and the payload deployed above a visible Earth; Moon missions with the lander touching
+   down; staging/floating phases short. (Honesty rules of arrival.js stay.)

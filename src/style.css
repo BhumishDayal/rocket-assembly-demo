@@ -411,6 +411,72 @@ kbd {
   text-overflow: ellipsis;
 }
 
+/* Landing page: a big title and one button over the planet; the rest of the UI waits (body.landing). */
+.brand,
+.hud,
+.bar {
+  transition: opacity 600ms ease;
+}
+
+body.landing .brand,
+body.landing .hud,
+body.landing .bar,
+body.landing .detail {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.landing {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  align-content: start;
+  justify-items: center;
+  padding: 16vh 16px 0;
+  text-align: center;
+  pointer-events: none;
+  transition: opacity 500ms ease;
+}
+
+.landing.leaving {
+  opacity: 0;
+}
+
+.landing h1 {
+  margin: 0;
+  font-size: clamp(44px, 7.5vw, 104px);
+  font-weight: 650;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+
+.landing-go {
+  margin-top: 32px;
+  padding: 14px 30px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: background 160ms, transform 160ms;
+}
+
+.landing-go:hover,
+.landing-go:focus-visible {
+  background: rgba(255, 255, 255, 0.16);
+  outline: none;
+}
+
+.landing-go:active {
+  transform: scale(0.97);
+}
+
 /* Bottom bar */
 .bar {
   position: fixed;

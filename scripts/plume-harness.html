@@ -89,7 +89,7 @@
       }
       const padLight = createPadLight({ baseRadius_u: bounds.baseRadius_u, bellExitRadius_u: Math.max(0.01, ...plumes.map((p) => p.exitRadius_u)) });
       scene.add(padLight.object3d);
-      const anchors = q.get("anchors") === "1" ? createAnchors({ baseRadius_u: bounds.baseRadius_u, stackHeight_u: H }) : null;
+      const anchors = q.get("anchors") === "1" ? createAnchors({ baseRadius_u: bounds.baseRadius_u, stackHeight_u: H, manifest }) : null;
       if (anchors) scene.add(anchors.object3d);
       let twin = null;
       if (q.get("twin") === "1") {

@@ -11,8 +11,11 @@ import { catalog, presetIds, getPreset, presetToBuild, applyOption } from "./dat
 import { evaluateBuild, stageDetails, stackMass_kg } from "./physics.js";
 import { optionsWithCompat } from "./compat.js";
 import { simulateAscent } from "./ascent.js";
+import { arrivalTimeline } from "./arrival.js";
 import { createSilhouette } from "./silhouette.js";
 import { createAnchors } from "./anchors.js";
+import { createPlanet } from "./planet.js";
+import { animate } from "animejs";
 import { SCALE, buildManifest, sceneBounds } from "./layout.js";
 import { createMaterials, createPart, createPad, createStars } from "./parts.js";
 import { createChoreographer } from "./choreo.js";
@@ -132,7 +135,7 @@ function applyBounds(b) {
   // Anchors are sized from the stack height too, so they follow every preset/option change. They hang on the
   // pad group, so they drop away with the pad in flight.
   anchors?.dispose();
-  anchors = createAnchors({ baseRadius_u: b.baseRadius_u, stackHeight_u: b.height_u });
+  anchors = createAnchors({ baseRadius_u: b.baseRadius_u, stackHeight_u: b.height_u, manifest: current.manifest });
   pad.group.add(anchors.object3d);
 }
 applyBounds(current.bounds);
@@ -223,7 +226,7 @@ const selector = createSelector({
   // Nothing to inspect in flight. A fairing in the clear look shows its payload, so a click there selects the
   // payload; an opaque fairing is what you see and click.
   resolve: (part) =>
-    choreo.state.launch
+    choreo.state.launch || landing
       ? null
       : part?.kind === "fairing" && part.look === "clear" && !choreo.state.exploded
         ? parts.find((p) => p.kind === "payload" && p.built) ?? part
@@ -231,6 +234,7 @@ const selector = createSelector({
   // Every click on a part flips its look (opaque ↔ clear); empty space only deselects.
   onPick: (part) => choreo.toggleLook(part),
   onGhostClick(part) {
+    if (landing) return;
     if (choreo.canBuild(part)) choreo.build(part);
   },
   onHover(hit) {
@@ -256,7 +260,7 @@ createScrub({
 });
 
 // ---------- UI ----------
-const { btnRockets, rocketsEl, btnBuildAll, btnExplode, btnReset, btnSound, hudText } = shell;
+const { btnRockets, rocketsEl, btnBuildAll, btnExplode, btnReset, hudText } = shell;
 
 // Build all becomes Launch once the stack is complete.
 btnBuildAll.addEventListener("click", () => (isComplete() ? launch() : choreo.buildAll()));
@@ -295,18 +299,13 @@ rocketsEl.addEventListener("click", (e) => {
   if (!opt) return;
   setRocketsOpen(false);
   switchPreset(Number(opt.dataset.i) - presetIndex);
-  choreo.buildAll();
 });
 addEventListener("pointerdown", (e) => {
   if (!rocketsEl.hidden && !e.target.closest("#rockets, #btn-rockets")) setRocketsOpen(false);
 });
 btnExplode.addEventListener("click", () => choreo.toggleExplode());
 btnReset.addEventListener("click", () => reset());
-btnSound.addEventListener("click", () => {
-  sfx.setMuted(!sfx.muted);
-  btnSound.textContent = sfx.muted ? "Sound off" : "Sound on";
-  btnSound.setAttribute("aria-pressed", String(!sfx.muted));
-});
+
 
 // HUD: running tally while building (parts, stacked height, stacked mass from the records via physics),
 // the verdict line once the preset is complete (same numbers the team app computes). The height is "est.":
@@ -383,7 +382,8 @@ async function chooseOption(part, recordId) {
   if (swapped?.built) selector.select(swapped);
 }
 
-function switchPreset(step) {
+// Switching rockets ([ ], the Rockets list) shows the new one built (one snap); reset and the story start empty.
+function switchPreset(step, { built = true } = {}) {
   presetIndex = (presetIndex + step + presetIds.length) % presetIds.length;
   current = loadPreset(presetIds[presetIndex]);
   selector.clear();
@@ -393,6 +393,7 @@ function switchPreset(step) {
   choreo.setBounds(current.bounds);
   selector.setParts(parts);
   choreo.rebuild(parts);
+  if (built) choreo.appearBuilt();
   if (!rocketsEl.hidden) rocketsEl.innerHTML = rocketsHtml();
   const q = new URLSearchParams(location.search);
   q.set("build", current.preset.id);
@@ -401,7 +402,7 @@ function switchPreset(step) {
 
 // Reset means reset: back to the empty pad and, if Options changed the build, the pristine preset.
 function reset() {
-  if (current.modified) switchPreset(0);
+  if (current.modified) switchPreset(0, { built: false });
   else choreo.reset();
 }
 
@@ -439,8 +440,61 @@ function outcomeHtml({ outcome, inOrbit, summary, alt_m }) {
     ? `<strong class="nogo">Pad abort</strong> · thrust below weight (TWR ${f.twr(current.verdict.liftoffTWR)})`
     : `<strong class="nogo">Did not reach space</strong> · max ${f.num(maxAlt_km, 1)}\u00a0km est.`;
 }
+const BODY_NAME = { earth: "Earth", moon: "the Moon", mars: "Mars" };
+const ORBIT_NAME = { earth: "Earth orbit", moon: "lunar orbit", mars: "Mars orbit" };
+function endingLegHtml(leg) {
+  if (!leg || leg.type === "booster") return hudText.innerHTML;
+  if (leg.type === "earth-payload") return `<strong>${f.esc(ORBIT_NAME.earth.toUpperCase())}</strong> · est.`;
+  const label =
+    leg.type === "orbit"
+      ? ORBIT_NAME[leg.body]?.toUpperCase()
+      : leg.type === "transfer"
+        ? leg.body && leg.body !== "earth"
+          ? `TRANSFER TO ${BODY_NAME[leg.body].toUpperCase()}`
+          : "TRANSFER"
+        : leg.type.toUpperCase();
+  const alt = Number.isFinite(leg.alt_km) && leg.alt_km > 0 ? ` · ${f.num(leg.alt_km, 0)}\u00a0km` : "";
+  return `<strong>${f.esc(label ?? "")}</strong>${alt} · est.`;
+}
+function endingFinalHtml(a, booster) {
+  const line = endingOutcome(a);
+  return booster ? `${line} · booster ${booster}` : line;
+}
+function endingOutcome(a) {
+  if (!a) return telemetry.final ?? "";
+  if (!a.success) {
+    return `Stranded in Earth orbit · <strong class="nogo">Δv short by ${f.ms(a.shortBy_ms ?? 0)}</strong> · est.`;
+  }
+  if (a.lands) return `<strong class="go">Landed on ${BODY_NAME[a.body] ?? a.body}</strong> · est.`;
+  if (a.body && a.body !== "earth") return `<strong class="go">In ${ORBIT_NAME[a.body]}</strong> · est.`;
+  const mission = catalog.missions.find((m) => m.id === current.build.missionId);
+  const name = mission ? mission.name.charAt(0).toLowerCase() + mission.name.slice(1) : "orbit";
+  return `<strong class="go">In ${f.esc(name)}</strong> · est.`;
+}
 let lastSim = null;
 function onTelemetry(tel) {
+  // The planet ending (arrival.js): a short label per leg, then one outcome line (est. by construction).
+  if (tel.booster === true) {
+    const now = performance.now();
+    if (now - telemetry.last < 80) return;
+    telemetry.last = now;
+    const t = Math.max(0, tel.t);
+    hudText.innerHTML = [
+      "<strong>BOOSTER</strong>",
+      `T+${pad2(t / 60)}:${pad2(t % 60)}`,
+      `${f.num(Math.max(0, tel.alt_m) / 1000, 1)}\u00a0km`,
+      f.ms(tel.vel_ms),
+      `<strong>${f.esc(tel.label)}</strong>`,
+      "est.",
+    ].join(" · ");
+    return;
+  }
+  if (tel.ending) {
+    const html = tel.final ? endingFinalHtml(tel.arrival, tel.booster) : endingLegHtml(tel.leg);
+    if (tel.final) telemetry.final = html;
+    hudText.innerHTML = html;
+    return;
+  }
   if (tel.final) {
     telemetry.final = outcomeHtml(tel);
     hudText.innerHTML = telemetry.final;
@@ -451,7 +505,7 @@ function onTelemetry(tel) {
   telemetry.last = now;
   hudText.innerHTML = telemetryHtml(tel);
 }
-async function launch() {
+async function launch({ countdown } = {}) {
   if (!isComplete() || choreo.state.busy || choreo.state.launch) return;
   setRocketsOpen(false);
   if (choreo.state.exploded && !(await choreo.assemble())) return;
@@ -467,7 +521,8 @@ async function launch() {
   lastSim = sim;
   telemetry.final = null;
   selector.clear();
-  choreo.launch(sim, { pad: pad.group, onTelemetry });
+  const arrival = arrivalTimeline(current.build, catalog, sim.summary);
+  choreo.launch(sim, { pad: pad.group, anchors, onTelemetry, arrival, countdown });
 }
 
 // ---------- twin compare (design B8/C10) ----------
@@ -689,44 +744,43 @@ async function runStory() {
   try {
     hideTwin({ reframe: false });
     setRocketsOpen(false);
-    if (current.preset.id !== "falcon-9" || current.modified) switchPreset(presetIds.indexOf("falcon-9") - presetIndex);
+    if (current.preset.id !== "falcon-9" || current.modified) switchPreset(presetIds.indexOf("falcon-9") - presetIndex, { built: false });
     else if (parts.some((p) => p.built) || choreo.state.launch) choreo.reset();
-    await hold(500);
+    await hold(300);
     await step(choreo.buildAll());
     await until(() => isComplete() && !choreo.state.busy && !choreo.state.auto);
-    await hold(1500);
+    await hold(700);
 
     // The stage-2 tank: card, Options, the first unusual alternative, then back.
     const slot = () => parts.find((p) => p.kind === "tank" && p.stageIndex === 1) ?? parts.find((p) => p.kind === "tank");
     const original = slot().record.id;
     selector.select(slot());
-    await hold(1000);
+    await hold(600);
     card.el.querySelector(".opt-toggle")?.click();
-    await hold(1000);
+    await hold(600);
     const alts = optionsWithCompat(current.build, catalog, "tank", slot().stageIndex);
     const pick = alts.find((o) => o.level === "unusual" && o.record.id !== original) ?? alts.find((o) => o.level === "ok" && o.record.id !== original);
     if (pick) {
       await step(chooseOption(slot(), pick.record.id));
-      await hold(1500);
+      await hold(900);
       card.el.querySelector(".opt-toggle")?.click();
-      await hold(800);
+      await hold(600);
       await step(chooseOption(slot(), original));
       await hold(500);
     }
     selector.clear();
-    await hold(300);
 
-    // Launch, watch it to the outcome, hold.
-    launch();
+    // Launch (a shorter countdown in the story), watch it to the outcome, hold.
+    launch({ countdown: 1.5 });
     await until(() => choreo.state.launch === "done");
-    await until(() => !choreo.state.deploying); // the payload unfolds in orbit first
-    await hold(2000);
+    await until(() => !choreo.state.ending && !choreo.state.deploying); // the planet ending (≤ 8 s)
+    await hold(600);
 
     // Back on the pad beside its closest real twin, then a slow orbit around both.
     choreo.returnToPad();
-    await hold(1000);
+    await hold(700);
     showTwin();
-    await hold(1200);
+    await hold(800);
     controls.autoRotate = true;
     controls.autoRotateSpeed = 0.5;
   } catch (e) {
@@ -739,8 +793,51 @@ async function runStory() {
 }
 // A real key press or click (not the story's own actions) hands control back.
 const cancelStory = (e) => {
-  if (story.active && e.isTrusted) story.cancel?.();
+  if (story.active && e.isTrusted) {
+    story.cancel?.();
+    story.cancelledAt = performance.now();
+  }
 };
+// The story's end state, at once: Falcon 9 built on the pad, its twin beside it, a slow orbit.
+function showStoryEnd() {
+  choreo.reset();
+  if (current.preset.id !== "falcon-9" || current.modified) switchPreset(presetIds.indexOf("falcon-9") - presetIndex);
+  else choreo.appearBuilt();
+  setTimeout(() => {
+    if (choreo.state.busy) choreo.skip();
+    showTwin();
+    controls.autoRotate = true;
+    controls.autoRotateSpeed = 0.5;
+  }, 900);
+}
+
+// ---------- skip: double-click / double-tap on the canvas finishes the running animation ----------
+function skipNow() {
+  if (performance.now() - (story.cancelledAt ?? -1e9) < 900) {
+    story.cancelledAt = -1e9;
+    return showStoryEnd();
+  }
+  const what = choreo.skip();
+  if (what === "settled" && swapping) {
+    swapping = false;
+    shown = null;
+  }
+  if (what) syncUi();
+}
+canvas.addEventListener("dblclick", (e) => {
+  if (landing) return;
+  e.preventDefault();
+  skipNow();
+});
+let lastTap = null; // double-tap: two touch taps within 320 ms and 30 px
+canvas.addEventListener("pointerup", (e) => {
+  if (e.pointerType !== "touch" || landing) return;
+  const now = performance.now();
+  if (lastTap && now - lastTap.t < 320 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 30) {
+    lastTap = null;
+    skipNow();
+  } else lastTap = { t: now, x: e.clientX, y: e.clientY };
+});
 addEventListener("keydown", cancelStory, true);
 addEventListener("pointerdown", cancelStory, true);
 
@@ -754,8 +851,20 @@ function onPartKey(part) {
 
 addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (landing) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      enterFromLanding();
+    }
+    return; // nothing else until the user has entered
+  }
   if (e.target.closest?.("input, textarea, select")) return;
   if (e.key === "Escape" && !rocketsEl.hidden) return setRocketsOpen(false);
+  // After a launch the final frame holds (HUD outcome line) until R, Esc or a double-click.
+  if (e.key === "Escape" && choreo.state.launch === "done" && !choreo.state.ending) {
+    choreo.skip();
+    return syncUi();
+  }
   const k = e.key.toLowerCase();
   const byKey = parts.find((p) => p.key === k);
   if (byKey) return onPartKey(byKey);
@@ -765,7 +874,6 @@ addEventListener("keydown", (e) => {
     choreo.toggleExplode();
   } else if (k === "b") choreo.buildAll();
   else if (k === "r") reset();
-  else if (k === "m") btnSound.click();
   else if (k === "l") launch();
   else if (k === "c") toggleTwin();
   else if (k === "s") saveCard();
@@ -774,6 +882,75 @@ addEventListener("keydown", (e) => {
   else if (k === "[") switchPreset(-1);
   else if (k === "]") switchPreset(1);
 });
+
+// ---------- landing page (first load without ?build / ?story / ?skip / ?demo) ----------
+// The Earth (UI4's planet.js) large in the lower half, a big title and one button; bar, HUD and hint hidden.
+// The globe sits right under the pad, so "Build a rocket" is one continuous descent from orbit to the home
+// shot: the pad group appears once the camera is above the deck, the planet sinks away under the ground, and
+// the UI fades in. The landing DOM is created here and removed after entering.
+const LANDING_R = 40;
+const LANDING_AZ = 0.58; // the home view's azimuth
+let landing = null;
+function startLanding() {
+  document.body.classList.add("landing");
+  const planet = createPlanet({ kind: "earth", radius_u: LANDING_R });
+  planet.object3d.position.set(0, -LANDING_R - 0.2, 0); // the pad stands on its north pole
+  planet.setSunDir?.(new THREE.Vector3(-0.85, 0.35, -0.2).normalize());
+  scene.add(planet.object3d);
+  root.visible = false;
+  controls.enabled = false;
+  const c = planet.object3d.position;
+  const off = new THREE.Vector3(0, 0.62 * LANDING_R, 2.05 * LANDING_R).applyAxisAngle(new THREE.Vector3(0, 1, 0), LANDING_AZ);
+  camera.position.copy(c).add(off);
+  controls.target.set(c.x, c.y + 1.02 * LANDING_R, c.z);
+  camera.lookAt(controls.target);
+  const el = document.createElement("div");
+  el.className = "landing";
+  el.innerHTML = `<h1>Rocket Assembly</h1><button type="button" class="landing-go">Build a rocket</button>`;
+  document.body.appendChild(el);
+  el.querySelector(".landing-go").addEventListener("click", enterFromLanding);
+  landing = { planet, el, entering: false, y0: planet.object3d.position.y };
+}
+function enterFromLanding() {
+  if (!landing || landing.entering) return;
+  landing.entering = true;
+  sfx.unlock();
+  sfx.play("whoosh", { rate: 0.6, gain: 0.8 });
+  const { planet, el, y0 } = landing;
+  el.style.transition = "none"; // the title and button fade with the move itself (first 40 %)
+  el.querySelector(".landing-go").disabled = true;
+  const p0 = camera.position.clone();
+  const t0 = controls.target.clone();
+  const { position: p1, target: t1 } = choreo.homePose(LANDING_AZ);
+  const smooth = (x) => (x <= 0 ? 0 : x >= 1 ? 1 : x * x * (3 - 2 * x));
+  const prog = { v: 0 };
+  animate(prog, {
+    v: 1,
+    duration: 3200,
+    ease: "inOutCubic",
+    onUpdate: () => {
+      const e = prog.v;
+      camera.position.lerpVectors(p0, p1, e);
+      controls.target.lerpVectors(t0, t1, e);
+      camera.lookAt(controls.target);
+      // The planet sinks away well before the deck shows (globe top and ground disc are almost coplanar).
+      planet.object3d.position.y = y0 - smooth((e - 0.2) / 0.4) * LANDING_R * 1.5;
+      if (!root.visible && camera.position.y > -0.5 && e > 0.45) root.visible = true; // the deck is one-sided
+      root.position.y = -2.5 * (1 - smooth((e - 0.55) / 0.35)); // the pad (and its ghost) rise into view
+      el.style.opacity = String(1 - smooth(e / 0.4));
+      if (e > 0.72 && document.body.classList.contains("landing")) document.body.classList.remove("landing"); // bar, HUD, hint fade in
+    },
+    onComplete: () => {
+      planet.dispose();
+      el.remove();
+      root.visible = true;
+      root.position.y = 0;
+      controls.enabled = true;
+      landing = null;
+      syncUi();
+    },
+  });
+}
 
 const unlock = () => {
   sfx.unlock();
@@ -785,7 +962,9 @@ addEventListener("keydown", unlock);
 
 // ---------- loop ----------
 choreo.prewarm(renderer);
-choreo.home();
+const landingMode = !["build", "story", "skip", "demo"].some((k) => query.has(k));
+if (landingMode) startLanding();
+else choreo.home();
 syncUi();
 
 // GTAO budget: frame times are averaged over 2 s windows while it is on; one slow window drops it for the
@@ -824,6 +1003,7 @@ function frame() {
   scene.fog.far = dist + (mode === "focus" || mode === "exploded" ? 3 : 6) * R;
   if (pad?.ringMat) pad.ringMat.opacity = 0.55 + 0.3 * (0.5 + 0.5 * Math.sin(t * 1.6));
   twin?.sil?.update(camera);
+  landing?.planet.update(t, camera);
   anchors?.update(t);
   if (composer) composer.render();
   else renderer.render(scene, camera);

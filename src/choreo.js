@@ -25,7 +25,9 @@ import { animate, spring } from "animejs";
 import { createHologramMaterial } from "./fx/hologram.js";
 import { createBoltFlash } from "./fx/flash.js";
 import { COLORS, LOOK, deployables, setShellOpacity as setShell } from "./parts.js";
-import { attachPlumes, createPadLight, P0 } from "./plume.js";
+import { attachPlumes, createPadLight, createPlume, P0 } from "./plume.js";
+import { createPlanet, createSurfacePatch, createDustPuff } from "./planet.js";
+import { createDroneShip } from "./anchors.js";
 
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const D = (ms) => (reduced ? ms * 0.55 : ms);
@@ -67,7 +69,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   const flash = createBoltFlash();
   scene.add(flash.object3d);
 
-  const state = { busy: 0, exploded: false, scrubbing: false, auto: false, launch: null, deploying: false, gen: 0, shake: 0 };
+  const state = { busy: 0, exploded: false, scrubbing: false, auto: false, launch: null, deploying: false, ending: false, gen: 0, shake: 0 };
   const live = new Set();
   const selectColor = new THREE.Color(COLORS.select ?? 0xffb020);
   const highlighted = new Set();
@@ -240,10 +242,10 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   }
   // Distance at which the span [y0, y1] around the axis (radius r) fills `frac` of the viewport height
   // (and fits the width), for the current camera pitch.
-  function fitDist(h, r, frac) {
+  function fitDist(h, r, frac, atPitch = null) {
     const tanHalf = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
     camDir.copy(camera.position).sub(controls.target).normalize();
-    const pitch = Math.abs(Math.asin(THREE.MathUtils.clamp(camDir.y, -1, 1)));
+    const pitch = Math.abs(atPitch ?? Math.asin(THREE.MathUtils.clamp(camDir.y, -1, 1)));
     const dv = (h * Math.cos(pitch) + 2 * r * Math.sin(pitch)) / (2 * tanHalf * frac);
     const dh = (2 * r) / (2 * tanHalf * camera.aspect * frac);
     return Math.max(dv, dh) + r;
@@ -252,8 +254,8 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   // What the camera frames now (main's fog band): its radius and mode ("stack" | "part" | "focus" | "exploded").
   let framedR = initialBounds?.radius_u ?? 1;
   let framedMode = "stack";
-  function spanFraming(y0, y1, r, frac, shift = 0.02) {
-    const dist = Math.max(controls.minDistance, fitDist(Math.max(y1 - y0, 0.05), r, frac));
+  function spanFraming(y0, y1, r, frac, shift = 0.02, atPitch = null) {
+    const dist = Math.max(controls.minDistance, fitDist(Math.max(y1 - y0, 0.05), r, frac, atPitch));
     const tanHalf = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
     return { ty: (y0 + y1) / 2 - shift * 2 * dist * tanHalf, dist };
   }
@@ -297,6 +299,17 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     framedR = halfWidth;
     framedMode = "stack";
     return frameTo({ ...spanFraming(0, top, halfWidth, 0.8), tx: center.x, tz: center.z, pitch: HOME_PITCH });
+  }
+  // The home shot as a pose (no animation), for a camera move that must end exactly where home() would:
+  // azimuth az (radians, around +Y from +Z), home pitch.
+  function homePose(az = 0.58) {
+    const { ty, dist } = spanFraming(0, stackHeight(), stackRadius(), 0.83, 0.02, HOME_PITCH);
+    const target = new THREE.Vector3(0, ty, 0);
+    const c = Math.cos(HOME_PITCH);
+    const position = target.clone().add(new THREE.Vector3(Math.sin(az) * c, Math.sin(HOME_PITCH), Math.cos(az) * c).multiplyScalar(dist));
+    framedR = stackRadius();
+    framedMode = "stack";
+    return { target, position };
   }
   // Home: the whole stack-to-be at 85 %, the first ghost waiting on the pad.
   function home() {
@@ -611,6 +624,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     const gen = state.gen;
     state.busy++;
     part.busy = true;
+    part.removing = true;
     if (highlighted.has(part)) clearHighlight(part);
     changed();
     sfx.play("whoosh", { rate: 0.8 });
@@ -618,6 +632,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     if (gen !== state.gen) return false;
     part.built = false;
     part.busy = false;
+    part.removing = false;
     state.busy--;
     frameStack();
     changed();
@@ -711,10 +726,12 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   }
 
   // Spring the progress to 0 or 1 (Space, or a released scrub). Busy while it runs.
+  let xTarget = 0;
   async function settleExplode(to) {
     const gen = state.gen;
     xAnim?.cancel();
     live.delete(xAnim);
+    xTarget = to;
     state.busy++;
     state.exploded = true;
     changed();
@@ -730,10 +747,14 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     xAnim = p.anim;
     await p;
     if (gen !== state.gen) return false;
+    finishExplode(to);
+    return true;
+  }
+  function finishExplode(to) {
     xAnim = null;
     xs.v = to;
     applyExplode();
-    state.busy--;
+    state.busy = Math.max(0, state.busy - 1);
     if (to === 1) {
       controls.autoRotate = true;
       controls.autoRotateSpeed = 0.9;
@@ -1063,6 +1084,12 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       case "liftoff":
         sfx.play("clunk"); // hold-down release
         state.shake = 1;
+        for (const [i, arm] of (L.anchors?.arms ?? []).entries()) {
+          const k = { v: 0 };
+          const r0 = arm.mesh.rotation.y;
+          const swing = THREE.MathUtils.degToRad(70) * (i % 2 ? -1 : 1);
+          run(k, { v: 1, duration: D(900), ease: "outCubic", onUpdate: () => (arm.mesh.rotation.y = r0 + swing * k.v) });
+        }
         break;
       case "meco":
         for (const pl of L.plumes) if (pl.stage === e.stage) pl.dead = true;
@@ -1097,6 +1124,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     if (L.done) {
       if (L.drifting) L.flight.rotateY(dt * 0.15); // slow roll in orbit; the outcome line stays in the HUD
       updateDebris(dt);
+      if (E) endingUpdate(dt);
       return;
     }
     L.real += dt;
@@ -1169,7 +1197,9 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     const inOrbit = types.has("orbit");
     L.drifting = inOrbit;
     const maxAlt = Math.max(...L.samples.map((x) => x.alt_m));
-    if (inOrbit) {
+    if (inOrbit && L.arrival?.legs?.length) {
+      startEnding(L.arrival); // the planet ending (≤ 8 s): orbit, transfer, arrival, landing
+    } else if (inOrbit) {
       // In orbit: frame the payload, orbit it slowly, unfold its hinges (fairing is long gone).
       const payload = parts.find((p) => p.kind === "payload" && !L.gone.has(p));
       controls.autoRotate = true;
@@ -1211,7 +1241,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   }
 
   // launch(sim, { pad, onTelemetry }) -> Promise<outcome>. The stack must be complete and assembled.
-  function launch(sim, { pad = null, onTelemetry = () => {} } = {}) {
+  function launch(sim, { pad = null, anchors = null, onTelemetry = () => {}, arrival = null, countdown = COUNTDOWN_S } = {}) {
     if (state.busy || state.exploded || state.launch || !parts.length || !parts.every((p) => p.built) || !sim?.samples?.length) {
       return Promise.resolve(false);
     }
@@ -1238,7 +1268,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       samples: sim.samples,
       events: sim.events,
       keys: playbackKeys(sim.events, sim.samples[sim.samples.length - 1].t),
-      real: -COUNTDOWN_S,
+      real: -countdown,
       next: 0,
       flight,
       pad,
@@ -1255,8 +1285,12 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       onTelemetry,
       tracking: false,
       done: false,
+      arrival,
+      anchors,
+      arms0: (anchors?.arms ?? []).map((a) => a.mesh.rotation.y),
     };
     controls.autoRotate = false;
+    sfx.play("launch-swell"); // 3 s riser, peaks at ignition (end of the countdown)
     frameSpan(0, H + L.riseMax, stackRadius(), 0.85, { pitch: HERO_PITCH, mode: "stack" });
     changed();
     return new Promise((resolve) => (L.resolve = resolve));
@@ -1303,6 +1337,385 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     return frameTo({ tx: c.x, ty: c.y, tz: c.z, dist: Math.max(controls.minDistance, dist), duration: D(1400) });
   }
 
+  // ---------- planet ending (design §7, ≤ 8 s after ORBIT) ----------
+  // Plays arrival.js legs (UI 2): { type: orbit | transfer | descent | touchdown | stranded, seconds, body, note }.
+  // orbit: the body's planet (UI4's planet.js) rises in below the craft and turns under it; the payload unfolds
+  // on the final orbit of a satellite mission. transfer: the upper stage relights, the origin planet recedes and
+  // the destination comes in. descent: cut to UI4's surface patch; the payload comes down upright on a small
+  // plume while its legs deploy (feet on the ground at touchdown). touchdown: UI4's dust puff. stranded: stays
+  // in Earth orbit with the shortfall line.
+  const PLANET_R = { earth: 70, moon: 26, mars: 40 };
+  let E = null;
+  function craftBox() {
+    focusBox.makeEmpty();
+    for (const part of parts) {
+      if (L?.gone.has(part)) continue;
+      for (const piece of part.pieces) if (piece.mesh.visible) focusBox.expandByObject(piece.mesh);
+    }
+    return focusBox.clone();
+  }
+  function planetFor(body) {
+    if (!E.planets[body]) {
+      const R = PLANET_R[body] ?? 40;
+      const planet = createPlanet({ kind: body, radius_u: R });
+      planet.setSunDir?.(new THREE.Vector3(-0.85, 0.35, -0.2).normalize());
+      planet.R = R;
+      scene.add(planet.object3d);
+      E.planets[body] = planet;
+    }
+    return E.planets[body];
+  }
+  // A planet slides up into place below the craft (from 0.9 R lower) over `ms`.
+  function bringPlanet(planet, ms) {
+    const target = E.F.clone().add(new THREE.Vector3(0, -(planet.R + E.r * 2.6), 0));
+    planet.object3d.visible = true;
+    planet.object3d.scale.setScalar(1);
+    const from = target.clone().add(new THREE.Vector3(0, -planet.R * 0.9, 0));
+    planet.object3d.position.copy(from);
+    const k = { v: 0 };
+    run(k, { v: 1, duration: D(ms), ease: "outCubic", onUpdate: () => planet.object3d.position.lerpVectors(from, target, k.v) });
+  }
+  function frameCraft(distK, pitchDeg, ms = 900) {
+    framedR = E.r * 3;
+    framedMode = "focus";
+    frameTo({ tx: E.F.x, ty: E.F.y, tz: E.F.z, dist: Math.max(controls.minDistance, E.r * distK), pitch: THREE.MathUtils.degToRad(pitchDeg), duration: D(ms) });
+  }
+  function startEnding(arrival) {
+    const box = craftBox();
+    E = {
+      arrival,
+      legs: arrival.legs,
+      i: -1,
+      legT: 0,
+      planets: {},
+      F: box.getCenter(new THREE.Vector3()),
+      r: Math.max(0.4, box.getSize(new THREE.Vector3()).length() / 2),
+      dust: createDustPuff(),
+      patch: null,
+      lander: null,
+      origin: null,
+    };
+    scene.add(E.dust.object3d);
+    // Earth missions land something: the Falcon booster (when it returns), then the payload deployed above
+    // Earth (planet below), or stranded above Earth when short. Moon/Mars keep arrival.js's legs.
+    const booster = L.sim.summary.booster;
+    if (!arrival.body || arrival.body === "earth") {
+      E.legs = [];
+      if (booster?.returns && booster.samples?.length) E.legs.push({ type: "booster", seconds: 4.4 });
+      E.legs.push({ type: arrival.success ? "earth-payload" : "stranded", seconds: 3.4, body: "earth" });
+    }
+    state.ending = true;
+    controls.autoRotate = false;
+    nextLeg();
+    if (L.skipEnding) fastForwardEnding();
+  }
+  // Run the remaining legs to their end state at once (double-click skip).
+  function fastForwardEnding() {
+    while (E && state.ending) {
+      const leg = E.legs[E.i];
+      if (leg?.type === "booster" && E.booster && !E.booster.ended) {
+        const B = E.booster;
+        B.outer.position.y = B.touchY;
+        B.outer.quaternion.identity();
+        for (const plume of B.plumes) plume.update(0, { throttle: 0, ambientPressure_Pa: P0, cameraDistance: 10 });
+        B.touched = true;
+      }
+      if (leg?.type === "descent" && E.lander) {
+        E.lander.part.group.position.y = E.lander.touchY;
+        E.lander.plume.update(0, { throttle: 0, ambientPressure_Pa: 0, cameraDistance: 10 });
+      }
+      nextLeg();
+    }
+  }
+  function nextLeg() {
+    E.i++;
+    E.legT = 0;
+    const leg = E.legs[E.i];
+    if (!leg) return finishEnding();
+    L.onTelemetry({ ending: true, leg });
+    const lastOrbit = !E.legs.slice(E.i + 1).some((l) => l.type === "orbit" || l.type === "descent");
+    switch (leg.type) {
+      case "orbit": {
+        const planet = planetFor(leg.body);
+        if (E.origin !== planet) bringPlanet(planet, Math.min(900, leg.seconds * 600));
+        for (const p of Object.values(E.planets)) if (p !== planet) p.object3d.visible = false;
+        E.origin = planet;
+        frameCraft(5.5, 18);
+        const payload = parts.find((p) => p.kind === "payload" && !L.gone.has(p));
+        if (lastOrbit && payload && !E.deployed && deployables(payload).length) {
+          E.deployed = true;
+          deploy(payload, { gap: 500 });
+        }
+        break;
+      }
+      case "transfer": {
+        E.burn = leg.seconds * 0.5; // the upper stage relights for the first half
+        E.from = E.origin;
+        E.to = leg.body && E.planets[leg.body] !== E.origin && PLANET_R[leg.body] ? planetFor(leg.body) : null;
+        if (E.to) E.to.object3d.visible = false;
+        frameCraft(9, 12, leg.seconds * 500);
+        break;
+      }
+      case "descent":
+        startDescent(leg);
+        break;
+      case "touchdown":
+        if (E.lander) {
+          E.lander.part.group.position.y = E.lander.touchY;
+          E.lander.plume?.update(0, { throttle: 0, ambientPressure_Pa: 0, cameraDistance: 10 });
+          E.dust.fire({ position: E.lander.ground.clone(), radius: E.lander.part.radius * 1.6 });
+          sfx.play("clunk", { gain: 0.6 });
+          state.shake = 0.3;
+        }
+        break;
+      case "booster":
+        startBooster(L.sim.summary.booster);
+        break;
+      case "earth-payload":
+      case "stranded": {
+        endBoosterScene();
+        L.flight.visible = true;
+        const planet = planetFor("earth");
+        bringPlanet(planet, 500);
+        E.origin = planet;
+        frameCraft(5.5, 18, 1); // a hard cut from the booster
+        const payload = parts.find((p) => p.kind === "payload" && !L.gone.has(p));
+        if (leg.type === "earth-payload" && payload && deployables(payload).length) deploy(payload, { gap: 500 });
+        break;
+      }
+    }
+  }
+
+  // ---------- booster return (design A4): the stage-0 parts land on the pad (rtls) or a drone-ship deck ----------
+  // Screen ~4.4 s, mapped onto UI 2's booster events: flip (grid fins unfold), 3-engine entry burn, coast (legs
+  // deploy), 1-engine landing burn (deck splash), touchdown. Telemetry reads the booster samples at the mapped T+.
+  const BOOSTER_PHASES = [
+    { name: "FLIP", s: 0.7 },
+    { name: "ENTRY BURN", s: 1.2, lit: 3 },
+    { name: "COAST", s: 0.7 },
+    { name: "LANDING BURN", s: 1.2, lit: 1 },
+    { name: "TOUCHDOWN", s: 0.6 },
+  ];
+  function startBooster(bst) {
+    const bparts = parts.filter((p) => p.stageIndex === 0);
+    if (!bparts.length) return;
+    L.debris = L.debris.filter((d) => !bparts.includes(d.part)); // the falling-away tumble no longer owns them
+    L.flight.visible = false;
+    for (const p of Object.values(E.planets)) p.object3d.visible = false;
+    const Hb = Math.max(...bparts.map((p) => p.slotY + p.height));
+    const outer = new THREE.Group();
+    const inner = new THREE.Group();
+    inner.position.y = -Hb / 2; // pivot at mid-height, so the flip turns about the middle
+    outer.add(inner);
+    scene.add(outer);
+    for (const part of bparts) {
+      inner.add(part.group);
+      part.group.position.set(0, part.slotY, 0);
+      part.group.quaternion.identity();
+      part.group.visible = true;
+      for (const piece of part.pieces) {
+        piece.mesh.position.copy(piece.rest.position);
+        piece.mesh.quaternion.copy(piece.rest.quaternion);
+        piece.mesh.visible = true;
+      }
+    }
+    // Landing zone at the origin: the real pad (rtls) or a drone-ship deck.
+    let zone = null;
+    if (bst.mode === "rtls" && L.pad) {
+      L.pad.position.y = 0;
+      L.pad.visible = true;
+    } else {
+      if (L.pad) L.pad.visible = false;
+      const ship = createDroneShip({ size_u: Math.max(...bparts.map((p) => p.radius)) * 9 });
+      ship.object3d.position.y = -(ship.deckY ?? 0); // deck at y = 0, where the feet touch down
+      zone = ship.object3d;
+      scene.add(zone);
+    }
+    // Feet height with fins and legs out: deploy to 1, measure, put back.
+    const deps = bparts.flatMap((p) => deployables(p));
+    for (const piece of deps) applyDeploy(piece, 1);
+    outer.position.set(0, 0, 0);
+    outer.updateMatrixWorld(true);
+    focusBox.makeEmpty();
+    for (const part of bparts) for (const piece of part.pieces) focusBox.expandByObject(piece.mesh);
+    const feet = focusBox.min.y; // relative to the outer pivot at y = 0
+    for (const piece of deps) applyDeploy(piece, 0);
+    const touchY = -feet;
+    const startY = touchY + Hb * 2.4;
+    outer.position.y = startY;
+    // Plumes: the ascent's stage-0 plumes ride on the engines part; light the innermost bells first.
+    const bplumes = L.plumes
+      .filter((pl) => pl.stage === 0)
+      .map((pl) => pl.plume)
+      .sort((a, b) => Math.hypot(a.object3d.position.x, a.object3d.position.z) - Math.hypot(b.object3d.position.x, b.object3d.position.z));
+    const exitR = Math.max(...bplumes.map((p) => p.exitRadius_u ?? 0.1), 0.1);
+    const splash = createPadLight({ baseRadius_u: Math.max(...bparts.map((p) => p.radius)), bellExitRadius_u: exitR });
+    scene.add(splash.object3d);
+    const ev = (type) => bst.events.find((e) => e.type === type);
+    const tFlip = ev("flip")?.t ?? bst.samples[0].t;
+    const tEntry = ev("entry")?.t ?? tFlip + 60;
+    const tLand = ev("landing-burn")?.t ?? tEntry + 60;
+    const tDown = ev("touchdown")?.t ?? ev("lost")?.t ?? tLand + 20;
+    E.booster = {
+      bst, bparts, outer, zone, splash, plumes: bplumes, Hb, startY, touchY, u: 0, landed: Boolean(ev("touchdown")),
+      times: [tFlip, tEntry, (tEntry + tLand) / 2, tLand, tDown, tDown],
+    };
+    if (deps.length) for (const part of bparts) if (deployables(part).length) deploy(part, { gap: 2600 }); // fins now, legs just before the landing burn
+    camAnim?.cancel();
+    sfx.play("whoosh", { rate: 0.7 });
+  }
+  function boosterSampleAt(t) {
+    const smp = E.booster.bst.samples;
+    if (t <= smp[0].t) return smp[0];
+    for (let i = 1; i < smp.length; i++) if (smp[i].t >= t) return smp[i];
+    return smp[smp.length - 1];
+  }
+  function boosterUpdate(dt) {
+    const B = E.booster;
+    B.u += dt;
+    let acc = 0;
+    let phase = BOOSTER_PHASES.length - 1;
+    for (let i = 0; i < BOOSTER_PHASES.length; i++) {
+      if (B.u < acc + BOOSTER_PHASES[i].s) {
+        phase = i;
+        break;
+      }
+      acc += BOOSTER_PHASES[i].s;
+    }
+    const ph = BOOSTER_PHASES[phase];
+    const q = Math.min(1, (B.u - acc) / ph.s);
+    const total = BOOSTER_PHASES.reduce((n, p) => n + p.s, 0);
+    // Height: down to the deck by the end of the landing burn, slowing over it.
+    const fall = Math.min(1, B.u / (total - BOOSTER_PHASES[4].s));
+    const ease = 1 - (1 - fall) ** 2.2;
+    B.outer.position.y = B.startY + (B.touchY - B.startY) * ease;
+    // Flip: from engines-up to engines-down over the first phase.
+    const flip = phase === 0 ? 1 - q * q * (3 - 2 * q) : 0;
+    B.outer.quaternion.setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI * flip);
+    const lit = ph.lit ?? 0;
+    const alt_m = Math.max(0, (B.outer.position.y - B.touchY) / scale);
+    B.plumes.forEach((plume, i) => plume.update(dt, { throttle: i < lit ? 1 : 0, ambientPressure_Pa: P0 * Math.exp(-alt_m * 40 / SCALE_HEIGHT_M), cameraDistance: camera.position.distanceTo(controls.target) }));
+    B.splash.update(dt, phase === 3 ? 1 : 0, alt_m);
+    if (phase === 4 && !B.touched) {
+      B.touched = true;
+      sfx.play("clunk", { gain: 0.8 });
+      state.shake = 0.5;
+    }
+    // Camera: low and steady at the deck, following the booster down.
+    const ty = B.outer.position.y + B.Hb * 0.1;
+    controls.target.set(0, ty * 0.6 + B.touchY * 0.4, 0);
+    const d = B.Hb * 2.6;
+    const el = THREE.MathUtils.degToRad(6);
+    camera.position.set(Math.sin(0.58) * Math.cos(el) * d, controls.target.y + Math.sin(el) * d, Math.cos(0.58) * Math.cos(el) * d);
+    framedR = B.Hb * 0.5;
+    framedMode = "focus";
+    // Telemetry on the booster's own clock.
+    const t = B.times[phase] + (B.times[phase + 1] - B.times[phase]) * q;
+    const smp = boosterSampleAt(t);
+    L.onTelemetry({ booster: true, t, alt_m: smp.alt_m, vel_ms: smp.vel_ms, label: phase === 4 ? (B.landed ? "TOUCHDOWN" : "LOST") : ph.name });
+  }
+  function endBoosterScene() {
+    const B = E?.booster;
+    if (!B || B.ended) return;
+    B.ended = true;
+    B.outer.visible = false;
+    for (const plume of B.plumes) plume.update(0, { throttle: 0, ambientPressure_Pa: 0, cameraDistance: 10 });
+    B.splash.update(0, 0, 1000);
+  }
+  function startDescent(leg) {
+    const payload = parts.find((p) => p.kind === "payload" && !L.gone.has(p));
+    if (!payload) return;
+    // Cut to the surface: the planet sphere and the rest of the stack go; the payload comes down upright.
+    for (const p of Object.values(E.planets)) p.object3d.visible = false;
+    const ground = E.F.clone().add(new THREE.Vector3(0, -E.r * 4, 0));
+    E.patch = createSurfacePatch({ kind: leg.body === "mars" ? "mars" : "moon", radius_u: Math.max(8, E.r * 6) });
+    E.patch.object3d.position.copy(ground);
+    scene.add(E.patch.object3d);
+    root.attach(payload.group);
+    L.gone.add(payload);
+    L.flight.visible = false;
+    payload.group.quaternion.identity();
+    for (const piece of payload.pieces) if (/:(0|1)$/.test(piece.mesh.name)) piece.mesh.visible = false; // adapter cone + clamp band
+    // Where the feet end up once the legs are out: deploy to 1, measure, put them back.
+    const deps = deployables(payload);
+    for (const piece of deps) applyDeploy(piece, 1);
+    payload.group.position.set(ground.x, 0, ground.z);
+    payload.group.updateMatrixWorld(true);
+    focusBox.makeEmpty();
+    for (const piece of payload.pieces) if (piece.mesh.visible) focusBox.expandByObject(piece.mesh);
+    const feetLocal = focusBox.min.y - payload.group.position.y;
+    for (const piece of deps) applyDeploy(piece, 0);
+    const touchY = ground.y - feetLocal;
+    const startY = touchY + E.r * 3;
+    payload.group.position.y = startY;
+    const plume = createPlume({ engineRecord: { id: "lander", propellant: "hypergolic" }, exitRadius_u: Math.max(0.05, payload.radius * 0.22) });
+    plume.object3d.position.set(0, feetLocal * 0.3, 0);
+    payload.group.add(plume.object3d);
+    E.lander = { part: payload, ground, touchY, startY, plume };
+    if (deps.length) deploy(payload, { gap: 300 });
+    framedR = E.r * 2;
+    framedMode = "focus";
+    frameTo({ tx: ground.x, ty: ground.y + E.r * 1.4, tz: ground.z, dist: E.r * 6, pitch: THREE.MathUtils.degToRad(10), duration: D(500) });
+  }
+  function endingUpdate(dt) {
+    const leg = E.legs[E.i];
+    E.legT += dt;
+    for (const p of Object.values(E.planets)) {
+      if (!p.object3d.visible) continue;
+      p.update(E.legT, camera);
+      p.object3d.rotation.x += dt * 0.05; // the ground slides under the craft
+    }
+    if (leg?.type === "transfer") {
+      const q = Math.min(1, E.legT / Math.max(0.1, leg.seconds));
+      if (E.from) {
+        E.from.object3d.position.y -= dt * E.from.R * 0.6;
+        E.from.object3d.scale.setScalar(1 - 0.6 * q);
+      }
+      if (E.to && q > 0.5 && !E.to.object3d.visible) bringPlanet(E.to, leg.seconds * 450);
+      const lastStage = Math.max(...L.plumes.map((pl) => pl.stage));
+      for (const pl of L.plumes) {
+        if (pl.stage !== lastStage) continue;
+        pl.plume.update(dt, { throttle: E.legT < E.burn ? 1 : 0, ambientPressure_Pa: 0, cameraDistance: camera.position.distanceTo(controls.target) });
+      }
+    }
+    if (leg?.type === "booster" && E.booster && !E.booster.ended) boosterUpdate(dt);
+    if (leg?.type === "descent" && E.lander) {
+      const q = Math.min(1, E.legT / Math.max(0.1, leg.seconds));
+      const ease = 1 - (1 - q) ** 3;
+      E.lander.part.group.position.y = E.lander.startY + (E.lander.touchY - E.lander.startY) * ease;
+      E.lander.plume.update(dt, { throttle: 1 - q * 0.6, ambientPressure_Pa: 0, cameraDistance: camera.position.distanceTo(controls.target) });
+    }
+    E.patch?.update?.(E.legT);
+    E.dust.update(dt);
+    if (leg && E.legT >= leg.seconds) nextLeg();
+  }
+  function finishEnding() {
+    state.ending = false;
+    L.onTelemetry({ ending: true, final: true, arrival: E.arrival, booster: E.booster ? (E.booster.landed ? "landed" : "lost") : null });
+    controls.autoRotate = true;
+    controls.autoRotateSpeed = 0.4;
+    changed();
+  }
+  function disposeEnding() {
+    if (!E) return;
+    for (const p of Object.values(E.planets)) p.dispose();
+    E.patch?.dispose?.();
+    if (E.patch) scene.remove(E.patch.object3d);
+    E.lander?.plume?.dispose();
+    if (E.booster) {
+      E.booster.splash.dispose?.();
+      if (E.booster.zone) {
+        scene.remove(E.booster.zone);
+        E.booster.zone.traverse((o) => o.geometry?.dispose()); // UI4's ship shares its prop materials: keep them
+      }
+      scene.remove(E.booster.outer);
+    }
+    E.dust.dispose?.();
+    scene.remove(E.dust.object3d);
+    E = null;
+    state.ending = false;
+  }
+
   // After a launch: the assembled rocket back on the pad, still built (story mode's twin compare).
   function returnToPad() {
     if (!L || !L.done) return false;
@@ -1311,6 +1724,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       for (const piece of part.pieces) {
         piece.mesh.position.copy(piece.rest.position);
         piece.mesh.quaternion.copy(piece.rest.quaternion);
+        piece.mesh.visible = part.built;
       }
       fadeShell(part, shellTarget(part), 0);
     }
@@ -1322,9 +1736,11 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
 
   // Undo a launch (reset / preset switch): plumes and pad light gone, parts back on the pad.
   function endLaunch() {
+    disposeEnding();
     if (!L) return;
     for (const pl of L.plumes) pl.plume.dispose();
     L.padLight?.dispose();
+    (L.anchors?.arms ?? []).forEach((arm, i) => (arm.mesh.rotation.y = L.arms0[i] ?? arm.mesh.rotation.y));
     if (L.pad) {
       L.pad.position.y = 0;
       L.pad.visible = true;
@@ -1344,7 +1760,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   // ---------- build all / build up to / reset ----------
   // Pipelined: the next part starts flying the moment the previous part's body has seated, while that part's
   // details are still landing. The camera follows each part and settles on the stack once, at the end.
-  async function buildUpTo(target) {
+  async function buildUpTo(target, { onLastSeat } = {}) {
     if (state.busy || state.exploded || target.built) return false;
     const gen = state.gen;
     state.auto = true;
@@ -1354,7 +1770,13 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         if (part.built) continue;
         let seated;
         const seatedP = new Promise((r) => (seated = r));
-        const done = buildPart(part, { onSeated: seated });
+        const last = part === target;
+        const done = buildPart(part, {
+          onSeated: () => {
+            seated();
+            if (last) onLastSeat?.();
+          },
+        });
         running.push(done);
         const ok = await Promise.race([seatedP.then(() => true), done]);
         if (!ok || gen !== state.gen) return false;
@@ -1372,9 +1794,10 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   }
 
   async function buildAll() {
-    if (state.busy || state.exploded || !parts.length) return;
+    if (state.busy || state.exploded || !parts.length || parts.every((p) => p.built)) return;
     const gen = state.gen;
-    const ok = await buildUpTo(parts[parts.length - 1]);
+    sfx.play("assemble-cue"); // UI 2's music cue; the sting lands on the last lock
+    const ok = await buildUpTo(parts[parts.length - 1], { onLastSeat: () => sfx.play("assemble-sting") });
     if (!ok || gen !== state.gen) return;
     controls.autoRotate = true;
     controls.autoRotateSpeed = 1.1;
@@ -1385,6 +1808,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
 
   // Back to the empty pad (camera untouched).
   function clear() {
+    sfx.stopMusic?.(0.3);
     endLaunch();
     state.gen++;
     cancelAll();
@@ -1394,6 +1818,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     state.scrubbing = false;
     state.auto = false;
     state.deploying = false;
+    state.ending = false;
     xs.v = 0;
     xAnim = null;
     xParts = [];
@@ -1427,6 +1852,90 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     clear();
     home();
     changed();
+  }
+
+  // A switched-to rocket appears built: every part at rest, then one snap from a small axial spread (all parts
+  // at once, spring 130/12, one clunk). No part-by-part build.
+  function appearBuilt() {
+    const gap = 1.2 * scale;
+    parts.forEach((part, i) => {
+      part.built = true;
+      part.busy = false;
+      hideGhostNow(part);
+      for (const piece of part.pieces) {
+        piece.mesh.visible = true;
+        piece.mesh.position.copy(piece.rest.position);
+        piece.mesh.quaternion.copy(piece.rest.quaternion);
+      }
+      part.group.position.y = part.slotY + (i + 1) * gap;
+    });
+    const gen = state.gen;
+    state.busy++;
+    const k = { v: 1 };
+    run(k, {
+      v: 0,
+      ease: spring({ stiffness: 130, damping: 12 }),
+      onUpdate: () => parts.forEach((p, i) => (p.group.position.y = p.slotY + (i + 1) * gap * k.v)),
+    }).then(() => {
+      if (gen !== state.gen) return;
+      state.busy--;
+      sfx.play("clunk", { gain: 0.8 });
+      state.shake = 0.6;
+      changed();
+    });
+    frameStack({ duration: D(700) });
+    changed();
+  }
+
+  // ---------- skip (double-click / double-tap) ----------
+  // Finish whatever is animating, at once: a launch jumps to its outcome (and through the planet ending), an
+  // ending runs to its end state, an explode/assemble lands, a build / Build all / swap / remove / switch snap
+  // settles with every part at rest (in-flight parts built, a part being removed gone). Returns what it did.
+  function skip() {
+    // A held outcome frame (manual launch): leave it, the rocket back on the pad, still built.
+    if (L && L.done && !state.ending) {
+      returnToPad();
+      return "pad";
+    }
+    if (L && !L.done) {
+      L.real = Math.max(L.real, L.keys[L.keys.length - 1][1] + 0.01);
+      L.skipEnding = true;
+      return "launch";
+    }
+    if (E && state.ending) {
+      fastForwardEnding();
+      return "ending";
+    }
+    if (xAnim) {
+      xAnim.cancel();
+      live.delete(xAnim);
+      finishExplode(xTarget);
+      return "explode";
+    }
+    if (!state.busy && !state.auto) return null;
+    const all = state.auto;
+    state.gen++; // pending build/swap continuations bail out
+    cancelAll();
+    for (const part of [...leaving]) retirePart(part);
+    for (const part of parts) {
+      const built = part.removing ? false : all || part.built || part.busy;
+      part.built = built;
+      part.busy = false;
+      part.removing = false;
+      part.group.position.y = part.slotY;
+      hideGhostNow(part);
+      for (const piece of part.pieces) {
+        piece.mesh.visible = built;
+        piece.mesh.position.copy(piece.rest.position);
+        piece.mesh.quaternion.copy(piece.rest.quaternion);
+      }
+      if (built) fadeShell(part, shellTarget(part), 0);
+    }
+    state.busy = 0;
+    state.auto = false;
+    frameStack();
+    changed();
+    return "settled";
   }
 
   // Preset switch: cancel everything, dispose the old stack, set up the new one.
@@ -1513,12 +2022,15 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     returnToPad,
     frameCompare,
     frameStack: () => frameStack(),
+    homePose,
     swap,
     applyManifest,
     restack,
     buildAll,
     reset,
     rebuild,
+    appearBuilt,
+    skip,
     setBounds,
     prewarm,
     update,
