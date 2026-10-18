@@ -15,11 +15,13 @@
 // Ghost    = the next buildable part shows as a faint hologram at its slot (idle 0.12, hover 0.35); hidden
 //            while busy, exploded or auto-building. part.ghostActive marks the clickable one.
 // Highlight = soft emissive pulse in COLORS.select on a selected part's (per-mesh cloned) materials.
+// X-ray    = shell opacity states via parts.setShellOpacity (design round 10): built 0.55, exploded 0.30,
+//            selected part 0.15 while the others keep theirs, 0.55 from the first frame of a fly-in.
 import * as THREE from "three";
 import { animate, spring } from "animejs";
 import { createHologramMaterial } from "./fx/hologram.js";
 import { createBoltFlash } from "./fx/flash.js";
-import { COLORS } from "./parts.js";
+import { COLORS, LOOK, setShellOpacity as setShell } from "./parts.js";
 
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const D = (ms) => (reduced ? ms * 0.55 : ms);
@@ -32,6 +34,9 @@ const tmpQ = new THREE.Quaternion();
 const tmpQ2 = new THREE.Quaternion();
 const tmpC = new THREE.Color();
 
+const SHELL = { built: 0.55, exploded: 0.3, focus: 0.15 };
+// Opacity states belong to the x-ray look only; the classic look keeps opaque shells.
+const setShellOpacity = LOOK === "xray" ? setShell : () => {};
 const GHOST_IDLE = 0.12;
 const GHOST_HOVER = 0.35;
 const EXPLODE_GAP_M = 3; // exploded view: clearance between parts, metres (visual)
@@ -109,6 +114,8 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     part.ghostFade = { v: 0 };
     part.ghostActive = false;
     part.hl = { v: 0 };
+    part.shell = { v: SHELL.built };
+    setShellOpacity(part, SHELL.built);
     part.group.position.y = part.slotY;
     const n = part.pieces.length;
     part.arrival = [...part.pieces].sort((a, b) => (a.order ?? a.index) - (b.order ?? b.index) || a.bottomY - b.bottomY);
@@ -143,6 +150,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
 
   function retirePart(part) {
     part.ghostAnim?.cancel();
+    part.shellAnim?.cancel();
     part.hlAnim?.cancel();
     highlighted.delete(part);
     leaving.delete(part);
@@ -178,46 +186,79 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   }
 
   // ---------- camera ----------
+  // Framing (design round 10): the stack fills ~85 % of the viewport height; a part flying in is framed at
+  // ~60 % with a slight orbit, then the camera eases back to the stack; a clicked part gets the 60 % focus.
   const camDir = new THREE.Vector3();
   let camAnim = null; // one camera move at a time: a new framing replaces the one in flight
-  function frameTo({ ty, dist, duration = D(1100), ease = "inOutCubic" }) {
-    camDir.copy(camera.position).sub(controls.target).normalize();
-    const cur = { ty: controls.target.y, d: camera.position.distanceTo(controls.target) };
+  function frameTo({ ty, dist, orbit = 0, duration = D(1100), ease = "inOutCubic" }) {
+    const cur = { ty: controls.target.y, d: camera.position.distanceTo(controls.target), az: 0 };
+    let az = 0;
     camAnim?.cancel();
     live.delete(camAnim);
     const p = run(cur, {
       ty,
       d: dist,
+      az: orbit,
       duration,
       ease,
       onUpdate: () => {
         controls.target.set(0, cur.ty, 0);
         camDir.copy(camera.position).sub(controls.target).normalize();
+        if (orbit) camDir.applyAxisAngle(Y, cur.az - az);
+        az = cur.az;
         camera.position.copy(controls.target).addScaledVector(camDir, cur.d);
       },
     });
     camAnim = p.anim;
     return p;
   }
-  // Framing scales with the preset: the smallest view still shows the engine cluster and some pad; the stack
-  // sits a little above centre so its base clears the bottom bar and its top clears the HUD line.
-  function view() {
-    const r = bounds?.baseRadius_u ?? bounds?.radius_u ?? 1;
-    const H = bounds?.height_u ?? 17;
-    return { minTop: Math.max(3, r * 5), pad: Math.max(4, r * 4), H };
+  // Distance at which the span [y0, y1] around the axis (radius r) fills `frac` of the viewport height
+  // (and fits the width), for the current camera pitch.
+  function fitDist(h, r, frac) {
+    const tanHalf = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+    camDir.copy(camera.position).sub(controls.target).normalize();
+    const pitch = Math.abs(Math.asin(THREE.MathUtils.clamp(camDir.y, -1, 1)));
+    const dv = (h * Math.cos(pitch) + 2 * r * Math.sin(pitch)) / (2 * tanHalf * frac);
+    const dh = (2 * r) / (2 * tanHalf * camera.aspect * frac);
+    return Math.max(dv, dh) + r;
   }
-  const framing = (top) => ({ ty: top * 0.47, dist: top * 1.62 + view().pad });
-  // Frames the built stack, plus `includeTop` (the part on its way in, or the exploded spread).
-  function reframe(extra = 1, includeTop = 0) {
-    const top = Math.max(topY(), includeTop, view().minTop);
-    const f = framing(top);
-    return frameTo({ ty: f.ty, dist: f.dist * extra });
+  // The centre sits `shift` of the view (default 2 %) below the span's middle, so the base clears the bar.
+  function frameSpan(y0, y1, r, frac, { shift = 0.02, ...opts } = {}) {
+    const dist = Math.max(controls.minDistance, fitDist(Math.max(y1 - y0, 0.05), r, frac));
+    const tanHalf = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+    return frameTo({ ty: (y0 + y1) / 2 - shift * 2 * dist * tanHalf, dist, ...opts });
   }
-  // Home: the empty pad with the first ghost near the middle, wide enough to read the scale of what is coming.
+  const stackHeight = () => Math.max(bounds?.height_u ?? 0, topY(), 1);
+  const stackRadius = () => bounds?.radius_u ?? 1;
+  function frameStack(opts = {}) {
+    return frameSpan(0, stackHeight(), stackRadius(), 0.83, opts); // ~85 %, nose clear of the HUD line
+  }
+  let orbitSign = 1;
+  function framePart(part) {
+    orbitSign = -orbitSign;
+    return frameSpan(part.slotY, part.slotY + part.height, part.radius, 0.6, { orbit: 0.2 * orbitSign });
+  }
+  // Click focus: frame the part where it is now (assembled or exploded), from its visible meshes.
+  // { frac, shift } let a phone keep the part in the upper half, above the bottom-sheet card.
+  const focusBox = new THREE.Box3();
+  function focus(part, { frac = 0.6, shift = 0.02 } = {}) {
+    if (!part?.pieces?.length) return;
+    focusBox.makeEmpty();
+    for (const piece of part.pieces) if (piece.mesh.visible) focusBox.expandByObject(piece.mesh);
+    if (focusBox.isEmpty()) return;
+    const r = Math.max(Math.abs(focusBox.min.x), Math.abs(focusBox.max.x), Math.abs(focusBox.min.z), Math.abs(focusBox.max.z));
+    return frameSpan(focusBox.min.y, focusBox.max.y, r, frac, { shift });
+  }
+  function unfocus() {
+    return state.exploded ? frameExploded() : frameStack();
+  }
+  let explodedSpan = null; // { top, r } of the current exploded view
+  function frameExploded() {
+    return explodedSpan ? frameSpan(0, explodedSpan.top, explodedSpan.r, 0.85) : frameStack();
+  }
+  // Home: the whole stack-to-be at 85 %, the first ghost waiting on the pad.
   function home() {
-    const v = view();
-    const top = Math.max(v.minTop, v.H * 0.25);
-    return frameTo({ ty: top * 0.32, dist: framing(top).dist, duration: D(900) });
+    return frameStack({ duration: D(900) });
   }
   function setBounds(b) {
     bounds = b;
@@ -263,6 +304,18 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     fadeGhost(part, on ? GHOST_HOVER : GHOST_IDLE);
   }
 
+  // ---------- x-ray: shell opacity states ----------
+  const shellTarget = (part) => (highlighted.has(part) ? SHELL.focus : state.exploded ? SHELL.exploded : SHELL.built);
+  function fadeShell(part, v = shellTarget(part), duration = D(420)) {
+    part.shellAnim?.cancel();
+    if (duration <= 0) {
+      part.shell.v = v;
+      setShellOpacity(part, v);
+      return;
+    }
+    part.shellAnim = animate(part.shell, { v, duration, ease: "outQuad", onUpdate: () => setShellOpacity(part, part.shell.v) });
+  }
+
   // ---------- highlight: emissive pulse on the selected part ----------
   const materialsOf = (part) => part.pieces.flatMap((p) => [].concat(p.mesh.material));
   function highlight(part, on) {
@@ -273,7 +326,9 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         if (m.emissive && !emissive0.has(m)) emissive0.set(m, { color: m.emissive.clone(), intensity: m.emissiveIntensity });
       }
       highlighted.add(part);
+      fadeShell(part, SHELL.focus);
     } else if (!highlighted.has(part)) return;
+    else fadeShell(part, state.exploded ? SHELL.exploded : SHELL.built);
     part.hlAnim = animate(part.hl, {
       v: on ? 1 : 0,
       duration: D(on ? 240 : 380),
@@ -335,6 +390,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   }
 
   function flyIn(part, sourceWorld, { cap = Infinity } = {}) {
+    fadeShell(part, SHELL.built, 0);
     const source = part.group.worldToLocal(sourceWorld.clone());
     const k = THREE.MathUtils.clamp(camera.position.distanceTo(controls.target) / 18, 0.6, 2.2);
     const delays = arrivalDelays(part, cap);
@@ -427,14 +483,14 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     hideGhostNow(part);
     changed();
     sfx.play("whoosh");
-    reframe(1, part.slotY + part.height);
+    framePart(part);
     await flyIn(part, sourcePoint(part));
     if (gen !== state.gen) return false;
     part.built = true;
     part.busy = false;
     state.busy--;
     lock(part);
-    reframe();
+    if (!state.auto) frameStack(); // Build all keeps following the parts and settles on the stack at the end
     changed();
     return true;
   }
@@ -452,7 +508,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     part.built = false;
     part.busy = false;
     state.busy--;
-    reframe();
+    frameStack();
     changed();
     return true;
   }
@@ -496,8 +552,11 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     controls.autoRotate = true;
     controls.autoRotateSpeed = 0.9;
     const built = parts.filter((p) => p.built);
+    for (const part of built) fadeShell(part, highlighted.has(part) ? SHELL.focus : SHELL.exploded, D(700));
     const { lifts, top } = explodeLayout(built);
-    reframe(1.12, top);
+    const spread = Math.max(0, ...built.flatMap((p) => p.pieces.map((q) => q.explode.dist * Math.hypot(q.explode.dir.x, q.explode.dir.z))));
+    explodedSpan = { top, r: stackRadius() + spread };
+    frameExploded();
     const jobs = [];
     built.forEach((part, pi) => {
       const lift = lifts.get(part);
@@ -530,6 +589,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     changed();
     sfx.play("assemble");
     const built = parts.filter((p) => p.built);
+    for (const part of built) fadeShell(part, highlighted.has(part) ? SHELL.focus : SHELL.built, D(700));
     const jobs = [];
     built.forEach((part, pi) => {
       const step = Math.min(18, 500 / Math.max(1, part.arrival.length));
@@ -551,7 +611,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     state.busy--;
     sfx.play("clunk", { gain: 0.7 });
     state.shake = 0.6;
-    reframe();
+    frameStack();
     changed();
     return true;
   }
@@ -647,7 +707,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     const above = kept.filter((p) => p.built && p.slotY >= changedY - 1e-6);
     const clear = SWAP_CLEAR_M * scale + Math.max(0, ...incoming.map((p) => p.height * 0.15));
     const liftY = (p) => Math.max(p.group.position.y, p.slotY) + clear;
-    reframe(1, Math.max(topY(), ...above.map((p) => liftY(p) + p.height)));
+    frameSpan(0, Math.max(stackHeight(), ...above.map((p) => liftY(p) + p.height)), stackRadius(), 0.85);
     const t0 = performance.now();
     const at = (ms) => wait(Math.max(0, D(ms) - (performance.now() - t0)));
     const lifting = Promise.all(above.map((p) => moveGroup(p, liftY(p), { duration: D(T.lift) })));
@@ -679,7 +739,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       state.shake = 0.7;
     }
     state.busy--;
-    reframe();
+    frameStack();
     changed();
     return { parts, replaced };
   }
@@ -702,6 +762,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     } finally {
       if (gen === state.gen) {
         state.auto = false;
+        if (!state.busy) frameStack();
         changed();
       }
     }
@@ -735,6 +796,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       part.built = false;
       part.busy = false;
       hideGhostNow(part);
+      fadeShell(part, SHELL.built, 0);
       part.group.position.y = part.slotY;
       for (const piece of part.pieces) {
         piece.mesh.visible = false;
@@ -814,6 +876,8 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     setGhost,
     ghostPart: () => ghostPart,
     highlight,
+    focus,
+    unfocus,
     build,
     buildUpTo,
     remove,

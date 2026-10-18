@@ -45,7 +45,7 @@ renderer.setPixelRatio(lite ? 1 : Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.0;
+renderer.toneMappingExposure = 0.95;
 renderer.shadowMap.enabled = !lite;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.localClippingEnabled = true;
@@ -62,26 +62,28 @@ controls.target.set(0, 2.5, 0);
 controls.enableDamping = true;
 controls.dampingFactor = 0.07;
 controls.enablePan = false;
-controls.minDistance = 4;
+controls.minDistance = 2.5; // close enough to frame a single engine cluster
 controls.maxDistance = 70;
 controls.maxPolarAngle = Math.PI * 0.49;
 controls.update();
 
 const pmrem = new THREE.PMREMGenerator(renderer);
 scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-scene.environmentIntensity = 0.5;
+scene.environmentIntensity = 0.25;
 
-const KEY_DIR = new THREE.Vector3(9, 12, 11).normalize(); // from the target toward the key light
-const key = new THREE.DirectionalLight(0xffffff, 2.4);
+// Light rig (design round 10): one warm peach key from upper-left-front of the home view, a cool fill from the
+// opposite side, a faint hemisphere. Dark graphite shells read by their rims and edges, not by flat white light.
+const KEY_DIR = new THREE.Vector3(-0.34, 1.1, 0.94).normalize(); // from the target toward the key light
+const key = new THREE.DirectionalLight(0xffb48a, 2.2);
 key.castShadow = !lite;
 key.shadow.mapSize.set(2048, 2048);
 key.shadow.bias = -0.0004;
 key.shadow.normalBias = 0.02;
 scene.add(key, key.target);
-const rim = new THREE.DirectionalLight(0x7fb6ff, 1.1);
-rim.position.set(-12, 9, -9);
-scene.add(rim);
-scene.add(new THREE.HemisphereLight(0x8fa6c8, 0x0f1118, 0.45));
+const fill = new THREE.DirectionalLight(0x6a7fa8, 0.5);
+fill.position.set(0.34, 0.45, -0.94).multiplyScalar(40);
+scene.add(fill);
+scene.add(new THREE.HemisphereLight(0x8fa6c8, 0x0f1118, 0.15));
 
 const root = new THREE.Group(); // shakes on lock
 scene.add(root);
@@ -149,9 +151,9 @@ if (!lite) {
   const gtao = new SolidGTAOPass(scene, camera, innerWidth, innerHeight);
   gtao.updateGtaoMaterial({ radius: 0.6, distanceExponent: 1.5, thickness: 1.2, scale: 1, samples: 16 });
   gtao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 6, rings: 2, samples: 16 });
-  gtao.blendIntensity = 0.9;
+  gtao.blendIntensity = 0.55; // dark shells need little AO
   composer.addPass(gtao);
-  composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.36, 0.55, 0.9));
+  composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.36, 0.55, 0.8)); // peach edges glow a touch
   composer.addPass(new OutputPass());
 }
 
@@ -186,8 +188,14 @@ const selector = createSelector({
   onSelect(part) {
     const prev = card.part;
     if (prev && prev !== part) choreo.highlight(prev, false);
-    if (!part) return card.hide();
+    if (!part) {
+      card.hide();
+      if (prev && !choreo.state.busy) choreo.unfocus(); // Esc / empty click: back to the stack
+      return;
+    }
     choreo.highlight(part, true);
+    // Glide to frame the clicked part (x-ray focus); on a phone keep it above the bottom-sheet card.
+    choreo.focus(part, matchMedia("(max-width: 760px)").matches ? { frac: 0.4, shift: 0.24 } : {});
     card.show(part, cardContext(part));
     sfx.play("ui", { gain: 0.5 });
   },

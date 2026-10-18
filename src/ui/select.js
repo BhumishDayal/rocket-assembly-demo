@@ -8,6 +8,7 @@
 //   part.ghostActive). The ghost is hit-tested as its world bounding box padded by ~20 px at the current zoom,
 //   so a thin 3.66 m tank is still easy to click; a ghost hit wins over a solid hit (the ghost draws on top).
 // - Hit -> part: mesh.userData.partId, else walk up the parents to the part's group / ghost group.
+//   Shells (mesh.userData.kind "shell") are see-through: a click goes to the first solid piece behind them.
 // - Hover raycasts are coalesced to one per animation frame and at most every 40 ms; they set the pointer
 //   cursor and report { part, ghost } through onHover (used for the ghost hover opacity).
 // - Esc and a click on empty space deselect (onSelect(null)).
@@ -79,8 +80,18 @@ export function createSelector({ canvas, camera, parts, onSelect, onGhostClick, 
     const ghost = ghostHit();
     if (ghost) return { part: ghost, ghost: true };
     const hits = raycaster.intersectObjects(solids(), false);
-    const part = hits.length ? resolve(partOf(hits[0].object)) : null;
+    const part = hits.length ? resolve(xray(hits)) : null;
     return part ? { part, ghost: false } : null;
+  }
+
+  // X-ray click-through: shells are see-through, so a click lands on what is seen through them. When the
+  // first hit is a shell, the first solid piece behind it decides: another part (engines inside an
+  // interstage, a payload inside a fairing) wins; the shell's own interior keeps the shell's part.
+  function xray(hits) {
+    const first = partOf(hits[0].object);
+    if (hits[0].object.userData.kind !== "shell") return first;
+    const inner = hits.find((h) => h.object.userData.kind !== "shell");
+    return (inner && partOf(inner.object)) || first;
   }
 
   function setHover(h) {

@@ -1,6 +1,11 @@
 // Headless smoke test for the demo: drives a real Chrome over the DevTools protocol and checks the main flow.
 // Run: node scripts/smoke.mjs <url> [outPrefix] [--size=1600x900] [--build-timeout=90]
+//      node scripts/smoke.mjs --serve [?query] [outPrefix] ...
 //   e.g. node scripts/smoke.mjs "http://127.0.0.1:5191/?build=falcon-9" /tmp/smoke/f9
+//        node scripts/smoke.mjs --serve "?build=saturn-v" /tmp/smoke/sv
+// --serve copies index.html, src/ and vite.config.js to a temp folder and serves that frozen snapshot with the
+// repo's Vite on a free port, so edits by other chats (Vite full-reloads the page on every save) cannot reset
+// the page mid-run. Without --serve, a reload during the run is reported and fails it.
 // No deps (Node >= 22 for the global WebSocket). Exits 1 if any assertion fails, 2 on a harness error.
 // Never pass --virtual-time-budget to Chrome: requestAnimationFrame barely ticks and anime.js stalls.
 //
@@ -19,16 +24,20 @@
 // Console warnings/errors, uncaught exceptions and failed loads are collected; exceptions and console errors
 // fail the run, warnings are only reported. A 404 for /favicon.ico is ignored (the page declares none).
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const args = process.argv.slice(2);
 const flags = Object.fromEntries(args.filter((a) => a.startsWith("--")).map((a) => a.slice(2).split("=")));
-const [url, prefixArg = "smoke"] = args.filter((a) => !a.startsWith("--"));
-if (!url) {
-  console.error("usage: node scripts/smoke.mjs <url> [outPrefix] [--size=1600x900] [--build-timeout=90]");
+const positional = args.filter((a) => !a.startsWith("--"));
+const serve = "serve" in flags;
+if (serve && positional[0] && !positional[0].startsWith("?")) positional.unshift(""); // --serve <outPrefix>
+const [target = "", prefixArg = "smoke"] = positional;
+if (!serve && !target) {
+  console.error("usage: node scripts/smoke.mjs <url>|--serve [?query] [outPrefix] [--size=1600x900] [--build-timeout=90]");
   process.exit(2);
 }
 const prefix = resolve(prefixArg);
@@ -51,6 +60,47 @@ const partNames = new Set([
   ...readJson("payloads.extra.json").map((r) => r.name),
   ...derivedNames,
 ]);
+// --serve: freeze the current tree into a temp folder and serve it with the repo's own Vite.
+const tmpDirs = [];
+let server = null;
+async function serveSnapshot() {
+  const dir = mkdtempSync(join(tmpdir(), "smoke-snap-"));
+  tmpDirs.push(dir);
+  for (const f of ["index.html", "vite.config.js", "package.json"]) if (existsSync(join(repo, f))) cpSync(join(repo, f), join(dir, f));
+  cpSync(join(repo, "src"), join(dir, "src"), { recursive: true });
+  if (existsSync(join(repo, "public"))) cpSync(join(repo, "public"), join(dir, "public"), { recursive: true });
+  symlinkSync(join(repo, "node_modules"), join(dir, "node_modules"), "dir");
+  // Own dependency cache: the default (node_modules/.vite) is the repo's shared one, and re-optimizing into it
+  // disturbs the dev server the user is watching. No HMR: nothing should reload the page under the test.
+  writeFileSync(
+    join(dir, "vite.smoke.config.mjs"),
+    `import base from "./vite.config.js";\nexport default { ...base, cacheDir: ${JSON.stringify(join(dir, ".vite-cache"))}, clearScreen: false, server: { ...(base.server ?? {}), hmr: false } };\n`,
+  );
+  const port = await new Promise((res) => {
+    const s = createServer().listen(0, "127.0.0.1", () => {
+      const p = s.address().port;
+      s.close(() => res(p));
+    });
+  });
+  const vite = join(repo, "node_modules", "vite", "bin", "vite.js");
+  server = spawn(process.execPath, [vite, "--config", "vite.smoke.config.mjs", "--port", String(port), "--strictPort", "--host", "127.0.0.1"], {
+    cwd: dir,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let log = "";
+  server.stdout.on("data", (d) => (log += d));
+  server.stderr.on("data", (d) => (log += d));
+  const base = `http://127.0.0.1:${port}/`;
+  for (let i = 0; i < 100; i++) {
+    try {
+      if ((await fetch(base)).ok) return base;
+    } catch {}
+    await sleep(100);
+  }
+  throw new Error(`snapshot server did not start:\n${log}`);
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const url = serve ? new URL(target, await serveSnapshot().catch((e) => (console.error("harness error:", e.message), process.exit(2)))).href : target;
 const startId = new URL(url).searchParams.get("build");
 const startIndex = Math.max(0, presetOrder.indexOf(startId));
 const presetName = (i) => presets.find((p) => p.id === presetOrder[i % presetOrder.length])?.name ?? "?";
@@ -87,16 +137,20 @@ const chrome = spawn(
   ],
   { stdio: "ignore" },
 );
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function cleanup() {
-  try {
-    chrome.kill();
-  } catch {}
-  try {
-    rmSync(profile, { recursive: true, force: true });
-  } catch {}
+  for (const p of [chrome, server]) {
+    try {
+      p?.kill();
+    } catch {}
+  }
+  for (const d of [profile, ...tmpDirs]) {
+    try {
+      rmSync(d, { recursive: true, force: true });
+    } catch {}
+  }
 }
 process.on("exit", cleanup);
+process.on("SIGINT", () => process.exit(130));
 
 async function connect() {
   const portFile = join(profile, "DevToolsActivePort");
@@ -128,6 +182,7 @@ const ws = await connect().catch((e) => {
 let nextId = 0;
 const pending = new Map();
 const consoleLog = []; // { level, text, t }
+let navigations = 0;
 const t0 = Date.now();
 const note = (level, text) => consoleLog.push({ level, text: text.slice(0, 400), t: ((Date.now() - t0) / 1000).toFixed(1) });
 ws.onmessage = (e) => {
@@ -139,6 +194,9 @@ ws.onmessage = (e) => {
   }
   if (m.method === "Runtime.consoleAPICalled" && ["warning", "error", "assert"].includes(m.params.type)) {
     note(m.params.type === "warning" ? "warning" : "error", m.params.args.map((a) => a.value ?? a.description ?? "").join(" "));
+  } else if (m.method === "Page.frameNavigated" && !m.params.frame.parentId) {
+    navigations++;
+    if (navigations > 1) note("reload", `page reloaded (${m.params.frame.url}); without --serve this is usually Vite reloading after another chat saved a file`);
   } else if (m.method === "Runtime.exceptionThrown") {
     const d = m.params.exceptionDetails;
     note("exception", d.exception?.description ?? d.text);
@@ -287,6 +345,9 @@ async function step(name, fn, { needs = [] } = {}) {
       await shot(`fail-${name}`);
     } catch {}
   }
+  const reloads = consoleLog.filter((l) => l.level === "reload" && Number(l.t) * 1000 >= t - t0).length;
+  if (reloads && status === "PASS") detail += " (page reloaded during this step)";
+  else if (reloads) detail = `page reloaded during this step; ${detail}`;
   results.push({ name, status, ms: Date.now() - t, detail });
   print(results.at(-1));
 }
@@ -469,6 +530,7 @@ await step(
 
 // ---------- summary ----------
 const errors = consoleLog.filter((l) => l.level !== "warning");
+const reloadCount = consoleLog.filter((l) => l.level === "reload").length;
 const warnings = consoleLog.filter((l) => l.level === "warning");
 const failed = results.filter((r) => r.status === "FAIL");
 const skipped = results.filter((r) => r.status === "SKIP");
@@ -481,7 +543,8 @@ console.log(
   `${ok ? "SMOKE PASS" : "SMOKE FAIL"}: ${results.filter((r) => r.status === "PASS").length}/${results.length} steps passed` +
     `${failed.length ? `, failed: ${failed.map((r) => r.name).join(", ")}` : ""}` +
     `${skipped.length ? `, skipped: ${skipped.map((r) => r.name).join(", ")}` : ""}` +
-    ` · ${errors.length} error(s)/exception(s), ${warnings.length} warning(s) · report ${prefix}-report.json`,
+    ` · ${errors.length - reloadCount} error(s)/exception(s), ${warnings.length} warning(s)` +
+    `${reloadCount ? `, ${reloadCount} page reload(s): rerun with --serve` : ""} · report ${prefix}-report.json`,
 );
 ws.close();
 cleanup();
