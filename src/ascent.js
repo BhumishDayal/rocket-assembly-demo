@@ -638,7 +638,7 @@ function flyBooster(sep, st, reserve_kg, cfg, { aim_m = 0, mode = "rtls", record
   const landReserve = needFor(cfg.landingDv_ms);
   evb("flip");
   evb("cold-gas", { phase: "start" }); // the flip is done on cold-gas thrusters
-  const end = sep.t + 1200;
+  const end = sep.t + (cfg.maxDuration_s ?? 1200);
   while (t < end) {
     const r = Math.hypot(x, y);
     const h = r - RE;
@@ -800,6 +800,56 @@ function returnBooster(sep, st, reserve_kg, cfg, record, mode = "rtls") {
     res = flyBooster(sep, st, reserve_kg, cfg, { aim_m: aim });
   }
   return record ? flyBooster(sep, st, reserve_kg, cfg, { aim_m: aim, record: true }) : res;
+}
+
+// The whole remaining vehicle coming home from space (flight.js, round 20): the booster model above, flown from a
+// state at the entry interface (2-D, m: x along the ground from the point under it, y up there), in drone-ship
+// mode (no boostback; it comes down where its arc ends). stageIndex picks the stage (its engines, dry mass and
+// area); prop_kg is the propellant it still has. Upper stages are not built to land, so when the real stage cannot,
+// the landing is flown again with what it lacks modelled (est.; listed in `modelled`):
+// - "sea-level thrust": a vacuum-only engine cannot fire in sea-level air; it gets its vacuum thrust and Isp there;
+// - "vented propellant": a stage still heavy with propellant cannot hover on its sea-level thrust; what a
+//   thrust-to-weight of 2 at sea level cannot hold up is dumped before the entry;
+// - "throttle": thrust capped at 3 g of the stage as it starts down (dry + propellant kept; deep throttling): one
+//   upper-stage engine on a nearly empty stage gives far more than the hoverslam control can null at its 40 %
+//   minimum throttle;
+// - "propellant": if what is left cannot cover the entry and landing burns, enough for 1.5 km/s is assumed.
+export function returnFromSpace(build, catalog, stageIndex, state, prop_kg) {
+  const st0 = stagesOf(build, catalog)[stageIndex];
+  if (!st0) return null;
+  const cfg = { ...BOOSTER, entryEngines: Math.min(BOOSTER.entryEngines, st0.n), boostbackEngines: Math.min(BOOSTER.boostbackEngines, st0.n), maxDuration_s: 3600 };
+  const fly = (st, prop) => flyBooster({ t: 0, ...state }, st, prop, cfg, { mode: "droneship", record: true });
+  // the stage as flown and the propellant it keeps, with what that took listed
+  const prepare = (prop, { seaLevel = false, cap = false } = {}) => {
+    let st = st0;
+    const out = [];
+    if (seaLevel && !(st.Fsl > 0)) {
+      st = { ...st, Fsl: st.Fvac, ispSl: st.ispVac };
+      out.push("sea-level thrust");
+    }
+    const keep = st.Fsl > 0 ? Math.max(0, st.Fsl / (2 * G0) - st.dry) : prop;
+    if (prop > keep) {
+      prop = keep;
+      out.push("vented propellant");
+    }
+    const limit = 3 * G0 * (st.dry + prop);
+    if (cap && st.Fvac > limit) {
+      st = { ...st, Fsl: Math.min(st.Fsl, limit), Fvac: limit };
+      out.push("throttle");
+    }
+    return { st, prop, out };
+  };
+  const tries = [prepare(prop_kg), prepare(prop_kg, { seaLevel: true, cap: true })];
+  const enough = st0.dry * (Math.exp(1500 / (st0.ispVac * G0)) - 1);
+  if (prop_kg < enough) tries.push({ ...prepare(enough, { seaLevel: true, cap: true }), extra: "propellant" });
+  let res = null;
+  let used = null;
+  for (const t of tries) {
+    res = fly(t.st, t.prop);
+    used = t;
+    if (res.landed) break;
+  }
+  return { ...res, modelled: [...used.out, ...(used.extra ? [used.extra] : [])], dry_kg: st0.dry };
 }
 
 export function simulateAscent(build, catalog, opts = {}) {

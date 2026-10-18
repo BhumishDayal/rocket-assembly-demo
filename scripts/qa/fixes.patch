@@ -1,0 +1,170 @@
+diff -ruN a/src/main.js b/src/main.js
+--- a/src/main.js
++++ b/src/main.js
+@@ -392,7 +392,7 @@
+ // Rockets: the presets as an in-place list above the bar. One line each: name, stages, height est.,
+ // payload → mission (all from the records and the layout). Choosing one loads it (it appears built).
+ // Compare mode (key C): the closest real rocket (GCAT twin) first, then the other presets; choosing one shows
+-// it beside the current rocket at true scale.
++// it beside the current rocket at true scale. Touch screens have no C key: the list's last row opens it there.
+ let rocketsMode = "switch";
+ function rocketsHtml(mode = "switch") {
+   const rows = [];
+@@ -414,6 +414,10 @@
+     const cur = mode === "switch" && i === presetIndex && !current.modified;
+     rows.push(`<li><button type="button" class="opt" data-i="${i}"${cur ? ' aria-current="true"' : ""}><span class="opt-name">${f.esc(p.name)}</span><span class="opt-meta" title="${f.esc(meta)}">${f.esc(meta)}</span></button></li>`);
+   });
++  if (mode === "switch" && matchMedia("(pointer: coarse)").matches && isComplete() && !choreo.state.launch) {
++    const [name, meta] = twin || rival ? ["Clear comparison", "Back to this rocket alone"] : ["Compare…", "Beside the closest real rocket or another preset"];
++    rows.push(`<li class="more"><button type="button" class="opt" data-compare="1"><span class="opt-name">${name}</span><span class="opt-meta">${meta}</span></button></li>`);
++  }
+   return `<ul>${rows.join("")}</ul>`;
+ }
+ function setRocketsOpen(open, mode = "switch") {
+@@ -423,7 +427,7 @@
+     rocketsMode = mode;
+     rocketsEl.innerHTML = rocketsHtml(mode);
+     rocketsEl.setAttribute("aria-label", mode === "compare" ? "Compare with" : "Pre-made rockets");
+-  }
++  } else if (rocketsEl.contains(document.activeElement)) btnRockets.focus({ preventScroll: true }); // keyboard: back to its button
+   rocketsEl.hidden = !open;
+   btnRockets.setAttribute("aria-expanded", String(open));
+   if (open && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
+@@ -434,6 +438,11 @@
+ rocketsEl.addEventListener("click", (e) => {
+   const opt = e.target.closest(".opt");
+   if (!opt) return;
++  if (opt.dataset.compare) {
++    if (!twin && !rival) return setRocketsOpen(true, "compare");
++    setRocketsOpen(false);
++    return clearCompare();
++  }
+   const mode = rocketsMode;
+   setRocketsOpen(false);
+   if (mode !== "compare") return switchPreset(Number(opt.dataset.i) - presetIndex);
+@@ -1229,6 +1238,7 @@
+   const byKey = parts.find((p) => p.key === k);
+   if (byKey) return onPartKey(byKey);
+   if (k === " ") {
++    if (document.activeElement?.matches?.("button:focus-visible")) return; // Tab-focused: Space presses it
+     e.preventDefault();
+     if (document.activeElement?.tagName === "BUTTON") document.activeElement.blur();
+     choreo.toggleExplode();
+diff -ruN a/src/style.css b/src/style.css
+--- a/src/style.css
++++ b/src/style.css
+@@ -180,7 +180,7 @@
+   padding: 0 5px;
+   border: 1px solid var(--hairline);
+   border-radius: 5px;
+-  font-size: 10px;
++  font-size: 11px;
+   line-height: 15px;
+   color: var(--text-2);
+   white-space: nowrap;
+@@ -360,12 +360,15 @@
+   transition: background 140ms;
+ }
+ 
+-:is(.detail, .rockets) .opt:hover:not(:disabled),
+-:is(.detail, .rockets) .opt:focus-visible {
++:is(.detail, .rockets) .opt:hover:not(:disabled) {
+   background: rgba(255, 255, 255, 0.06);
+-  outline: none;
+ }
+ 
++:is(.detail, .rockets) .opt:focus-visible {
++  outline: 2px solid var(--holo);
++  outline-offset: -2px;
++}
++
+ :is(.detail, .rockets) .opt[aria-current="true"] {
+   cursor: default;
+   background: rgba(255, 176, 32, 0.08);
+@@ -432,6 +435,12 @@
+   text-overflow: ellipsis;
+ }
+ 
++.rockets li.more {
++  margin-top: 4px;
++  padding-top: 4px;
++  border-top: 1px solid var(--hairline);
++}
++
+ /* Landing page: a big title and one button over the planet; the rest of the UI waits (body.landing, until the
+    dive passes 0.98). */
+ .brand,
+@@ -448,6 +457,13 @@
+   pointer-events: none;
+ }
+ 
++body.landing .bar {
++  visibility: hidden;
++  transition:
++    opacity 600ms ease,
++    visibility 0s linear 600ms;
++}
++
+ /* The atmosphere's glow during the landing dive (opacity from ui/landing.js); over the canvas, under the UI. */
+ .landing-glow {
+   position: fixed;
+@@ -576,6 +592,7 @@
+   font-size: 12px;
+   color: var(--text-2);
+   text-align: right;
++  max-width: calc(100vw - 560px); /* wraps before the key legend under the title */
+   pointer-events: none;
+   user-select: none;
+ }
+@@ -593,6 +610,16 @@
+   color: var(--nogo);
+ }
+ 
++@media (max-width: 1100px) {
++  .hud {
++    top: 124px;
++    left: 32px;
++    right: 32px;
++    max-width: none;
++    text-align: left;
++  }
++}
++
+ @media (max-width: 760px) {
+   .brand {
+     top: 16px;
+@@ -607,7 +634,14 @@
+     display: none;
+   }
+   .hud {
+-    display: none;
++    top: 44px;
++    left: 16px;
++    right: 16px;
++    font-size: 11px;
++    display: -webkit-box;
++    -webkit-box-orient: vertical;
++    -webkit-line-clamp: 2;
++    overflow: hidden;
+   }
+   .detail {
+     left: 12px;
+@@ -636,6 +670,18 @@
+   .rockets {
+     width: auto;
+     right: 0;
++  }
++}
++
++/* Touch: number buttons and source links get a 24 px tall hit box; the negative margin keeps the rows' layout. */
++@media (pointer: coarse) {
++  .detail .num {
++    padding: 3px 0;
++    margin: -3px 0;
++  }
++  .detail .src a {
++    padding: 6px 0;
++    margin: -6px 0;
+   }
+ }
+ 

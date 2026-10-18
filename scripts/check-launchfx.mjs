@@ -1,7 +1,8 @@
 // Check for src/fx/launchfx.js (+ the planet.js shadow decal): every effect at full and half intensity over its
 // timeline has no NaN, shows and hides on its documented schedule, casts no shadows, and everything active at
 // once stays within 25 draws. Weather (round 18): wind drift on the vents, steam, deluge mist and cold-gas puffs,
-// the plume lean, the aurora (2 draws, intensity) and the lightning strike (3 draws, ~1.2 s).
+// the plume lean, the aurora (2 draws, intensity) and the lightning strike (3 draws, ~1.2 s). Failures: the
+// impact (sea / ground, 3 draws, ~2.5 s, size from speed) and the plasma break-up (a second draw while on).
 // Shaders are compiled by the browser harnesses (scripts/fx-harness.html, scripts/far-harness.html), not here.
 // Run: node scripts/check-launchfx.mjs   (no deps; exits 1 on any failure)
 import { registerHooks } from "node:module";
@@ -118,7 +119,16 @@ for (const k of [1, 0.5]) {
   plasma.update(0.1, { intensity: 0 });
   expect(!plasma.object3d.visible, `${L} plasma should hide at 0`);
   plasma.update(0.1, { intensity: k });
-  expect(plasma.object3d.visible, `${L} plasma should show`);
+  expect(plasma.object3d.visible && draws(plasma.object3d) === 1, `${L} plasma should show, 1 draw without break-up`);
+  plasma.setBreakup(0.8);
+  plasma.update(0.1, { intensity: k });
+  const shardsU = plasma.object3d.getObjectByName("fx-plasma-breakup").material.uniforms;
+  expect(draws(plasma.object3d) === 2 && shardsU.uB.value === 0.8 && shardsU.uI.value === k, `${L} break-up adds its draw`);
+  plasma.setBreakup(0);
+  plasma.update(0.1, { intensity: k });
+  expect(draws(plasma.object3d) === 1, `${L} break-up off hides it`);
+  plasma.setBreakup(1);
+  plasma.update(0.1, { intensity: k });
   all.push(plasma);
 
   const clouds = FX.createCloudLayer({ altitude_u: 40, radius_u: 60 });
@@ -203,6 +213,18 @@ for (const k of [1, 0.5]) {
   bolt.fire({ azimuth: 70, distance_km: 9 });
   bolt.update(0.02);
   all.push(aurora, bolt);
+  const impact = FX.createImpact();
+  expect(!impact.object3d.visible, `${L} impact starts hidden`);
+  impact.fire({ position: new THREE.Vector3(5, 0, -3), kind: "sea", speed_ms: 600 });
+  impact.update(0.3);
+  const iu = impact.object3d.getObjectByName("fx-impact-burst").material.uniforms;
+  expect(impact.active() && draws(impact.object3d) === 3 && iu.uSea.value === 1 && Math.abs(iu.uSize.value - 16) < 1e-9 && iu.uOrigin.value.x === 5, `${L} sea impact`);
+  impact.update(2.3);
+  expect(!impact.active() && !impact.object3d.visible, `${L} impact over by 2.5 s`);
+  impact.fire({ position: new THREE.Vector3(), kind: "ground", speed_ms: 50 });
+  impact.update(0.2);
+  expect(iu.uSea.value === 0 && Math.abs(iu.uSize.value - 8 * 0.4) < 1e-9 && impact.object3d.getObjectByName("fx-impact-ring").scale.x > 0, `${L} ground impact, size clamped from speed`);
+  all.push(impact);
 
   const decal = createShadowDecal({ radius_u: 0.6 });
   const sun = new THREE.Vector3(-0.5, 0.7, 0.3).normalize();

@@ -1,0 +1,159 @@
+[
+  {
+    "id": "raptor-3",
+    "name": "Raptor 3 (sea-level variant)",
+    "propellant": "methalox",
+    "thrustSL_kN": 2451.7,
+    "thrustVac_kN": null,
+    "ispSL_s": null,
+    "ispVac_s": 350,
+    "mass_kg": 1525,
+    "diameter_m": 1.3,
+    "source": "https://www.spacex.com/vehicles/starship/",
+    "_status": "partial: thrustVac_kN and ispSL_s TODO(source). Not usable by physics.js until both are filled (see _candidates).",
+    "_fields": {
+      "thrustSL_kN": {
+        "value": 2451.7,
+        "derived": "250 tf × 9.80665 = 2,451.7 kN",
+        "url": "https://www.spacex.com/updates#starship-v3",
+        "quote": "Raptor 3 engines deliver increased thrust, with sea-level variants now producing 250 tf (551,000 lbf) up from 230 tf (507,000 lbf), while vacuum engines produce 275 tf (606,000 lbf) up from 258 tf (568,000 lbf).",
+        "quote2": "{label:\"Thrust\",value:\"250 tf\",secondValue:\" / 551 klbf\"} (Raptor tile, spacex.com/vehicles/starship, served from https://www.spacex.com/2337.c79c2132bc6aff75.js)",
+        "note": "V3 flight rating (SpaceX update \"Introducing Starship V3\", 2026-05-12; CMS JSON https://content.spacex.com/api/spacex-website/updates, updateId starship-v3). SpaceX does not say whether 250 tf is measured at sea level; taken as the sea-level rating. SpaceX's 3 Aug 2024 post gave 280 tf for the same engine (https://x.com/SpaceX/status/1819772716339339664); the 2026 figure is used as the current official one."
+      },
+      "ispVac_s": {
+        "value": 350,
+        "url": "https://x.com/SpaceX/status/1819772716339339664",
+        "quote": "Raptor 3 (sea level variant) Thrust: 280tf Specific impulse: 350s Engine mass: 1525kg Engine + vehicle-side commodities and hardware mass : 1720kg",
+        "note": "SpaceX post, 3 Aug 2024 (read through api.fxtwitter.com). SpaceX does not say sea level or vacuum. Mapped to VACUUM: SpaceX's matching figure for Raptor 2 is 347 s, while the FAA's 2022 plume report gives Raptor 2 about 316 s at sea level (see raptor-2 _candidates), so 347/350 s cannot be sea-level values. Wikipedia's engine table (oldid 1380574902) also lists 350 s in its vacuum column, citing the same post."
+      },
+      "mass_kg": {
+        "value": 1525,
+        "url": "https://www.spacex.com/updates#starship-v3",
+        "quote": "Mass of the Raptor sea-level engines has been reduced to 1,525 kg from 1,630 kg.",
+        "note": "Same figure in the 2024 post (\"Engine mass: 1525kg\"). Engine only; with vehicle-side hardware SpaceX gives 1,720 kg."
+      },
+      "diameter_m": {
+        "value": 1.3,
+        "url": "https://www.spacex.com/vehicles/starship/",
+        "quote": "{name:\"Raptor\",...metrics:[{label:\"Diameter\",value:\"1.3 m\",secondValue:\" / 4.2 ft\"},{label:\"Height\",value:\"2.9 m\",secondValue:\" / 9.5 ft\"},{label:\"Thrust\",value:\"250 tf\",secondValue:\" / 551 klbf\"}]",
+        "note": "SpaceX does not say what Diameter measures. Consistent with the FAA's Raptor 2 nozzle exit (1.306 m, raptor-2). Height 2.9 m is a visuals.json fact (engine length), not a contract field."
+      },
+      "thrustVac_kN": { "value": null, "todo": "TODO(source): SpaceX publishes no vacuum thrust for the sea-level Raptor." },
+      "ispSL_s": { "value": null, "todo": "TODO(source): no published sea-level Isp for Raptor 3. The FAA/Space Force plume appendices for Raptor 3 give emissions only (no total plume flow), so the Raptor 2 method below cannot be repeated." }
+    },
+    "_candidates": {
+      "thrustVac_kN": {
+        "value": 2579.1,
+        "derived": "(Starship tile thrust 1,614 tf − 3 × RVac 275 tf) / 3 = 263 tf = 2,579.1 kN. Assumes the Starship tile is the ship's total VACUUM thrust: at sea-level ratings 3 × 250 + 3 × 275 = 1,575 tf, not 1,614, while the Super Heavy tile (8,240 tf ≈ 33 × 250) is a sea-level sum.",
+        "url": "https://www.spacex.com/vehicles/starship/",
+        "quote": "{label:\"Thrust\",value:\"1,614 tf\",secondValue:\" / 3.5 Mlbf\"} (Starship tile); \"Starship is powered by six engines, three Raptor engines, and three Raptor Vacuum (RVac) engines\"",
+        "confidence": "est. (interpretation of a marketing tile)"
+      },
+      "ispSL_s": {
+        "value": 332.7,
+        "derived": "350 s × 250 tf / 263 tf: same propellant flow at sea level and in vacuum (choked nozzle), so Isp scales with thrust. Rests on the thrustVac candidate above.",
+        "confidence": "est. (two inferences deep)"
+      }
+    }
+  },
+  {
+    "id": "raptor-3-vacuum",
+    "name": "Raptor 3 Vacuum (RVac)",
+    "propellant": "methalox",
+    "thrustSL_kN": 0,
+    "thrustVac_kN": 2696.8,
+    "ispSL_s": 0,
+    "ispVac_s": null,
+    "mass_kg": null,
+    "diameter_m": 2.3,
+    "source": "https://www.spacex.com/vehicles/starship/",
+    "_status": "partial: ispVac_s and mass_kg TODO(source). Vacuum-only (0 / 0 at sea level, as merlin-1d-vac and the RL10s in engines.json).",
+    "_fields": {
+      "thrustVac_kN": {
+        "value": 2696.8,
+        "derived": "275 tf × 9.80665 = 2,696.8 kN",
+        "url": "https://www.spacex.com/updates#starship-v3",
+        "quote": "while vacuum engines produce 275 tf (606,000 lbf) up from 258 tf (568,000 lbf).",
+        "quote2": "{name:\"Raptor vacuum (RVAC)\",...metrics:[{label:\"Diameter\",value:\"2.3 m\",secondValue:\" / 7.5 ft\"},{label:\"Height\",value:\"4.4 m\",secondValue:\" / 14.4 ft\"},{label:\"Thrust\",value:\"275 tf\",secondValue:\" / 606 klbf\"}]"
+      },
+      "diameter_m": {
+        "value": 2.3,
+        "url": "https://www.spacex.com/vehicles/starship/",
+        "quote": "{label:\"Diameter\",value:\"2.3 m\",secondValue:\" / 7.5 ft\"}",
+        "note": "What Diameter measures is unstated (nozzle exit or overall). Height 4.4 m: visuals fact."
+      },
+      "ispVac_s": { "value": null, "todo": "TODO(source): no SpaceX/FAA/NASA figure. The only number is a 2019 CEO post for the Raptor 1-era RVac (below), not an acceptable source." },
+      "mass_kg": { "value": null, "todo": "TODO(source): never published for any RVac generation." }
+    },
+    "_candidates": {
+      "ispVac_s": {
+        "value": 380,
+        "url": "https://web.archive.org/web/20190925065050/https://twitter.com/elonmusk/status/1171118891671490560",
+        "quote": "Sea level Raptor’s vacuum Isp is ~350 sec, but ~380 sec with larger vacuum-optimized nozzle",
+        "confidence": "CEO post, 2019, Raptor 1 era, approximate (\"~\"). Wikipedia (oldid 1380574902) uses it for Raptor 3 Vacuum. Note its first half (~350 s vacuum Isp for the sea-level engine) agrees with SpaceX's 2024 figure."
+      }
+    }
+  },
+  {
+    "id": "raptor-2",
+    "name": "Raptor 2 (sea-level variant)",
+    "propellant": "methalox",
+    "thrustSL_kN": 2255.5,
+    "thrustVac_kN": null,
+    "ispSL_s": null,
+    "ispVac_s": 347,
+    "mass_kg": 1630,
+    "diameter_m": 1.306,
+    "source": "https://x.com/SpaceX/status/1819795288116330594",
+    "_status": "partial, superseded by raptor-3 on V3 vehicles: thrustVac_kN TODO(source); ispSL_s has a derived candidate from the FAA plume report.",
+    "_fields": {
+      "thrustSL_kN": {
+        "value": 2255.5,
+        "derived": "230 tf × 9.80665 = 2,255.5 kN",
+        "url": "https://x.com/SpaceX/status/1819795288116330594",
+        "quote": "Raptor 2 (sea level variant) Thrust: 230tf Specific impulse: 347s Engine mass: 1630kg Engine + vehicle-side commodities and hardware mass: 2875kg",
+        "quote2": "up from 230 tf (507,000 lbf) (SpaceX \"Introducing Starship V3\", https://www.spacex.com/updates#starship-v3)"
+      },
+      "ispVac_s": { "value": 347, "url": "https://x.com/SpaceX/status/1819795288116330594", "quote": "Specific impulse: 347s", "note": "Condition unstated; mapped to vacuum for the reason given under raptor-3." },
+      "mass_kg": { "value": 1630, "url": "https://www.spacex.com/updates#starship-v3", "quote": "Mass of the Raptor sea-level engines has been reduced to 1,525 kg from 1,630 kg." },
+      "diameter_m": {
+        "value": 1.306,
+        "derived": "nozzle exit radius 25.718 in × 2 × 0.0254 = 1.306 m",
+        "url": "https://www.faa.gov/sites/faa.gov/files/2022-06/AppendixG_ExhaustPlumeCalculations.pdf",
+        "quote": "Table 1: Raptor2 Nozzle Characteristics Nozzle exit radius Rj (in) 25.718",
+        "note": "FAA 2022 PEA Appendix G, Sierra Engineering report 2022-001P prepared for SpaceX, 31 May 2022."
+      },
+      "thrustVac_kN": { "value": null, "todo": "TODO(source)" },
+      "ispSL_s": { "value": null, "todo": "TODO(source): no published figure; a value derived from the FAA plume report is in _candidates" }
+    },
+    "_candidates": {
+      "ispSL_s": {
+        "value": 316.3,
+        "derived": "engine propellant flow = total mixed plume flow − entrained air = 432,386 − 430,783 = 1,603 lbm/s = 727.1 kg/s; Isp = 230 tf / 727.1 kg/s = 316.3 s. Cross-check: a carbon balance on the same report (CO2 1,202.5 lbm/s minus the CO2 of the entrained air, exit-plane CO2/CO/CH4 fractions in its Table 3) gives 1,589 lbm/s, within 1 %.",
+        "url": "https://www.faa.gov/sites/faa.gov/files/2022-06/AppendixG_ExhaustPlumeCalculations.pdf",
+        "quote": "Integration of the SPF data indicates that 430,783 lbm/s air is entrained by the core jet",
+        "quote2": "Given the total mixed plume mass flow rate of 432,386 lb/s, this corresponds to 5.62 lbm/s for NO and 2.59 lbm/s CO.",
+        "confidence": "derived from an FAA document (model matched to test data: \"model results matched test performance data\") and SpaceX's 230 tf; assumes the report ran at the 230 tf rating (it says only \"100% nominal engine operating condition\")."
+      }
+    }
+  },
+  {
+    "id": "raptor-vacuum",
+    "name": "Raptor Vacuum (Raptor 2 generation)",
+    "propellant": "methalox",
+    "thrustSL_kN": 0,
+    "thrustVac_kN": 2530.1,
+    "ispSL_s": 0,
+    "ispVac_s": null,
+    "mass_kg": null,
+    "diameter_m": null,
+    "source": "https://www.spacex.com/updates#starship-v3",
+    "_status": "partial, superseded by raptor-3-vacuum: ispVac_s, mass_kg, diameter_m TODO(source).",
+    "_fields": {
+      "thrustVac_kN": { "value": 2530.1, "derived": "258 tf × 9.80665 = 2,530.1 kN", "url": "https://www.spacex.com/updates#starship-v3", "quote": "while vacuum engines produce 275 tf (606,000 lbf) up from 258 tf (568,000 lbf)." },
+      "ispVac_s": { "value": null, "todo": "TODO(source); same 2019 CEO candidate as raptor-3-vacuum" },
+      "mass_kg": { "value": null, "todo": "TODO(source)" },
+      "diameter_m": { "value": null, "todo": "TODO(source): the 2.3 m on spacex.com describes the current (Raptor 3) RVac" }
+    }
+  }
+]

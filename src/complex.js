@@ -67,11 +67,12 @@ const TOWER_SHARE = 1.15; // FSS lattice top / stack height
 const MAST_SHARE = 1.3; // lightning-tower top / stack height
 const WATER_DIST_SHARE = 1.5; // water tower distance from the pad axis / FSS height
 const WATER_TOP_SHARE = 0.85; // water tower roof above the deck / FSS height
-const FSS_MIN_W_M = 12; // FSS square footprint: at least this …
-const FSS_W_SHARE = 0.11; // … or this share of its height
+const FSS_MIN_W_M = 11; // FSS square footprint: at least this …
+const FSS_W_SHARE = 0.1; // … or this share of its height
 const FSS_LEVEL_M = 6.1; // one level per ~20 ft
 const FSS_LEVELS = [10, 14];
 const FSS_GAP_M = 3; // FSS front face to the pad deck edge
+const FSS_BACK = 0.42; // FSS azimuth behind the home view's left axis (rad; anchors.js used 0.35)
 const HARDSTAND_M = 13; // hardstand rise above the apron
 const RAMP_GRADE = 0.075; // crawlerway ramp
 const APRON_M = 1500;
@@ -84,7 +85,8 @@ const DEG = Math.PI / 180;
 const XRAY = LOOK === "xray";
 const LINE_X = 0.35; // x-ray edge-line level (parts.js LINE_PROP)
 const PAINT_K = 0.15 / LINE_X; // painted look: solid structures at 0.15
-const LATTICE_K = 0.2; // dense lattices: painted lines at 0.07 so the many members do not tint the steel
+const LATTICE_X = 0.18; // dense lattices in x-ray: quieter than solid props, the x-ray rocket stays the focus
+const LATTICE_K = 0.07 / LATTICE_X; // … and 0.07 painted, so the many members do not tint the steel
 const POOLS = 8; // light pools in the ground shader
 const clamp = THREE.MathUtils.clamp;
 const smooth = (a, b, x) => {
@@ -101,7 +103,7 @@ const noPick = (o) => {
 
 // Palette (sRGB hex, converted to linear by THREE.Color). Visual.
 const PAL = {
-  fss: 0x8e4030, // red-oxide lattice
+  fss: 0x74402f, // red-oxide lattice (muted: the rocket stays the hero)
   deck: 0x5d6167, // grating floors, platforms
   shaft: 0xa9aba7, // elevator shaft cladding
   crane: 0xd6d3c8,
@@ -112,7 +114,7 @@ const PAL = {
   rssClad: 0xd2d3cf,
   waterLeg: 0x8d9196,
   waterTank: 0xd3d4d0,
-  waterPipe: 0x7c8086,
+  waterPipe: 0x5f6368,
   mast: 0x868a8f,
   mastTop: 0xdedcd3,
   tankWhite: 0xdedfd9,
@@ -126,15 +128,15 @@ const PAL = {
   post: 0x7d8186,
   rail: 0x5a5e64,
   tray: 0x6e7278,
-  concreteTop: 0xbdb9b1,
-  concreteRamp: 0xa9a59d,
-  slope: 0x4c5438,
-  berm: 0x46503a,
+  concreteTop: 0xa8a49c,
+  concreteRamp: 0x96928a,
+  slope: 0x3c4232,
+  berm: 0x3a4134,
   trench: 0x8b867f,
-  apron: 0x75767a,
-  gravel: 0xb3ac9d,
-  median: 0x3c4430,
-  asphalt: 0x47484c,
+  apron: 0x606164,
+  gravel: 0x9d978a,
+  median: 0x343a2c,
+  asphalt: 0x46474b,
 };
 
 // ---------- procedural textures (generated once, shared) ----------
@@ -252,6 +254,27 @@ function groundHook(shader) {
 }
 const groundKey = () => "complex-ground-v1";
 
+// Night falloff for the structures (steel, cladding): albedo fades with the distance from the pad axis, as if
+// only the pad's floodlights lit the site (the builder's key light is directional and would light the whole
+// complex like daylight). material.night = { uNight: (start, width, far factor, 0), uNightC: pad centre (world) }.
+const NIGHT_OFF = { uNight: { value: new THREE.Vector4(1e9, 1, 1, 0) }, uNightC: { value: new THREE.Vector3() } };
+function nightHook(shader) {
+  Object.assign(shader.uniforms, this.night ?? NIGHT_OFF);
+  shader.vertexShader = shader.vertexShader.replace("#include <common>", "#include <common>\nvarying vec3 vNightW;").replace(
+    "#include <project_vertex>",
+    `#include <project_vertex>
+    vec4 nightW = vec4(transformed, 1.0);
+    #ifdef USE_INSTANCING
+      nightW = instanceMatrix * nightW;
+    #endif
+    vNightW = (modelMatrix * nightW).xyz;`,
+  );
+  shader.fragmentShader = shader.fragmentShader
+    .replace("#include <common>", "#include <common>\nvarying vec3 vNightW;\nuniform vec4 uNight;\nuniform vec3 uNightC;")
+    .replace("#include <map_fragment>", "#include <map_fragment>\ndiffuseColor.rgb *= mix(1.0, uNight.z, smoothstep(uNight.x, uNight.x + uNight.y, length(vNightW.xz - uNightC.xz)));");
+}
+const nightKey = () => "complex-night-v1";
+
 let SH = null;
 function shared() {
   if (SH) return SH;
@@ -271,6 +294,22 @@ function shared() {
         const fleck = f > 0.975 ? -0.12 : f < 0.02 ? 0.06 : 0;
         const k = (0.86 + 0.07 * (slab - 0.5) + 0.16 * (stain - 0.5) + 0.07 * (agg - 0.5) + fleck) * (1 - 0.42 * joint);
         return [k, k * 0.985, k * 0.955];
+      },
+      { srgb: true },
+    ),
+    // Apron, one tile = 24 m: faint joints every 12 m, broad stains and fine grain (the concrete map's grid would
+    // read as floor tiles across 1.5 km).
+    apron: dataTexture(
+      256,
+      256,
+      (u, v) => {
+        const du = Math.min(u % 0.5, 0.5 - (u % 0.5));
+        const dv = Math.min(v % 0.5, 0.5 - (v % 0.5));
+        const joint = Math.max(Math.exp(-((du / 0.003) ** 2)), Math.exp(-((dv / 0.003) ** 2)));
+        const stain = fbm(u, v, 3, 31, 4);
+        const grain = vnoise(u, v, 128, 32);
+        const k = (0.86 + 0.2 * (stain - 0.5) + 0.06 * (grain - 0.5)) * (1 - 0.14 * joint);
+        return [k, k * 0.99, k * 0.97];
       },
       { srgb: true },
     ),
@@ -318,11 +357,18 @@ function shared() {
     mt.customProgramCacheKey = groundKey;
     return mt;
   };
+  const night = (mt) => {
+    mt.onBeforeCompile = nightHook;
+    mt.customProgramCacheKey = nightKey;
+    return mt;
+  };
   SH = {
     tex,
-    steel: std({ color: 0xffffff, vertexColors: true, metalness: 0.45, roughness: 0.52, roughnessMap: tex.grain }),
-    clad: std({ color: 0xffffff, vertexColors: true, metalness: 0.08, roughness: 0.72, bumpMap: tex.siding, bumpScale: 0.6 }),
+    steel: night(std({ color: 0xffffff, vertexColors: true, metalness: 0.45, roughness: 0.52, roughnessMap: tex.grain })),
+    clad: night(std({ color: 0xffffff, vertexColors: true, metalness: 0.08, roughness: 0.72, bumpMap: tex.siding, bumpScale: 0.6 })),
     concrete: ground(std({ color: 0xffffff, vertexColors: true, roughness: 0.93, map: tex.concrete, bumpMap: tex.concrete, bumpScale: 0.45 })),
+    // The 1.5 km apron fills half the screen: matte Lambert (no specular to lose at roughness ~1), no shadows.
+    apron: ground(new THREE.MeshLambertMaterial({ color: 0xffffff, vertexColors: true, map: tex.apron, fog: true, ...po })),
     gravel: ground(std({ color: 0xffffff, vertexColors: true, roughness: 0.98, map: tex.gravel, bumpMap: tex.gravel, bumpScale: 0.6, polygonOffsetFactor: -1, polygonOffsetUnits: -4 })),
     lamp: new THREE.MeshStandardMaterial({ color: 0x2b2d32, metalness: 0.55, roughness: 0.45, emissive: 0xffe2b6, emissiveMap: tex.lampFace, emissiveIntensity: 3.2, fog: true }),
     window: new THREE.MeshBasicMaterial({ color: 0xffcf98, fog: true }),
@@ -332,7 +378,7 @@ function shared() {
 
 // X-ray twins (one per mesh): dark steel for structures, dark ground, a dark solid for the hardstand.
 const xSteel = () => propMaterial(propMaterials().steelDark);
-const xGround = (offset = 1) => new THREE.MeshStandardMaterial({ color: 0x0c0e14, metalness: 0.2, roughness: 0.95, fog: true, polygonOffset: true, polygonOffsetFactor: offset, polygonOffsetUnits: offset * 4 });
+const xGround = (offset = 1) => new THREE.MeshLambertMaterial({ color: 0x0c0e14, fog: true, polygonOffset: true, polygonOffsetFactor: offset, polygonOffsetUnits: offset * 4 });
 const xSolid = () => new THREE.MeshStandardMaterial({ color: 0x17191e, metalness: 0.3, roughness: 0.85, fog: true, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
 
 // ---------- geometry emitter ----------
@@ -698,9 +744,10 @@ const _Z = new THREE.Vector3(0, 0, 1);
 // A prop mesh in both looks: painted (a clone of `paint`, default) and x-ray (`xray`), with the builder's edge
 // segments as a peach line child (x-ray level LINE_X, painted × lineK). Classic look (?look=classic): painted
 // only, no lines.
-function lookMesh(B, name, paint, { xray = xSteel, lineK = PAINT_K, lines = true, cast = false, receive = true, ground = null } = {}) {
+function lookMesh(B, name, paint, { xray = xSteel, level = LINE_X, lineK = PAINT_K, lines = true, cast = false, receive = true, ground = null, night = null } = {}) {
   const painted = propMaterial(paint);
   if (ground) painted.ground = ground;
+  if (night) painted.night = night;
   const mesh = noPick(new THREE.Mesh(B.geometry(), painted));
   mesh.name = name;
   mesh.castShadow = cast;
@@ -710,10 +757,10 @@ function lookMesh(B, name, paint, { xray = xSteel, lineK = PAINT_K, lines = true
   mesh.userData.looks = { xray: xm, painted };
   mesh.userData.paintLineK = lineK;
   if (lines && B.nl) {
-    const ln = noPick(new THREE.LineSegments(B.lineGeometry(), peachLineMaterial(LINE_X)));
+    const ln = noPick(new THREE.LineSegments(B.lineGeometry(), peachLineMaterial(level)));
     ln.name = "edges";
-    ln.userData.base0 = LINE_X;
-    ln.userData.base = LINE_X * lineK;
+    ln.userData.base0 = level;
+    ln.userData.base = level * lineK;
     ln.material.opacity = ln.userData.base;
     mesh.add(ln);
     mesh.userData.edges = ln;
@@ -827,10 +874,12 @@ export function createLaunchComplex({
   const wF = Math.max(m(FSS_MIN_W_M), FSS_W_SHARE * tH);
   const hw = wF / 2;
   const dT = padR + m(FSS_GAP_M) + hw;
-  const phiT = trenchPhi - Math.PI; // straight left of the home view, faces aligned with the hardstand
+  const phiT = trenchPhi - Math.PI - FSS_BACK; // left of the home view and a little behind, faces toward the rocket
   const levels = clamp(Math.round((tH - topY) / m(FSS_LEVEL_M)), FSS_LEVELS[0], FSS_LEVELS[1]);
   // tower-local (x out, z) → site (x, z)
-  const towerToSite = (x, z) => [-dT - x, -z];
+  const cB = Math.cos(FSS_BACK);
+  const sB = Math.sin(FSS_BACK);
+  const towerToSite = (x, z) => [-(x + dT) * cB + z * sB, -(x + dT) * sB - z * cB];
 
   // ---------- (2) RSS geometry (tower-local plan) ----------
   const wR = 0.8 * wF;
@@ -840,9 +889,13 @@ export function createLaunchComplex({
   const rVeh = Math.max(b, widestIn(manifest, yR0, yR1));
   const arms0 = armSpecs(manifest, sc);
   const maxReach = Math.max(m(6), ...arms0.map((a) => Math.max(0.05, dT - hw - a.r - 0.03)));
-  // Hinge on the far side (local +z): far enough out that the parked RSS clears the arms' swing.
+  // Hinge just outboard of the FSS's back corner (local +x out, +z away from the home camera), so the parked
+  // RSS hides behind the FSS from the home view; the gap grows until the body clears the FSS at every angle, the arms' ±70° swing
+  // when parked and the arms at rest when mated.
   let gapR = m(1.5);
-  const hinge = { x: -hw + m(1), z: 0 };
+  const hinge = { x: hw + 0.7 * hwR, z: 0 };
+  const armH = Math.max(m(2.6), 0.024 * tH);
+  const armW = m(3.2);
   const rss = { thM: 0, thP: 0, s0: 0, LR: 0, colS: 0, colZ: 0, wOff: 0 };
   const solveRss = () => {
     hinge.z = hw + hwR + gapR;
@@ -862,23 +915,41 @@ export function createLaunchComplex({
     rss.thP = rss.thM + RSS_MAX_DEG * DEG;
     const zV = (-dT - hinge.x) * Math.sin(rss.thM) + -hinge.z * Math.cos(rss.thM);
     rss.inner = zV > 0 ? 1 : -1; // RSS-local z side facing the vehicle when mated
-    rss.colS = rss.s0;
-    rss.colZ = -rss.inner * (hwR - m(1));
+    // support column on the outer side, under the body, standing clear of the pad deck when mated
+    const zc = hwR - m(1);
+    const need = padR + m(2.5);
+    const lateral = wOff + zc;
+    rss.colS = lateral >= need ? rss.s0 : Math.max(0.3 * rss.LR, rss.s0 - Math.sqrt(need * need - lateral * lateral));
+    rss.colZ = -rss.inner * zc;
   };
   // RSS-local (s, z) → tower-local plan at angle th
   const rssToTower = (s, z, th) => [hinge.x + s * Math.cos(th) + z * Math.sin(th), hinge.z - s * Math.sin(th) + z * Math.cos(th)];
-  // Clearance of the parked RSS body from every arm's swept disc (arm hinge at (−hw, 0), radius = reach).
-  const parkedClear = () => {
+  // Plan outline samples of the RSS body at angle th (tower-local).
+  const bodyPts = (th) => {
     const pts = [];
-    for (let i = 0; i <= 8; i++) for (const z of [-hwR, hwR]) pts.push(rssToTower((rss.LR * i) / 8, z, rss.thP));
-    for (let i = 0; i <= 6; i++) pts.push(rssToTower(0, -hwR + (wR * i) / 6, rss.thP));
-    return Math.min(...pts.map(([x, z]) => Math.hypot(x + hw, z))) - maxReach;
+    for (let i = 0; i <= 12; i++) for (const z of [-hwR, hwR]) pts.push(rssToTower((rss.LR * i) / 12, z, th));
+    for (let i = 1; i < 6; i++) for (const s of [0, rss.LR]) pts.push(rssToTower(s, -hwR + (wR * i) / 6, th));
+    return pts;
+  };
+  const armsInSpan = arms0.filter((a) => a.y + armH > yR0 && a.y - armH < yR1);
+  const rssClear = () => {
+    const pad = m(1);
+    for (let k = 0; k <= 12; k++) {
+      const th = rss.thM + ((rss.thP - rss.thM) * k) / 12;
+      for (const [x, z] of bodyPts(th)) {
+        if (Math.abs(x) < hw + pad && Math.abs(z) < hw + pad) return false; // into the FSS
+        if (k === 0) for (const a of armsInSpan) if (x < -hw && x > -dT + a.r && Math.abs(z) < armW / 2 + pad) return false; // mated: over an arm
+      }
+    }
+    for (const [x, z] of bodyPts(rss.thP)) if (Math.hypot(x + hw, z) < maxReach + pad) return false; // parked: in an arm's swing
+    return true;
   };
   solveRss();
-  for (let i = 0; i < 12 && arms0.length && parkedClear() < m(1.5); i++) {
+  for (let i = 0; i < 16 && !rssClear(); i++) {
     gapR += m(1.5);
     solveRss();
   }
+  rss.clear = rssClear();
 
   // ---------- (5) hardstand plan (site frame) ----------
   const cwT = holeR + 0.05 * b + 0.02; // trench half-width incl. its walls (createPad)
@@ -901,6 +972,11 @@ export function createLaunchComplex({
       arcMinX = Math.min(arcMinX, sx);
       arcMinZ = Math.min(arcMinZ, sz);
     }
+  }
+  for (const [x, z] of [[-hw, -hw], [hw, -hw], [hw, hw], [-hw, hw]]) {
+    const [sx, sz] = towerToSite(x, z);
+    arcMinX = Math.min(arcMinX, sx - m(6));
+    arcMinZ = Math.min(arcMinZ, sz - m(6));
   }
   const xL = Math.max(dT + hw + m(10), -arcMinX + m(8));
   const lane = m(10);
@@ -944,9 +1020,39 @@ export function createLaunchComplex({
     [-xL - towerOut, -zB - towerOut * 0.6], // back-left
     [-xL - towerOut, zF + towerOut], // front-left
   ];
+  {
+    const t = trenchPhi;
+    const opts = [phiT - 1.15, phiT + 1.15];
+    const off = (a) => Math.abs(Math.atan2(Math.sin(a - cameraAzimuth), Math.cos(a - cameraAzimuth)));
+    const camAz = off(opts[0]) < off(opts[1]) ? opts[0] : opts[1];
+    const ac = Math.atan2(-Math.sin(camAz - t), Math.cos(camAz - t)); // the ray's angle in the site plan (x, z)
+    const reachCam = 1.9 * H + m(20);
+    for (const p of mastXY) {
+      const r = Math.hypot(p[0], p[1]);
+      let a = Math.atan2(p[1], p[0]);
+      const da = Math.atan2(Math.sin(a - ac), Math.cos(a - ac));
+      const need = Math.asin(Math.min(0.95, (m(3.2) + Math.max(m(16), 0.3 * H)) / r));
+      if (r < reachCam && Math.abs(da) < need) {
+        a = ac + Math.sign(da || 1) * need;
+        p[0] = r * Math.cos(a);
+        p[1] = r * Math.sin(a);
+      }
+    }
+  }
   const mastTop = MAST_SHARE * H;
-  const dW = WATER_DIST_SHARE * tH;
   const wAng = -38 * DEG; // right and behind
+  // 1.5 × the FSS height out; for very short stacks at least far enough that the legs stand off the hardstand foot
+  let dOff = 0;
+  {
+    const foot = offsetPoly(outline, HS);
+    const ux = Math.cos(wAng);
+    const uz = Math.sin(wAng);
+    for (let d = 0; d < m(2000); d += m(1)) if (!pointInPoly(ux * d, uz * d, foot)) {
+      dOff = d;
+      break;
+    }
+  }
+  const dW = Math.max(WATER_DIST_SHARE * tH, dOff + m(11) + m(4)); // legs spread m(11)
   const WT = [dW * Math.cos(wAng), dW * Math.sin(wAng)];
   const farmHalfX = m(46);
   const farmHalfZ = m(34);
@@ -957,12 +1063,13 @@ export function createLaunchComplex({
   const pools = Array.from({ length: POOLS }, () => new THREE.Vector4(0, 0, 1, 0));
   const groundU = {
     uGFar: { value: new THREE.Vector4(0, 1, 0.3, 1 / m(60)) },
-    uGS: { value: new THREE.Vector4(xs0, xF, cwT, 0.42) },
-    uGS2: { value: new THREE.Vector4(m(150), 0.35 / m(4), 0, 0) },
+    uGS: { value: new THREE.Vector4(xs0, xF, cwT, 0.5) },
+    uGS2: { value: new THREE.Vector4(m(210), 0.35 / m(4), 0, 0) },
     uGPools: { value: pools },
     uGPoolColor: { value: new THREE.Color(1.0, 0.78, 0.55).multiplyScalar(0.9 * floodK) },
   };
   const groundOf = (scorch, far, stain, pool) => ({ ...groundU, uGK: { value: new THREE.Vector4(scorch, far, stain, pool) } });
+  const nightU = { uNight: { value: new THREE.Vector4(1e9, 1, 1, 0) }, uNightC: { value: new THREE.Vector3() } }; // set once Rf is known
 
   // ---------- hardstand mesh ----------
   const conc = new Builder(m(8));
@@ -1013,7 +1120,7 @@ export function createLaunchComplex({
       conc.seg(foot, end);
     }
   }
-  const hardstand = lookMesh(conc, "complex-hardstand", S.concrete, { xray: xSolid, ground: groundOf(0.75, 0.4, 0.7, 1), receive: true });
+  const hardstand = lookMesh(conc, "complex-hardstand", S.concrete, { xray: xSolid, level: 0.2, lineK: 0.15 / 0.2, ground: groundOf(0.75, 0.4, 0.7, 1), receive: true });
   site.add(hardstand);
 
   // ---------- (6) trench channel, exit, deflector ----------
@@ -1040,43 +1147,26 @@ export function createLaunchComplex({
         }
       }
     }
-    // Flared wing walls along the exit.
+    // Flared wing walls along the exit (low), then a sloped deflector berm that turns the exhaust up and away.
     const ww = m(1.2);
-    const wh = m(3.5);
-    for (const s of [-1, 1]) {
-      const a = v3(xF - m(1), groundY, s * (cwT + ww / 2));
-      const e = v3(xE, groundY, s * (halfW(xE) + ww / 2));
-      tr.strut(a.clone().setY(groundY + wh / 2), e.clone().setY(groundY + wh / 2), ww, wh, C.trench, v3(0, 1, 0));
+    const wh = m(2.4);
+    for (const s2 of [-1, 1]) {
+      const a = v3(xF - m(1), groundY + wh / 2, s2 * (cwT + ww / 2));
+      const e = v3(xE, groundY + wh / 2, s2 * (halfW(xE) + ww / 2));
+      tr.strut(a, e, ww, wh, C.trench, v3(0, 1, 0));
     }
-    // Exit deflector: a curved concrete kicker with steel-plated face that throws the exhaust up and out.
-    const kL = m(12);
-    const kH = m(5);
-    const kw = halfW(xE);
-    const prof = [];
-    for (let i = 0; i <= 6; i++) {
-      const t = i / 6;
-      prof.push([xE + kL * t, groundY + 0.02 + kH * t * t]);
-    }
-    for (let i = 0; i < prof.length - 1; i++) {
-      const [x0, y0] = prof[i];
-      const [x1, y1] = prof[i + 1];
-      quadUp(tr, v3(x0, y0, -kw), v3(x1, y1, -kw), v3(x1, y1, kw), v3(x0, y0, kw), C.rail);
-    }
-    const kTop = prof[prof.length - 1];
-    tr.quad(v3(kTop[0], groundY, -kw), v3(kTop[0], groundY, kw), v3(kTop[0], kTop[1], kw), v3(kTop[0], kTop[1], -kw), C.trench);
-    for (const s of [-1, 1]) {
-      // side cheeks of the kicker
-      const pts = prof.map(([x, y]) => v3(x, y, s * kw));
-      for (let i = 0; i < pts.length - 1; i++) {
-        const a = pts[i];
-        const bb = pts[i + 1];
-        const a0 = a.clone().setY(groundY);
-        const b0 = bb.clone().setY(groundY);
-        if (s > 0) tr.quad(a0, b0, bb, a, C.trench);
-        else tr.quad(b0, a0, a, bb, C.trench);
-      }
-      tr.loop(pts, false);
-    }
+    const kL = m(7);
+    const kH = m(2.4);
+    const kw = halfW(xE) + ww;
+    const k0 = v3(xE, groundY + 0.02, -kw);
+    const k1 = v3(xE, groundY + 0.02, kw);
+    const k2 = v3(xE + kL, groundY + kH, kw);
+    const k3 = v3(xE + kL, groundY + kH, -kw);
+    quadUp(tr, k0, k3, k2, k1, C.saddle);
+    tr.loop([k0, k1, k2, k3]);
+    tr.quad(v3(xE + kL, groundY, -kw), v3(xE + kL, groundY, kw), k2, k3, C.trench); // back face
+    tr.tri(v3(xE, groundY, kw), v3(xE + kL, groundY, kw), k2, C.trench); // cheeks
+    tr.tri(v3(xE + kL, groundY, -kw), v3(xE, groundY, -kw), k3, C.trench);
   }
   const trench = lookMesh(tr, "complex-trench", S.concrete, { xray: xSolid, ground: groundOf(0.95, 0.4, 0.5, 0.6), lines: false });
   // Lines of the trench go on the hardstand's line child (one draw).
@@ -1084,7 +1174,7 @@ export function createLaunchComplex({
   site.add(trench);
 
   // ---------- (10) apron with the berm ----------
-  const ap = new Builder(m(12));
+  const ap = new Builder(m(24));
   const half = m(APRON_M) / 2;
   quadUp(ap, v3(-half, groundY, -half), v3(half, groundY, -half), v3(half, groundY, half), v3(-half, groundY, half), C.apron);
   // Earth berm on the farm's pad-facing sides (an L of trapezoid sections), merged into the apron.
@@ -1097,7 +1187,7 @@ export function createLaunchComplex({
   const gapB = m(18);
   bermSection(ap, [fx0 - farmHalfX, fz0 + farmHalfZ], [fx0 + farmHalfX - gapB, fz0 + farmHalfZ], groundY, bermH, bermTop, bermBase, C.berm, true, true);
   bermSection(ap, [fx0 + farmHalfX, fz0 + farmHalfZ - gapB], [fx0 + farmHalfX, fz0 - farmHalfZ], groundY, bermH, bermTop, bermBase, C.berm, true, true);
-  const apron = lookMesh(ap, "complex-apron", S.concrete, { xray: () => xGround(1), ground: groundOf(0.85, 1, 1, 1), lines: false });
+  const apron = lookMesh(ap, "complex-apron", S.apron, { xray: () => xGround(1), ground: groundOf(1, 1, 1, 1), lines: false, receive: false });
   site.add(apron);
 
   // ---------- roads: crawlerway (gravel lanes, grass median) on the hardstand, down the ramp, out to the gate;
@@ -1162,9 +1252,9 @@ export function createLaunchComplex({
   tower.rotation.y = phiT - Math.PI / 2;
   object3d.add(tower);
   const fssB = new Builder(m(2));
-  const cw = Math.max(m(0.7), 0.05 * wF); // column
-  const bw = 0.62 * cw; // crossbeam
-  const br = 0.45 * cw; // brace
+  const cw = Math.max(m(0.55), 0.04 * wF); // column
+  const bw = 0.6 * cw; // crossbeam
+  const br = 0.42 * cw; // brace
   const lvY = (k) => topY + ((tH - topY) * k) / levels;
   const grid = [-hw, 0, hw];
   for (const x of grid) for (const z of grid) fssB.aabb(x, (topY + tH) / 2, z, cw, tH - topY, cw, C.fss);
@@ -1275,6 +1365,7 @@ export function createLaunchComplex({
   beams.instanceMatrix.needsUpdate = true;
   beams.computeBoundingSphere();
   beams.castShadow = beams.receiveShadow = true;
+  beams.material.night = nightU;
   if (XRAY) beams.userData.looks = { xray: xSteel(), painted: beams.material };
   // the beams' box edges, for the lattice line child
   const unitEdges = [
@@ -1300,12 +1391,10 @@ export function createLaunchComplex({
       fssB.seg(tmpA, tmpB);
     }
   }
-  const towerFrame = lookMesh(fssB, "complex-fss", S.steel, { lineK: LATTICE_K, cast: true, receive: true });
+  const towerFrame = lookMesh(fssB, "complex-fss", S.steel, { night: nightU, level: LATTICE_X, lineK: LATTICE_K, cast: true, receive: true });
   tower.add(towerFrame, beams);
 
   // ---------- umbilical arms (one mesh each, origin on the hinge at the tower face) ----------
-  const armH = Math.max(m(2.6), 0.024 * tH);
-  const armW = m(3.2);
   const arms = arms0.map((a) => {
     const reach = Math.max(0.05, dT - hw - a.r - 0.03);
     const B = new Builder(m(2));
@@ -1325,7 +1414,7 @@ export function createLaunchComplex({
     B.aabb(-reach / 2, -armH / 2 + ch + m(0.12), 0, reach, m(0.2), armW - 2 * ch, C.deck, false);
     for (const zz of [-armW * 0.18, armW * 0.18]) B.cyl(v3(-m(0.8), -armH * 0.18, zz), v3(-reach + m(1.4), -armH * 0.18, zz), m(0.16), m(0.16), 6, C.pipe, { caps: false });
     B.aabb(-reach + m(0.7), 0, 0, m(1.4), armH * 1.15, armW * 1.12, C.hood);
-    const mesh = lookMesh(B, `complex-arm:${a.id}`, S.steel, { lineK: LATTICE_K, cast: true, receive: true });
+    const mesh = lookMesh(B, `complex-arm:${a.id}`, S.steel, { night: nightU, level: LATTICE_X, lineK: LATTICE_K, cast: true, receive: true });
     mesh.position.set(-hw, a.y, 0);
     tower.add(mesh);
     return { mesh, y_u: a.y, reach_u: reach, partId: a.id };
@@ -1346,6 +1435,18 @@ export function createLaunchComplex({
     // corner columns of the body and the hinge column (full height)
     for (const s of [0, LR]) for (const z of [-hwR, hwR]) B.aabb(s, (yR0 + yR1) / 2, z, rc, yR1 - yR0, rc, C.rssFrame);
     B.cyl(v3(0, topY, 0), v3(0, yR1 + m(3), 0), m(1.6), m(1.6), 12, C.rssFrame, { lines: true });
+    const bays = Math.max(2, Math.round(LR / m(7)));
+    for (let i = 1; i < bays; i++) for (const z of [-hwR, hwR]) B.aabb((LR * i) / bays, (yR0 + yR1) / 2, z, rc * 0.8, yR1 - yR0, rc * 0.8, C.rssFrame);
+    for (let k = 0; k < nLev; k++) {
+      const ya = yR0 + ((yR1 - yR0) * k) / nLev + rc;
+      const yb = yR0 + ((yR1 - yR0) * (k + 1)) / nLev - rc;
+      for (let i = 0; i < bays; i++) {
+        const sa = (LR * i) / bays;
+        const sb = (LR * (i + 1)) / bays;
+        const zz = rss.inner * hwR;
+        B.strut(v3(sa, (i + k) % 2 ? ya : yb, zz), v3(sb, (i + k) % 2 ? yb : ya, zz), rc * 0.6, rc * 0.6, C.rssFrame, v3(0, 0, 1));
+      }
+    }
     for (let k = 0; k <= nLev; k++) {
       const y = yR0 + ((yR1 - yR0) * k) / nLev;
       for (const z of [-hwR, hwR]) B.aabb(LR / 2, y, z, LR, rc * 0.8, rc * 0.8, C.rssFrame);
@@ -1368,7 +1469,7 @@ export function createLaunchComplex({
     B.strut(v3(cs, topY + (yR0 - topY) * 0.45, cz), v3(Math.max(0, cs - m(10)), yR0, cz), rc, rc, C.rssFrame);
     B.aabb(cs, topY + m(1.1), cz, m(5), m(1.6), m(2.6), C.counterweight);
     for (const ds of [-m(1.6), m(1.6)]) B.cyl(v3(cs + ds, topY + m(0.55), cz - m(1.4)), v3(cs + ds, topY + m(0.55), cz + m(1.4)), m(0.55), m(0.55), 10, C.rail, { lines: false });
-    const rssMesh = lookMesh(B, "complex-rss", S.clad, { lineK: LATTICE_K, cast: true, receive: true });
+    const rssMesh = lookMesh(B, "complex-rss", S.clad, { night: nightU, level: LATTICE_X, lineK: LATTICE_K, cast: true, receive: true });
     rssGroup.add(rssMesh);
   }
   let rssAngle = 0;
@@ -1430,18 +1531,18 @@ export function createLaunchComplex({
   wB.lathe(v3(wc.x, tankY0 + tankH * 0.08, wc.z), [[tankR + m(0.1), 0], [tankR + m(1.2), 0], [tankR + m(1.2), m(0.3)], [tankR + m(0.1), m(0.3)]], 28, C.waterLeg, true);
   wB.strut(legAt(0, groundY + m(1)), legAt(0, legTop).clone().lerp(wc.clone().setY(legTop), -0.06), m(0.6), m(0.15), C.waterLeg, null, false);
   // Down pipe: along the apron toward the pad, up the hardstand slope, across the top, into the plinth wall.
-  const pipeR = m(1.0);
+  const pipeR = m(0.7);
   const dirToPad = v3(-WT[0], 0, -WT[1]).normalize();
-  const start = v3(wc.x, groundY + pipeR + m(0.6), wc.z).addScaledVector(dirToPad, legR0 * 0.2);
+  const start = v3(wc.x, groundY + pipeR + m(0.3), wc.z).addScaledVector(dirToPad, legR0 * 0.2);
   const footPoly = offsetPoly(outline, HS + m(1));
   let foot = start.clone();
   for (let s = 0; s < 4000; s++) {
     foot.addScaledVector(dirToPad, m(1));
     if (pointInPoly(foot.x, foot.z, footPoly)) break;
   }
-  const topEdge = foot.clone().addScaledVector(dirToPad, HS + m(1)).setY(topY + pipeR + m(0.4));
+  const topEdge = foot.clone().addScaledVector(dirToPad, HS + m(1)).setY(topY + pipeR + m(0.2));
   const enterR = padR + m(0.2);
-  const end = dirToPad.clone().multiplyScalar(-enterR).setY(topY + pipeR + m(0.4));
+  const end = dirToPad.clone().multiplyScalar(-enterR).setY(topY + pipeR + m(0.2));
   const pipePts = [start, foot, topEdge, end];
   for (let i = 0; i < pipePts.length - 1; i++) wB.cyl(pipePts[i], pipePts[i + 1], pipeR, pipeR, 12, C.waterPipe, { caps: false, lines: true });
   for (const p of pipePts.slice(1, -1)) wB.sphere(p, pipeR * 1.18, C.waterPipe, 12, 8);
@@ -1451,7 +1552,7 @@ export function createLaunchComplex({
     const p = start.clone().addScaledVector(dirToPad, d);
     wB.aabb(p.x, (groundY + p.y - pipeR) / 2, p.z, m(1.2), p.y - pipeR - groundY, m(1.2), C.saddle, false);
   }
-  const waterTower = lookMesh(wB, "complex-water-tower", S.steel, { cast: true, receive: true });
+  const waterTower = lookMesh(wB, "complex-water-tower", S.steel, { night: nightU, cast: true, receive: true });
   site.add(waterTower);
 
   // ---------- (4) lightning towers + catenary wires ----------
@@ -1494,7 +1595,7 @@ export function createLaunchComplex({
     mB.box(bc.clone().addScaledVector(toPad, m(1.3)).setY(yb + m(1.4)), toPad.clone().multiplyScalar(m(0.12)), v3(0, m(1.4), 0), side.clone().multiplyScalar(m(5)), C.mast, false);
     banks.push({ c: bc.clone().setY(yb + m(1.6)), toPad, side, mast: [mx, mz] });
   }
-  const masts = lookMesh(mB, "complex-lightning-towers", S.steel, { lineK: LATTICE_K, cast: false, receive: true });
+  const masts = lookMesh(mB, "complex-lightning-towers", S.steel, { night: nightU, level: LATTICE_X, lineK: LATTICE_K, cast: false, receive: true });
   site.add(masts);
   // Wires: the four sides between the tops and one to a ground anchor outward from each tower.
   const wireSegs = [];
@@ -1548,10 +1649,10 @@ export function createLaunchComplex({
   // Pipe rack: from the farm toward the hardstand's left edge, up its slope, across to the FSS outer face.
   const rackH = m(3.6);
   const rp0 = v3(fx0 + farmHalfX - m(9), groundY, fz0 + farmHalfZ - m(9));
-  const rpFoot = v3(-xL - HS - m(2), groundY, 0);
-  const rpTop = v3(-xL + m(1), topY, 0);
-  const [fssOutX] = towerToSite(hw + cw, 0);
-  const rpEnd = v3(fssOutX - m(1.5), topY, 0);
+  const [fssOutX, fssOutZ] = towerToSite(hw + cw + m(1.5), 0);
+  const rpFoot = v3(-xL - HS - m(2), groundY, fssOutZ);
+  const rpTop = v3(-xL + m(1), topY, fssOutZ);
+  const rpEnd = v3(fssOutX, topY, fssOutZ);
   const rackPts = [rp0, rpFoot, rpTop, rpEnd];
   const bents = [];
   for (let i = 0; i < rackPts.length - 1; i++) {
@@ -1578,7 +1679,8 @@ export function createLaunchComplex({
     });
   }
   // down the FSS outer face: the lines turn up into the tower's vertical runs
-  fB.cyl(v3(rpEnd.x, topY + rackH, rpEnd.z), v3(fssOutX - m(0.4), topY + rackH, rpEnd.z), m(0.42), m(0.42), 8, C.pipe, { caps: false });
+  const [fssFaceX, fssFaceZ] = towerToSite(hw + cw * 0.5, 0);
+  fB.cyl(v3(rpEnd.x, topY + rackH, rpEnd.z), v3(fssFaceX, topY + rackH, fssFaceZ), m(0.42), m(0.42), 8, C.pipe, { caps: false });
   // Continue the pad's transporter rails down the ramp and along the crawlerway median.
   const railY = (z) => yRamp(z) + m(0.15);
   for (const s of [-1, 1]) {
@@ -1587,13 +1689,22 @@ export function createLaunchComplex({
     for (let i = 0; i < zs.length - 1; i++) fB.strut(v3(x, railY(zs[i]), zs[i]), v3(x, railY(zs[i + 1]), zs[i + 1]), m(0.3), m(0.3), C.rail, v3(1, 0, 0), false);
   }
   // Cable tray: FSS front face → pad plinth wall → up → across the deck to the launch mount.
-  const [fssFrontX] = towerToSite(-hw - cw, 0);
-  const trayW = m(1.6);
-  const trayZ = m(1.2);
-  fB.aabb((fssFrontX + -padR) / 2, topY + m(0.25), trayZ, Math.abs(-padR - fssFrontX), m(0.5), trayW, C.tray);
-  fB.aabb(-padR - m(0.3), (topY + 0) / 2, trayZ, m(0.6), P, trayW, C.tray);
-  fB.aabb((-padR + -mountR * 1.05) / 2, m(0.08), trayZ, Math.abs(padR - mountR * 1.05), m(0.16), trayW, C.tray);
-  const farmMesh = lookMesh(fB, "complex-farm", S.steel, { cast: false, receive: true });
+  {
+    const trayW = m(1.6);
+    const off = m(1.2); // beside the arm line
+    const [fx, fz] = towerToSite(-hw - cw, off);
+    const ux = -cB;
+    const uz = -sB; // radial unit (site), pointing away from the pad
+    const nx = -uz;
+    const nz = ux;
+    const at = (r) => v3(ux * r + nx * (off * -1), 0, uz * r + nz * (off * -1));
+    const rFss = Math.hypot(fx, fz);
+    const yT = topY + m(0.25);
+    fB.strut(at(padR + m(0.3)).setY(yT), at(rFss).setY(yT), trayW, m(0.5), C.tray, v3(0, 1, 0));
+    fB.strut(at(padR + m(0.3)).setY(topY), at(padR + m(0.3)).setY(0), trayW, m(0.6), C.tray, v3(ux, 0, uz));
+    fB.strut(at(mountR * 1.05).setY(m(0.08)), at(padR + m(0.3)).setY(m(0.08)), trayW, m(0.16), C.tray, v3(0, 1, 0));
+  }
+  const farmMesh = lookMesh(fB, "complex-farm", S.steel, { night: nightU, cast: false, receive: true });
   site.add(farmMesh);
   // rack bents (instanced): two posts + a crossbar, standing on the local ground at each station
   const bentGeo = (() => {
@@ -1609,6 +1720,7 @@ export function createLaunchComplex({
   racks.instanceMatrix.needsUpdate = true;
   racks.computeBoundingSphere();
   racks.receiveShadow = true;
+  racks.material.night = nightU;
   if (XRAY) racks.userData.looks = { xray: xSteel(), painted: racks.material };
   site.add(racks);
 
@@ -1686,7 +1798,7 @@ export function createLaunchComplex({
   building(-rampHalf - m(10), zGate + m(8), m(6), m(5), m(3.6), C.wall, { windows: 2, face: [1, 0] });
   building(ptcr[0] - m(2), ptcr[1] + m(30), m(12), m(9), m(5), C.wall, { windows: 1, face: [1, 0] });
   building(fx0 + farmHalfX * 0.3, fz0 - farmHalfZ * 0.72, m(10), m(7), m(4.5), C.wall, { windows: 1, face: [0, -1] });
-  const buildings = lookMesh(bB, "complex-buildings", S.clad, { cast: true, receive: true });
+  const buildings = lookMesh(bB, "complex-buildings", S.clad, { night: nightU, cast: true, receive: true });
   site.add(buildings);
   const windows = noPick(new THREE.Mesh(win.geometry(), S.window.clone()));
   windows.name = "complex-windows";
@@ -1731,6 +1843,7 @@ export function createLaunchComplex({
   });
   posts.instanceMatrix.needsUpdate = true;
   posts.computeBoundingSphere();
+  posts.material.night = nightU;
   if (XRAY) posts.userData.looks = { xray: xSteel(), painted: posts.material };
   site.add(posts);
   const fenceWires = noPick(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(fenceSegs), new THREE.LineBasicMaterial({ color: 0x8a9096, transparent: true, opacity: 0.45, fog: true })));
@@ -1763,6 +1876,7 @@ export function createLaunchComplex({
   });
   poles.instanceMatrix.needsUpdate = true;
   poles.computeBoundingSphere();
+  poles.material.night = nightU;
   if (XRAY) poles.userData.looks = { xray: xSteel(), painted: poles.material };
   site.add(poles);
 
@@ -1823,19 +1937,66 @@ export function createLaunchComplex({
     const pos = beamCone.attributes.position;
     for (let i = 0; i < pos.count; i++) {
       const t = -pos.getY(i); // 0 at the lamp, 1 at the far end
-      const k = 1 + t * 11;
+      const k = 1 + t * 8;
       pos.setXYZ(i, pos.getX(i) * k, pos.getY(i), pos.getZ(i) * k);
     }
     beamCone.computeVertexNormals();
   }
-  const beamMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(1.0, 0.8, 0.58), transparent: true, opacity: 0.075 * floodK, alphaMap: S.tex.fade, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: true });
+  const beamMat = new THREE.ShaderMaterial({
+    uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, { uColor: { value: new THREE.Color(1.0, 0.8, 0.58) }, opacity: { value: 0.12 * floodK } }]),
+    vertexShader: /* glsl */ `
+      #include <common>
+      #include <fog_pars_vertex>
+      varying float vT;
+      varying vec3 vN;
+      varying vec3 vV;
+      void main() {
+        vT = uv.y;
+        vec4 mvPosition = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+        vN = normalize(normalMatrix * mat3(instanceMatrix) * normal);
+        vV = -mvPosition.xyz;
+        gl_Position = projectionMatrix * mvPosition;
+        #include <fog_vertex>
+      }`,
+    fragmentShader: /* glsl */ `
+      #include <common>
+      #include <fog_pars_fragment>
+      uniform vec3 uColor;
+      uniform float opacity;
+      varying float vT;
+      varying vec3 vN;
+      varying vec3 vV;
+      void main() {
+        float facing = abs(dot(normalize(vN), normalize(vV)));
+        float a = opacity * pow(vT, 2.2) * facing * facing;
+        #ifdef USE_FOG
+          a *= 1.0 - smoothstep(fogNear, fogFar, vFogDepth);
+        #endif
+        gl_FragColor = vec4(uColor * a, 1.0);
+      }`,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    fog: true,
+  });
+  beamMat.opacity = 0.12 * floodK;
+  // setPropLook writes material.opacity (lookOpacity); the shader reads it through this uniform.
+  beamMat.uniforms.opacity = {
+    get value() {
+      return beamMat.opacity;
+    },
+    set value(v) {
+      beamMat.opacity = v;
+    },
+  };
   const beamsLit = noPick(new THREE.InstancedMesh(beamCone, beamMat, banks.length));
   beamsLit.name = "complex-light-beams";
-  beamsLit.userData.lookOpacity = { painted: 0.075 * floodK, xray: 0 };
+  beamsLit.userData.lookOpacity = { painted: 0.12 * floodK, xray: 0 };
   banks.forEach((bk, i) => {
     const from = bk.c.clone().addScaledVector(bk.toPad, m(1.6));
-    const to = v3(0, aimY * 0.6, 0);
-    const len = from.distanceTo(to) * 0.95;
+    const to = v3(0, Math.max(aimY * 0.6, m(9) * 1.3 + 0.1), 0); // the cone's far rim (radius m(9)) stays above the deck
+    const len = from.distanceTo(to) * 0.9;
     const q = new THREE.Quaternion().setFromUnitVectors(v3(0, -1, 0), to.clone().sub(from).normalize());
     beamsLit.setMatrixAt(i, new THREE.Matrix4().compose(from, q, v3(1, len, 1)));
   });
@@ -1858,9 +2019,12 @@ export function createLaunchComplex({
     const c = v3(bk.mast[0], 0, bk.mast[1]).addScaledVector(bk.toPad, Math.hypot(...bk.mast) * 0.42);
     return new THREE.Vector4(c.x, c.z, m(30), 0.75);
   });
-  poolList.push(new THREE.Vector4(-dT + hw + m(4), 0, m(18), 0.5), new THREE.Vector4(hangar.x - hangar.w / 2 - m(10), hangar.z, m(22), 0.55), new THREE.Vector4(pumpHouse[0], pumpHouse[1] + m(10), m(14), 0.4), new THREE.Vector4(0, zFront, m(20), 0.35));
+  const [poolFx, poolFz] = towerToSite(-hw - m(5), 0);
+  poolList.push(new THREE.Vector4(poolFx, poolFz, m(18), 0.5), new THREE.Vector4(hangar.x - hangar.w / 2 - m(10), hangar.z, m(22), 0.55), new THREE.Vector4(pumpHouse[0], pumpHouse[1] + m(10), m(14), 0.4), new THREE.Vector4(0, zFront, m(20), 0.35));
   poolList.slice(0, POOLS).forEach((p, i) => pools[i].copy(p));
-  groundU.uGFar.value.set(Math.max(xR, zB) + HS + m(20), Rf * 0.75, 0.3, 1 / m(60));
+  const siteR = Math.max(xR, xL, zF, zB) + HS; // the hardstand's reach
+  groundU.uGFar.value.set(siteR * 0.75, Math.max(m(60), Rf * 0.55), 0.16, 1 / m(60));
+  nightU.uNight.value.set(siteR * 0.9, Math.max(m(70), Rf * 0.6), 0.2, 0);
   // Real lights: two warm spots (front-left bank: the key's side; back-right: a rim on the vehicle), no shadows.
   const lights = [];
   if (spotLights) {
@@ -1918,7 +2082,7 @@ export function createLaunchComplex({
         });
         if (y0 === null) continue;
         adopted.push({ o, y: o.position.y });
-        o.position.y = groundY - 0.012 - y0;
+        o.position.y = groundY - m(1.5) - y0; // well under the apron: a hair's gap z-fights at a distance
       }
     }
     return true;
@@ -1932,7 +2096,9 @@ export function createLaunchComplex({
   // ---------- API ----------
   let look = "painted";
   const beaconCol = beaconGeo.attributes.color;
+  const padC = new THREE.Vector3();
   function update(t = 0) {
+    nightU.uNightC.value.copy(object3d.getWorldPosition(padC));
     // beacons: 1.6 s cycle, alternate towers half a cycle apart, soft on/off
     for (let i = 0; i < beaconCol.count; i++) {
       const ph = (t / 1.6 + (i % 2) * 0.5) % 1;
@@ -1966,6 +2132,9 @@ export function createLaunchComplex({
     radius_u: Rf,
     height_u: Math.max(mastTop, antTop),
     rssMaxDeg: RSS_MAX_DEG,
+    // RSS plan in the tower frame (+x away from the rocket): hinge, body length/width, the parked/mated yaw
+    // (rss.rotation.y), whether the clearance solver found a gap that clears the FSS and the arms.
+    rssInfo: { hinge: [hinge.x, hinge.z], length_u: rss.LR, width_u: wR, span_u: [yR0, yR1], parkedYaw: rss.thP, matedYaw: rss.thM, gap_u: gapR, clear: rss.clear },
     get rssAngle() {
       return rssAngle;
     },

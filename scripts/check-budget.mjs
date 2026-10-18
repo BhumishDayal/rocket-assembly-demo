@@ -3,8 +3,10 @@
 // unique materials, programs (approximated by material type + shader hooks + maps/defines), textures. The
 // pad + anchors are reported separately, and so are the flight props grouped by the scene they share (pad
 // ignition, ascent to orbit, booster return, Moon landing, Mars landing).
-// Fails when a preset's builder exceeds 320 meshes + 120 line sets in either look, or a flight-prop scene
+// Fails when a preset's builder exceeds 900 meshes + 300 line sets in either look, or a flight-prop scene
 // exceeds 60 extra draws. (All flight props together are printed too, for reference: they never share a frame.)
+// Instanced fine detail (rivets, bolt circles, clamps: parts.js) counts as one mesh per InstancedMesh (column
+// inst) and has no line sets; its instances count in verts.
 // Run: node scripts/check-budget.mjs   (no deps; exits 1 over budget)
 import { registerHooks } from "node:module";
 
@@ -24,7 +26,7 @@ const { attachPlumes, createPlume, createPadLight } = await import("../src/plume
 const FX = await import("../src/fx/launchfx.js");
 const { createPlanet, createTerrain, createOcean, createSkyDome, createDustPuff, createShadowDecal } = await import("../src/planet.js");
 
-const BUILDER = { meshes: 320, lines: 120 };
+const BUILDER = { meshes: 900, lines: 300 };
 const FLIGHT = 60;
 const failures = [];
 
@@ -62,7 +64,7 @@ function texturesOf(m, out) {
   for (const u of Object.values(m.uniforms ?? {})) if (u?.value?.isTexture) out.add(u.value);
 }
 function stats(...roots) {
-  const s = { meshes: 0, lines: 0, casters: 0, geos: new Set(), verts: 0, mats: new Set(), progs: new Set(), texs: new Set() };
+  const s = { meshes: 0, inst: 0, lines: 0, casters: 0, geos: new Set(), verts: 0, mats: new Set(), progs: new Set(), texs: new Set() };
   for (const root of roots) {
     root.updateMatrixWorld(true);
     root.traverseVisible((o) => {
@@ -71,6 +73,7 @@ function stats(...roots) {
       if (!ms.length || ms.every((m) => m.visible === false)) return; // three skips these draws
       if (o.isLine) s.lines++;
       else s.meshes++;
+      if (o.isInstancedMesh) s.inst++;
       if (o.castShadow && !o.isLine) s.casters++;
       if (o.geometry) {
         s.geos.add(o.geometry);
@@ -83,12 +86,12 @@ function stats(...roots) {
       }
     });
   }
-  return { meshes: s.meshes, lines: s.lines, draws: s.meshes + s.lines, casters: s.casters, geos: s.geos.size, verts: s.verts, mats: s.mats.size, progs: s.progs.size, texs: s.texs.size };
+  return { meshes: s.meshes, inst: s.inst, lines: s.lines, draws: s.meshes + s.lines, casters: s.casters, geos: s.geos.size, verts: s.verts, mats: s.mats.size, progs: s.progs.size, texs: s.texs.size };
 }
 
 // ---------- table ----------
 
-const COLS = ["meshes", "lines", "draws", "casters", "geos", "verts", "mats", "progs", "texs"];
+const COLS = ["meshes", "inst", "lines", "draws", "casters", "geos", "verts", "mats", "progs", "texs"];
 const rows = [];
 const row = (label, st, note = "") => rows.push({ label, ...st, note });
 function print() {

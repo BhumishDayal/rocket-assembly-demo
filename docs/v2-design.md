@@ -654,3 +654,11 @@ The flight follows the physics outcome of the build, not the mission script:
 4. Everything the user can request through Grok (assembly:apply builds) goes through the same path.
 Owners: UI 2 flight.js branches (partial burn, vis-viva propagation, re-entry/impact samples); UI4 createImpact()
 in launchfx (sea splash column / ground fireball + debris) and a re-entry break-up glow; UI 3 director shows them.
+
+### Round 20 — every flight ends with a LANDING (user, ~02:50): "we are building a rocket, not a satellite"
+- Moon/Mars missions: land there (round 16). Earth-orbit missions (LEO/GTO/escape): after the orbit pass the
+  vehicle de-orbits, re-enters (plasma), descends and lands propulsively on the pad or the drone ship (legs if
+  it has them, otherwise a propulsive touchdown on the pad), labelled est. No "In orbit" end state with a
+  floating vehicle. Failures stay failures per round 19 (fall back / impact / transfer short).
+Owners: UI 2 flight.js (de-orbit + re-entry + landing segment for Earth missions, reusing the booster-descent
+maths for the whole remaining vehicle), UI 3 director.

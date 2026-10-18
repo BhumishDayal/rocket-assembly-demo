@@ -22,7 +22,9 @@
 //  (7)  createIgnitionFlash({ color })              TEA-TEB green flash (0.4 s) or MECO sparks (0.9 s);
 //         fire({ position, kind: "tea-teb" | "meco", scale_u }); update(dt)
 //  (8)  createPlasmaGlow({ radius_u, length_u })    re-entry glow around the booster base (origin = engine exit
-//         plane, shell up the side and a cap under the engines); update(dt, { intensity 0..1 }) — UI 2's heat proxy
+//         plane, shell up the side and a cap under the engines); update(dt, { intensity 0..1 }) — UI 2's heat proxy;
+//         setBreakup(0..1): glowing fragments and sparks peeling off and trailing behind (a stage falling back
+//         uncontrolled), a second draw shown only while the break-up is on
 //  (9)  createCloudLayer({ altitude_u, radius_u })  a thin layer of soft cloud billboards the camera passes
 //         through (fade near the camera); update(dt, { intensity = 1 })
 //  (10) createSea({ radius_u })                     dark sea disc + faint peach wave lines (fog on, 2 draws);
@@ -34,6 +36,10 @@
 //         band and a red fringe (2 draws, additive) with slow folds and drifting rays; lives in the FAR layer:
 //         world.attach("earth", aurora) (world.js) places it, turns it with the Earth and hides what is behind
 //         the planet; setIntensity(stormGlow 0..1), update(dt)
+//  (15) createImpact()                              a failed ascent hitting the sea or the ground (~2.5 s, 3
+//         draws): fire({ position, kind: "sea" | "ground", speed_ms, size_u }) — sea: a white water column,
+//         spray and a foam ring wave; ground: a flash and fireball, a smoke column, debris chunks, a dust shock
+//         ring; update(dt), active()
 //  (14) createLightning({ ground_u })               distant cloud-to-ground strike for scrubbed launches (near
 //         layer, site frame): a sky flash in the cloud base, a jagged bolt, a soft glow on the ground (3 draws);
 //         fire({ azimuth (compass degrees: 0 north, 90 east), distance_km }); update(dt); active()
@@ -615,13 +621,51 @@ export function createPlasmaGlow({ radius_u = 0.5, length_u = 3 } = {}) {
   });
   const mesh = noPick(new THREE.Mesh(new THREE.LatheGeometry(pts, 48), mat));
   mesh.name = "fx-plasma";
-  const object3d = group("fx-plasma", mesh);
+  // Break-up: fragments shed from the hot shell, streaming up past the falling stage (+y), cooling from white
+  // to deep orange; some tumble off sideways.
+  const shards = sprites({
+    count: 72,
+    seed: 67,
+    name: "fx-plasma-breakup",
+    uniforms: { uB: { value: 0 }, uLen: { value: length_u }, uR: { value: r } },
+    body: /* glsl */ `
+      uniform float uB, uLen, uR;
+      void particle(inout vec3 c, inout vec2 sz, inout float a, inout vec3 col, inout vec3 vel, inout float soft) {
+        if (aSeed.w > uB) return;                       // more of them as the break-up grows
+        float life = 0.6 + 0.8 * aSeed.y;
+        float k = mod(uTime + aSeed.x * life, life) / life;
+        float ang = aSeed.z * 6.2831853 + aSeed.x * 3.0;
+        vec3 o = vec3(cos(ang), 0.0, sin(ang));
+        float h0 = aSeed.y * uLen * 0.8;
+        float rise = uLen * (0.8 + 2.6 * aSeed.x) * k;   // swept up behind the stage
+        float out_ = uR * (1.1 + (0.5 + 4.0 * aSeed.w) * k);
+        c = o * out_ + vec3(0.0, h0 + rise, 0.0);
+        vel = vec3(o.x * 0.25, 1.0, o.z * 0.25);
+        float big = step(0.78, aSeed.z);                // a few larger burning pieces
+        float s = uR * (0.1 + 0.32 * big) * (1.0 - 0.4 * k);
+        sz = vec2(s, s * (1.5 + 9.0 * (1.0 - big) * (1.0 - k)));   // sparks streak, pieces stay compact
+        a = uI * (1.0 - k) * (0.8 + 0.6 * aSeed.y);
+        col = mix(vec3(1.0, 0.9, 0.7), vec3(1.0, 0.35, 0.1), k) * 3.0;
+        soft = 0.8;
+      }
+    `,
+  });
+  shards.visible = false;
+  const object3d = group("fx-plasma", mesh, shards);
   object3d.visible = false;
+  let breakup = 0;
   return {
     object3d,
+    setBreakup(k = 0) {
+      breakup = clamp01(k);
+      shards.material.uniforms.uB.value = breakup;
+    },
     update(dt, { intensity = 0 } = {}) {
       mat.uniforms.uTime.value += dt;
       mat.uniforms.uI.value = clamp01(intensity);
+      shards.material.uniforms.uTime.value += dt;
+      shards.material.uniforms.uI.value = clamp01(intensity);
+      shards.visible = breakup > 0.002;
       object3d.visible = intensity > 0.002;
     },
     dispose: disposeAll(object3d),
@@ -1053,4 +1097,164 @@ function glowTexture() {
   glowTex.magFilter = glowTex.minFilter = THREE.LinearFilter;
   glowTex.needsUpdate = true;
   return glowTex;
+}
+
+// (15) Impact: a failed ascent hitting the sea or the ground. One additive burst (flash, fireball, glowing
+// debris / spray glints), one normal-blend column (smoke and dark chunks / the white water column and spray)
+// and an expanding ring (dust shock / foam ring wave). Sizes scale with speed_ms; ~2.5 s. Visual model.
+export function createImpact() {
+  const DUR = 2.5;
+  const shared = { uStart: { value: -100 }, uOrigin: { value: new THREE.Vector3() }, uSea: { value: 0 }, uSize: { value: 8 } };
+  const burst = sprites({
+    count: 48,
+    seed: 71,
+    name: "fx-impact-burst",
+    uniforms: shared,
+    body: /* glsl */ `
+      uniform float uStart, uSea, uSize;
+      uniform vec3 uOrigin;
+      void particle(inout vec3 c, inout vec2 sz, inout float a, inout vec3 col, inout vec3 vel, inout float soft) {
+        float t = uTime - uStart;
+        if (t < 0.0 || t > 2.5) return;
+        bool sea = uSea > 0.5;
+        if (gl_InstanceID == 0) {                       // the flash
+          float k = t / (sea ? 0.25 : 0.45);
+          if (k > 1.0) return;
+          c = uOrigin + vec3(0.0, uSize * 0.3, 0.0);
+          sz = vec2(uSize * (sea ? 2.0 : 4.0) * (0.5 + k));
+          a = (sea ? 0.8 : 2.0) * (1.0 - k) * (1.0 - k);
+          col = sea ? vec3(0.9, 0.95, 1.0) : vec3(1.0, 0.75, 0.4);
+          soft = 1.0;
+          return;
+        }
+        if (!sea && gl_InstanceID < 14) {               // fireball billows: rise, swell, darken
+          float k = t / 1.4;
+          if (k > 1.0) return;
+          vec3 d = normalize(aSeed.xyz - 0.5 + vec3(0.0, 0.6, 0.0));
+          c = uOrigin + d * uSize * 1.4 * sqrt(k) + vec3(0.0, uSize * 1.2 * k, 0.0);
+          sz = vec2(uSize * (0.6 + 1.2 * k) * (0.7 + 0.6 * aSeed.w));
+          a = 1.3 * (1.0 - k) * (1.0 - k);
+          col = mix(vec3(1.0, 0.8, 0.45), vec3(0.9, 0.25, 0.05), k) * 1.8;
+          soft = 1.6;
+          return;
+        }
+        // glowing debris (ground) or spray glints (sea): ballistic, outward and up
+        float k = t / 1.8;
+        if (k > 1.0) return;
+        vec3 d = normalize(vec3(aSeed.x - 0.5, sea ? 0.9 + aSeed.y : 0.3 + aSeed.y * 0.8, aSeed.z - 0.5));
+        float sp = uSize * (sea ? 3.0 : 4.5) * (0.4 + aSeed.w);
+        c = uOrigin + d * sp * t + vec3(0.0, -uSize * 1.6 * t * t, 0.0);
+        vel = d * sp + vec3(0.0, -uSize * 3.2 * t, 0.0);
+        sz = vec2(uSize * 0.05, uSize * (0.05 + 0.25 * (1.0 - k)));
+        a = (sea ? 0.5 : 1.0) * (1.0 - k);
+        col = sea ? vec3(0.85, 0.9, 1.0) : vec3(1.0, 0.55, 0.2) * 2.0;
+        soft = 0.6;
+      }
+    `,
+  });
+  const column = sprites({
+    count: 54,
+    additive: false,
+    seed: 73,
+    name: "fx-impact-column",
+    uniforms: shared,
+    body: /* glsl */ `
+      uniform float uStart, uSea, uSize;
+      uniform vec3 uOrigin;
+      void particle(inout vec3 c, inout vec2 sz, inout float a, inout vec3 col, inout vec3 vel, inout float soft) {
+        float t = uTime - uStart;
+        if (t < 0.0 || t > 2.5) return;
+        bool sea = uSea > 0.5;
+        float k = t / 2.5;
+        if (gl_InstanceID < 40) {
+          float delay = aSeed.x * (sea ? 0.25 : 0.6);
+          float tt = max(t - delay, 0.0);
+          if (sea) {                                    // the water column: thrown up, spreading, falling back
+            float v0 = uSize * (4.0 + 3.0 * aSeed.y);
+            float y = max(v0 * tt - uSize * 1.6 * tt * tt, 0.0);
+            vec2 sp = (aSeed.zw - 0.5) * uSize * (0.25 + 0.9 * tt);   // a narrow column that spreads as it tops out
+            c = uOrigin + vec3(sp.x, y * 0.85, sp.y);
+            float w = uSize * (0.25 + 0.45 * tt) * (0.7 + 0.6 * aSeed.w);
+            sz = vec2(w, w * (2.6 - 1.4 * k));               // tall streaks while rising
+            vel = vec3(0.0, 1.0, 0.0);
+            a = 0.5 * smoothstep(0.0, 0.1, tt) * (1.0 - smoothstep(0.6, 1.0, k)) * step(0.0, y + 0.001);
+            col = vec3(0.92, 0.95, 0.98);
+          } else {                                      // the smoke column: rising, swelling, drifting
+            float y = uSize * (0.3 + 4.0 * (1.0 - exp(-tt / 1.2))) * (0.6 + 0.5 * aSeed.y);
+            vec2 sp = (aSeed.zw - 0.5) * uSize * (0.6 + 1.0 * tt);
+            c = uOrigin + vec3(sp.x + uSize * 0.3 * tt, y, sp.y);
+            sz = vec2(uSize * (0.6 + 0.9 * tt) * (0.7 + 0.6 * aSeed.w));
+            a = 0.5 * smoothstep(0.0, 0.3, tt) * (1.0 - smoothstep(0.75, 1.0, k));
+            col = mix(vec3(0.14, 0.13, 0.12), vec3(0.3, 0.29, 0.28), aSeed.y);
+          }
+          soft = 2.4;
+          return;
+        }
+        // dark debris chunks (ground) / a low spray sheet (sea)
+        vec3 d = normalize(vec3(aSeed.x - 0.5, sea ? 0.15 : 0.5 + aSeed.y, aSeed.z - 0.5));
+        float sp = uSize * (sea ? 2.5 : 3.5) * (0.5 + aSeed.w);
+        c = uOrigin + d * sp * t + vec3(0.0, -uSize * 1.6 * t * t, 0.0);
+        if (c.y < uOrigin.y) return;
+        vel = d;
+        float s = uSize * (sea ? 0.35 : 0.12) * (0.6 + 0.8 * aSeed.y);
+        sz = vec2(s);
+        a = (sea ? 0.35 : 0.9) * (1.0 - k);
+        col = sea ? vec3(0.9, 0.94, 0.97) : vec3(0.08, 0.07, 0.07);
+        soft = sea ? 2.0 : 0.3;
+      }
+    `,
+  });
+  const ringMat = new THREE.ShaderMaterial({
+    uniforms: { ...shared, uTime: { value: 0 } },
+    vertexShader: /* glsl */ `varying vec2 vP; void main() { vP = position.xz; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: /* glsl */ `
+      uniform float uTime, uStart, uSea, uSize;
+      varying vec2 vP;
+      ${NOISE}
+      void main() {
+        float t = uTime - uStart;
+        float k = clamp(t / 2.5, 0.0, 1.0);
+        float R = uSize * (0.6 + (uSea > 0.5 ? 5.0 : 6.5) * pow(k, 0.6));
+        float r = length(vP);
+        float w = uSize * (0.25 + 0.5 * k);
+        float band = exp(-pow((r - R) / w, 2.0)) * (0.7 + 0.3 * n2(normalize(vP + 1e-4) * 9.0 + k * 2.0));
+        float a = band * (1.0 - k) * step(0.0, t) * step(t, 2.5);
+        vec3 col = uSea > 0.5 ? vec3(0.9, 0.94, 0.97) : vec3(0.45, 0.38, 0.3);
+        gl_FragColor = vec4(col, a * (uSea > 0.5 ? 0.7 : 0.6));
+        ${TONE}
+      }`,
+    transparent: true,
+    depthWrite: false,
+    fog: false,
+  });
+  const ring = noPick(new THREE.Mesh(new THREE.CircleGeometry(1, 64).rotateX(-Math.PI / 2), ringMat));
+  ring.name = "fx-impact-ring";
+  const object3d = group("fx-impact", burst, column, ring);
+  object3d.visible = false;
+  let time = 0;
+  let until = -1;
+  return {
+    object3d,
+    // position in the object3d's frame (on the surface); speed_ms scales the event; size_u overrides it
+    fire({ position, kind = "ground", speed_ms = 300, size_u } = {}) {
+      const size = size_u ?? 8 * Math.min(2, Math.max(0.4, speed_ms / 300));
+      shared.uOrigin.value.copy(position ?? new THREE.Vector3());
+      shared.uSea.value = kind === "sea" ? 1 : 0;
+      shared.uSize.value = size;
+      shared.uStart.value = time;
+      ring.position.copy(shared.uOrigin.value).add(new THREE.Vector3(0, 0.02, 0));
+      ring.scale.setScalar(size * 9);
+      until = time + DUR;
+      object3d.visible = true;
+    },
+    update(dt) {
+      time += dt;
+      burst.material.uniforms.uTime.value = time;
+      column.material.uniforms.uTime.value = time;
+      ringMat.uniforms.uTime.value = time;
+      object3d.visible = time < until;
+    },
+    active: () => time < until,
+    dispose: disposeAll(object3d),
+  };
 }

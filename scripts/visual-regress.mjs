@@ -156,7 +156,7 @@ async function capture(id) {
     for (let pass = 0; pass < 6; pass++) {
       let touched = 0;
       for (const a of document.getAnimations()) {
-        if (a.playState !== "running" && a.playState !== "pending") continue;
+        if (a.playState !== "running" && !a.pending) continue;
         touched++;
         const end = a.effect?.getComputedTiming?.().endTime;
         if (end === Infinity) { a.pause(); a.currentTime = 0; a.__vrPaused = true; }
@@ -170,7 +170,6 @@ async function capture(id) {
   let png = await page.shot();
   let tries = 0;
   for (; !png.equals(prev) && tries < 4; tries++) {
-    if (!tries) writeFileSync(join(outDir, `${id}-unsettled-1.png`), prev);
     await sleep(250);
     prev = png;
     png = await page.shot();
@@ -372,7 +371,7 @@ for (const id of frames) {
   }
   const r = await page.js(`window.__diff(${JSON.stringify(readFileSync(ref).toString("base64"))}, ${JSON.stringify(shot.png.toString("base64"))}, ${THRESHOLD})`, 120000);
   if (r.sizeMismatch) {
-    rows.push({ id, status: "FAIL", score: 100, detail: `size ${r.b.join("x")} vs baseline ${r.a.join("x")}` });
+    rows.push({ id, status: "FAIL", score: 100, changed: 100, box: null, notes: [`size ${r.b.join("x")} vs baseline ${r.a.join("x")}`] });
     continue;
   }
   const over = r.score > THRESHOLD;
@@ -402,13 +401,13 @@ for (const r of rows) {
   for (const n of r.notes) console.log(`        ${n}`);
 }
 const bad = rows.filter((r) => r.status !== "PASS");
-const was = manifest.files ?? {};
-const changedFiles = {
-  changed: Object.keys(files).filter((f) => f in was && was[f] !== files[f]),
-  added: Object.keys(files).filter((f) => !(f in was)),
-  removed: Object.keys(was).filter((f) => !(f in files)),
+const refFiles = manifest.files;
+const changedFiles = refFiles && {
+  changed: Object.keys(files).filter((f) => f in refFiles && refFiles[f] !== files[f]),
+  added: Object.keys(files).filter((f) => !(f in refFiles)),
+  removed: Object.keys(refFiles).filter((f) => !(f in files)),
 };
-if (manifest.files) {
+if (changedFiles) {
   const n = changedFiles.changed.length + changedFiles.added.length + changedFiles.removed.length;
   console.log(`\nfiles since the baseline (${manifest.created.slice(0, 16).replace("T", " ")} UTC): ${n ? "" : "none changed"}`);
   for (const [k, list] of Object.entries(changedFiles)) if (list.length) console.log(`  ${k.padEnd(8)} ${list.join(", ")}`);

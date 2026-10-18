@@ -7,6 +7,9 @@
     /scripts/fx-harness.html?scene=entry&k=1        the booster falling engines-first: plasma glow, grid fins
                                                    out, legs stowed, cloud layer below, sea far below
     /scripts/fx-harness.html?scene=gallery&k=0.5    every effect side by side at intensity k
+    /scripts/fx-harness.html?scene=entry&breakup=1  the booster falling back uncontrolled: plasma + break-up
+    /scripts/fx-harness.html?scene=impact&kind=sea|ground&at=0.8   a failed ascent's impact at night, frozen
+                                                   `at` seconds after it hits
   Params: k (intensity 0..1, default 1), t (seconds since ignition for the steam, default 4).
   window.__ready is set after ~45 frames.
 -->
@@ -32,7 +35,7 @@
       import { createMaterials, createPart, createPad, createStars, deployables } from "../src/parts.js";
       import { createAnchors, createDroneShip } from "../src/anchors.js";
       import { attachPlumes, createPadLight } from "../src/plume.js";
-      import { createShadowDecal } from "../src/planet.js";
+      import { createShadowDecal, createOcean } from "../src/planet.js";
       import * as FX from "../src/fx/launchfx.js";
       import { catalog, getPreset, presetToBuild } from "../src/data/catalog.js";
 
@@ -110,6 +113,7 @@
           booster.add(part.group);
         }
         const plasma = FX.createPlasmaGlow({ radius_u: bounds.baseRadius_u, length_u: 3.2 });
+        plasma.setBreakup(+(q.get("breakup") ?? 0));
         booster.add(plasma.object3d);
         booster.position.y = 60;
         scene.add(booster);
@@ -129,6 +133,33 @@
         });
         camera.position.set(7, 56, 9);
         camera.lookAt(0, 61.5, 0);
+      } else if (scene_ === "impact") {
+        // Night: a dark sea or ground, the impact frozen `at` seconds in.
+        const sea = q.get("kind") !== "ground";
+        scene.background = new THREE.Color(0x020308);
+        scene.fog = new THREE.Fog(0x03050c, 200, 1600);
+        if (sea) {
+          const ocean = createOcean({ size_u: 4000, sunDir: new THREE.Vector3(0.3, 0.6, -0.7) });
+          ocean.setSky({ zenith: new THREE.Color(0.002, 0.003, 0.008), horizon: new THREE.Color(0.01, 0.02, 0.06) });
+          scene.add(ocean.object3d);
+          updates.push((t, dt) => ocean.update(dt));
+        } else {
+          const g = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000).rotateX(-Math.PI / 2), new THREE.MeshStandardMaterial({ color: 0x1a1814, roughness: 1 }));
+          scene.add(g);
+        }
+        const impact = FX.createImpact();
+        scene.add(impact.object3d);
+        const at = +(q.get("at") ?? 0.8);
+        let fired = false;
+        let tt = 0;
+        updates.push((t, dt) => {
+          if (!fired) impact.fire({ position: new THREE.Vector3(0, 0, 0), kind: sea ? "sea" : "ground", speed_ms: 400 }), (fired = true);
+          const step = Math.min(dt, Math.max(0, at - tt));
+          tt += step;
+          impact.update(step);
+        });
+        camera.position.set(70, 22, 110);
+        camera.lookAt(0, 18, 0);
       } else {
         // Gallery: every effect at intensity k, side by side.
         const pad = createPad({ baseRadius_u: 0.46 });

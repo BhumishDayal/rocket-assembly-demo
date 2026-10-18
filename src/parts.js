@@ -1,8 +1,13 @@
 // Procedural rocket parts, generated from the layout manifest (src/layout.js) at true scale.
 // A part is a group at spec.slotY whose local y = 0 is the part's bottom. A part is a mechanical assembly of
-// separate pieces (docs/v2-design.md round 8): an engine = nozzle extension, regen bell, chamber, injector,
-// valve block, turbopump, gas generator, LOX + fuel pipes, actuator pair, gimbal; a tank = shell quarters,
-// stringers, three domes, slosh baffles, downcomer, pressurant bottles, skirt and forward rings, ...
+// separate pieces (docs/v2-design.md round 8, then the density pass at ~3× the pieces): a sea-level engine =
+// 28 (nozzle extension and regen bell with their stiffening rings, exhaust duct, throat, chamber and four
+// brackets, gas generator, manifold ring, injector, two main valves, turbopump, pump inlet, feed, high-pressure
+// and ignition lines, instrumentation box, two actuators, gimbal block, heat-shield boot; see engineKit), a
+// vacuum engine 20; a tank ≈ 56 (skin quarters, stringer sets, three domes, baffles, ring frames, feed and
+// pressurisation lines, bottles on brackets, vents, raceway segments, umbilicals, skirt and forward rings, see
+// buildTank); an interstage 24, a fairing 16, payloads by archetype (≈ 15–35). Rivet rows, bolt circles, pipe
+// clamps and raceway straps are static instanced detail on the pieces (see "instanced fine detail").
 // Piece rules: translation-only children (rotation about Y allowed, X/Z rotations baked into the geometry);
 // every mesh has its own material clone, mesh.userData.partId = spec.id and mesh.userData.kind
 // ("shell" | "interior" | "detail"). Each piece carries (round 7):
@@ -899,6 +904,123 @@ function piece(geo, material, { x = 0, y = 0, z = 0, ry = 0, order = 0, dir = UP
   return { mesh, order, explode: { dir: dir.clone().normalize(), dist }, ax, sym, kind, engine, deploy: dep, follow: fol, landerLeg: hingeOf(landerLeg) };
 }
 
+// ---------- instanced fine detail ----------
+
+// Static fine detail at no animation cost (density pass): rivet rows along seams, bolt circles on flanges,
+// pipe clamps and raceway straps. One InstancedMesh per detail type per piece, a child of the piece's mesh, so
+// it moves with the piece. Transforms are authored in metres in the piece geometry's own frame and stored in
+// scene units (shared by every piece of the same shape, e.g. the engines of a cluster). The unit geometries
+// are shared module-wide; a part's detail meshes share one painted and one x-ray material per detail type and
+// colour (userData.looks, switched by setShellOpacity like the pieces; both MeshStandardMaterial with the same
+// features, so the switch compiles nothing), so they draw back to back without material changes (nothing
+// animates detail materials; pieces keep their own clones). On a shell piece the detail shows in the painted look only (userData.lookOnly "painted"): an
+// x-ray shell is see-through and would leave it floating. No shadows, no edge lines, never picked
+// (userData.nonPickable, raycast no-op); it is not a piece, so deploys, explode layouts and the line budget
+// ignore it (check-budget counts each InstancedMesh as one mesh). mesh.userData.details lists them.
+const DETAIL = {
+  bolt: { painted: { color: 0x8c9199, metalness: 0.9, roughness: 0.32 }, xray: { color: 0xa3a9b2, metalness: 0.85, roughness: 0.3 } },
+  rivet: { painted: { color: 0xb6b8b4, metalness: 0.45, roughness: 0.42 }, xray: { color: 0x5a5f68, metalness: 0.8, roughness: 0.4 } },
+  clamp: { painted: { color: 0x767b83, metalness: 0.85, roughness: 0.4 }, xray: { color: 0xb4bac3, metalness: 0.7, roughness: 0.35 } },
+  strap: { painted: { color: 0xa3a5a1, metalness: 0.5, roughness: 0.48 }, xray: { color: 0x5a5f68, metalness: 0.8, roughness: 0.4 } },
+};
+let detailGeos = null;
+const detailGeo = (type) =>
+  (detailGeos ??= {
+    bolt: new THREE.CylinderGeometry(0.5, 0.5, 1, 6).translate(0, 0.5, 0), // hex head, unit across, base on y = 0, axis +Y
+    rivet: lathe([[0.5, 0], [0.42, 0.16], [0.26, 0.28], [0, 0.32]], 6), // domed head, unit across
+    clamp: new THREE.TorusGeometry(1, 0.22, 4, 10).rotateX(Math.PI / 2), // band round +Y, unit radius
+    strap: new THREE.BoxGeometry(1, 1, 1), // centred unit box
+  })[type];
+
+// One instance (metres in, scene units out): the unit detail at p with its +Y turned onto n, scaled along its
+// own axes, turned by `twist` about n.
+const xfQ = new THREE.Quaternion();
+const xfT = new THREE.Quaternion();
+const xfN = new THREE.Vector3();
+function xf(p, n, sx, sy = sx, sz = sx, twist = 0) {
+  xfQ.setFromUnitVectors(UP, xfN.copy(n).normalize());
+  if (twist) xfQ.multiply(xfT.setFromAxisAngle(UP, twist));
+  return new THREE.Matrix4().compose(p.clone().multiplyScalar(S), xfQ, new THREE.Vector3(sx * S, sy * S, sz * S));
+}
+function instAttr(list) {
+  const a = new Float32Array(list.length * 16);
+  list.forEach((m, i) => m.toArray(a, i * 16));
+  return new THREE.InstancedBufferAttribute(a, 16);
+}
+// Bolt heads on a circle of radius r at height y round (cx, cz): on a flange face (face "up" / "down") or
+// standing out of a band (face "out"). size: across flats; h: head height.
+function boltCircle(r, y, n, size, { face = "up", h = 0.6 * size, phase = 0, cx = 0, cz = 0 } = {}) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const phi = phase + ((i + 0.5) / n) * TAU;
+    const o = radialPhi(phi);
+    out.push(xf(v3(cx + o.x * r, y, cz + o.z * r), face === "up" ? UP : face === "down" ? DOWN : o, size, h, size, phi));
+  }
+  return out;
+}
+// Rivet heads from a to b at about `pitch` apart, on a surface facing radially out from the Y axis.
+function rivetRow(a, b, pitch, size) {
+  const n = Math.max(2, Math.round(a.distanceTo(b) / pitch) + 1);
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const p = a.clone().lerp(b, i / (n - 1));
+    out.push(xf(p, v3(p.x, 0, p.z), size));
+  }
+  return out;
+}
+// Rivet heads round an arc of radius r at height y, lathe azimuth phi0 → phi1.
+function rivetArc(r, y, phi0, phi1, pitch, size) {
+  const n = Math.max(2, Math.round((r * Math.abs(phi1 - phi0)) / pitch) + 1);
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const o = radialPhi(lerp(phi0, phi1, i / (n - 1)));
+    out.push(xf(o.clone().multiplyScalar(r).setY(y), o, size));
+  }
+  return out;
+}
+// Pipe clamps: a band round a pipe of radius r at n points of a curve, between t0 and t1.
+function clampsAlong(curve, r, n, t0 = 0.18, t1 = 0.82) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const t = n === 1 ? (t0 + t1) / 2 : lerp(t0, t1, i / (n - 1));
+    out.push(xf(curve.getPoint(t), curve.getTangent(t), 1.25 * r, 0.9 * r, 1.25 * r));
+  }
+  return out;
+}
+// Adds one InstancedMesh of `type` to a piece; list = Matrix4[] (from the helpers above) or a shared
+// InstancedBufferAttribute. color overrides the painted colour (rivets take their host's paint).
+let detailMats = null; // while createPart builds a part: `${type}|${color}` → { painted, xray }
+function addDetail(pc, type, list, { lookOnly = null, color = null } = {}) {
+  const attr = list?.isInstancedBufferAttribute ? list : instAttr(list ?? []);
+  if (!attr.count) return null;
+  const spec = DETAIL[type];
+  const mk = (o) => new THREE.MeshStandardMaterial({ fog: true, ...o });
+  const key = `${type}|${color}`;
+  let pair = detailMats?.get(key);
+  if (!pair) {
+    pair = { painted: mk(color === null ? spec.painted : { ...spec.painted, color }), xray: XRAY ? mk(spec.xray) : null };
+    detailMats?.set(key, pair);
+  }
+  const { painted, xray } = pair;
+  const inst = new THREE.InstancedMesh(detailGeo(type), painted, attr.count);
+  inst.instanceMatrix = attr;
+  inst.castShadow = inst.receiveShadow = false;
+  inst.raycast = () => {};
+  Object.assign(inst.userData, { kind: "detail", detail: type, nonPickable: true });
+  if (xray) inst.userData.looks = { painted, xray };
+  if (lookOnly) inst.userData.lookOnly = lookOnly;
+  pc.mesh.add(inst);
+  (pc.mesh.userData.details ??= []).push(inst);
+  return inst;
+}
+// Rivets take their host's paint, a shade darker on light finishes and lighter on dark ones, so they read as
+// texture up close and vanish at a distance.
+function rivetTint(mesh) {
+  const c = (mesh.userData.looks?.painted ?? mesh.material).color?.clone() ?? new THREE.Color(0xd0d0d0);
+  return (c.getHSL({}).l > 0.35 ? c.multiplyScalar(0.8) : c.multiplyScalar(1.7).addScalar(0.04)).getHex();
+}
+const rivetsOn = (finish) => finish !== "orange-foam"; // sprayed foam shows no rivets
+
 // ---------- engines ----------
 
 // Nozzle + chamber + injector profiles, exit at y=0. Rao-style parabolic bell: a quadratic Bezier from the
@@ -960,13 +1082,26 @@ export function bellExits(spec) {
 }
 
 // One engine's sub-assemblies, each its own geometry in engine-local metres (exit plane y=0, gimbal top y=L,
-// turbopump on local +X, gas generator on −X, valve block on −Z). Shared by every engine of the same shape.
-//   sea-level: nozzle extension, regen bell, chamber, injector, valve block, turbopump, gas generator (+ turbine
-//              exhaust duct), LOX pipe, fuel pipe, actuator pair, gimbal                         = 11 pieces
-//   vacuum:    long nozzle extension, regen bell, chamber, injector, turbopump, 2 pipes, gimbal  = 8 pieces
-//   twin (chambers = 2, RD-180 style): two bell/chamber/injector stacks inside the record's envelope around
-//              one turbopump                                                                     = 15 pieces
-// Entry: { geo, mat, ax: [side, rank] around the chamber core, sym, ds (double-sided) }.
+// turbopump on local +X, gas generator on −X, valves on −Z). Shared by every engine of the same shape.
+//   sea-level (27 here + the heat-shield boot buildEngines adds per engine = 28): nozzle extension and its
+//     stiffening ring, regen bell and its stiffening ring, turbine exhaust duct, throat, chamber, 4 chamber
+//     brackets, gas generator, injector manifold ring, injector dome, main fuel and main LOX valves, turbopump
+//     housing, pump inlet, 2 feed lines, 2 high-pressure lines, ignition line, instrumentation box, 2 gimbal
+//     actuators, gimbal block
+//   vacuum (20): long nozzle extension with 2 stiffening rings, regen bell, exhaust duct, throat, chamber,
+//     2 brackets, manifold ring, injector dome, main valve, turbopump, pump inlet, 2 feed lines, 1 high-pressure
+//     line, 2 actuators, gimbal block
+//   twin (chambers = 2, RD-180 style): the chamber stack (extension, 2 rings, regen bell, throat, chamber,
+//     manifold ring, injector) twice inside the record's envelope around one set of shared turbomachinery and
+//     plumbing, without brackets, ignition line or instrumentation box (29 + boot, so even nine stay under
+//     300 pieces a cluster)
+// Lens view (ax = [side, rank] round the chamber core): below it the throat, the regen bell with the exhaust
+// duct, the upper ring, the extension, the lower ring; above it the manifold ring, the injector dome, the
+// valves, the turbopump, the plumbing (inlet, feed, high-pressure and ignition lines), the actuators with the
+// instrumentation box, the gimbal block; brackets and gas generator stay with the chamber.
+// Instanced detail (shared transforms): bolt circles on the manifold ring, pump and inlet flanges, clamps on
+// the feed lines.
+// Entry: { geo, mat, ax, sym, ds (double-sided), kind, edges, details: [{ type, attr }] }.
 const kitCache = new Map();
 // extFrac: a sourced nozzle extension (visuals.engines[id].extension.startRadiusFraction): the bell splits
 // where its radius reaches extFrac × the exit radius, and the extension below is a smooth film-cooled shell
@@ -985,9 +1120,12 @@ function engineKit({ exitD_m, L, vacuum, chambers = 1, overall = false, extFrac 
   const prof = nozzleProfile({ L, Re, rt, rc, bellL, convL, chamberL, domeL, vacuum });
   const { yTop, y1, rAtBell } = prof;
   const radiusAt = (y) => (y <= bellL ? rAtBell(y) : rc);
-
-  const kit = [];
+  const yJ = bellL + convL; // throat section → chamber joint
   const zs = twin ? [-off, off] : [0];
+  const kit = [];
+  const add = (geo, mat, ax, o = {}) => kit.push({ geo, mat, ax, ...o });
+  const det = (type, list) => ({ type, attr: instAttr(list) });
+
   // Bell split into the nozzle extension (lower) and the regeneratively cooled bell (upper), joined by a
   // bolted flange; a stiffener lip at the exit. Dark steel (darker niobium-like extension on vacuum engines),
   // faint warm tint toward the throat, lighter machined flanges. uv.x repeats the one-ridge texture.
@@ -1018,11 +1156,29 @@ function engineKit({ exitD_m, L, vacuum, chambers = 1, overall = false, extFrac 
     for (let i = 0; i < uv.count; i++) uv.setX(i, uv.getX(i) * RIDGES);
     return g;
   };
+  // Stiffening "hat band" hugging the bell at height yc: a closed, chamfered lathe ring with a centre bead.
+  const hatH = 0.024 * L;
+  const hat = (yc, z) => {
+    const t = 0.022 * Re;
+    const e = 0.004 * Re;
+    const yb = yc - hatH / 2;
+    const yt = yc + hatH / 2;
+    const [rb, rm, rT] = [rAtBell(yb), rAtBell(yc), rAtBell(yt)];
+    const pts = [[rT + e, yt], [rb + e, yb], [rb + t, yb], [rm + 1.35 * t, yc - 0.15 * hatH], [rm + 1.35 * t, yc + 0.15 * hatH], [rT + t, yt], [rT + e, yt]];
+    return latheUV(lathe(pts, 48), { H: hatH, R: rm, y0: yb }).translate(0, 0, z);
+  };
+  // the lower ring on the extension (clear of the exit lip and the flange), the upper one on the regen bell
+  // (sea level) or higher on the long vacuum extension
+  const yLo = clamp((vacuum ? 0.3 : 0.45) * ySplit, 0.03 * L + hatH, ySplit - fl - hatH);
+  const yHi = vacuum ? clamp(0.68 * ySplit, yLo + 2 * hatH, ySplit - fl - hatH) : ySplit + fl + 0.42 * (bellL - ySplit - fl);
   for (const z of zs) {
     const ge = colorLathe(lathe(ext, 48), ext.length, (j) => (j < 2 || j >= ext.length - 2 ? flange : steel));
     // a radiatively cooled vacuum extension or a film-cooled one has no cooling tubes: flat uv.x, so no ridges
     const extUV = vacuum || filmCooled ? (g) => (g.attributes.uv.array.forEach((_, i, a) => i % 2 === 0 && (a[i] = 0.5)), g) : ridgeUV;
-    kit.push({ geo: extUV(ge).translate(0, 0, z), mat: "engine", ax: [-1, 1], sym: !twin, ds: true, kind: "shell" });
+    add(extUV(ge).translate(0, 0, z), "engine", [-1, 3], { sym: !twin, ds: true, kind: "shell" });
+  }
+  for (const z of zs) add(hat(yLo, z), "machined", [-1, 4], { sym: !twin, edges: true });
+  for (const z of zs) {
     const gr = colorLathe(lathe(regen, 48), regen.length, (j, y) => {
       if (j < 2) return flange;
       const k = Math.pow(clamp(y / bellL, 0, 1), 3) * 0.55;
@@ -1031,84 +1187,162 @@ function engineKit({ exitD_m, L, vacuum, chambers = 1, overall = false, extFrac 
     // Bolt circle on the extension flange (nuts on the regen side).
     const b = Math.min(0.012 * L, 0.05 * rs);
     const bolts = paint(boltRing(rs * 1.035, ySplit + fl + b / 2, 16, b), flange);
-    kit.push({ geo: merge([ridgeUV(gr), bolts]).translate(0, 0, z), mat: "engine", ax: [-1, 0], sym: !twin, ds: true });
+    add(merge([ridgeUV(gr), bolts]).translate(0, 0, z), "engine", [-1, 1], { sym: !twin, ds: true });
   }
-  // Chamber with a knurled ring at the throat; injector dome with a bolt circle on its flange.
-  const knurl = boltRing(rt * 1.16, bellL + 0.012 * L, 24, (TAU * rt * 1.16) / 48, 0.03 * L, 0.08 * rt);
-  for (const z of zs) kit.push({ geo: merge([lathe(prof.chamber, 20), knurl.clone()]).translate(0, 0, z), mat: "chamber", ax: [0, 0], sym: !twin, ds: true });
-  const bd = Math.min(0.01 * L, 0.06 * rc);
-  for (const z of zs) kit.push({ geo: merge([lathe(prof.dome, 20), boltRing(rc * 1.09, y1 + 0.015 * L + bd / 2, 16, bd)]).translate(0, 0, z), mat: "powerhead", ax: [1, 0], sym: !twin });
+  for (const z of zs) add(hat(yHi, z), "machined", [-1, 2], { sym: !twin, edges: true });
 
-  // Turbopump: a vertical cylinder beside the chamber (between the chambers on a twin) with turbine cap and
-  // pump volute ring.
+  // Turbopump layout (shared by the pieces below): a vertical cylinder beside the chamber (between the
+  // chambers on a twin).
   const rp = rc * (twin ? 0.7 : vacuum ? 0.5 : 0.6);
   const hp = L * (vacuum ? 0.16 : 0.24);
   const py0 = bellL + convL * 0.5;
   const px = twin ? 0 : rc + rp + 0.03 * L;
-  const pz = twin ? 0 : 0;
-  if (!vacuum) {
-    // Main valve block on the injector (−Z side) with its actuator can.
-    const vz = twin ? -(rp + 0.3 * rc) : -rc * 1.15;
-    kit.push({ geo: merge([box(0.55 * rc, 0.07 * L, 0.5 * rc, 0, yTop - 0.03 * L, vz), cyl(0.14 * rc, 0.14 * rc, 0.05 * L, 8, 0, yTop + 0.005 * L, vz)]), mat: "valve", ax: [1, 1] });
-  }
-  kit.push({
-    geo: merge([
-      cyl(rp, rp, hp, 12, px, py0, pz),
-      cyl(rp * 0.72, rp * 0.72, hp * 0.14, 10, px, py0 + hp, pz),
-      new THREE.TorusGeometry(rp * 1.02, rp * 0.22, 6, 16).rotateX(Math.PI / 2).translate(px, py0 + hp * 0.3, pz),
-    ]),
-    mat: "pump",
-    ax: [1, 2],
-  });
-  if (!vacuum) {
-    // Gas generator (small can with a domed top, opposite the pump) and its turbine exhaust duct down the bell.
-    const rg = rc * (twin ? 0.36 : 0.3);
-    const hg = L * 0.1;
-    const gx = twin ? -(rp + rg + 0.03 * L) : -(rc + rg + 0.02 * L);
-    const gy = bellL + convL;
-    const yEnd = bellL * 0.42;
+  // Turbine exhaust duct: from the turbine end of the pump down along the bell, a flared exit at its end
+  // (moves with the regen bell in the lens view).
+  {
     const rD = rp * 0.42;
-    const xEnd = -(radiusAt(yEnd) + (twin ? off : 0) * 0 + rD * 1.3);
-    const parts = [cyl(rg, rg * 0.8, hg, 10, gx, gy), lathe(domePoints(rg, rg * 0.7, true, 4), 10).translate(gx, gy + hg, 0)];
-    if (!twin) parts.push(tube(v3(gx, gy, 0), v3(Math.min(gx, xEnd) - rD, gy - (gy - yEnd) * 0.35, 0), v3(xEnd, yEnd, 0), rD, 10));
-    kit.push({ geo: merge(parts), mat: "powerhead", ax: [0, 0] });
+    let curve;
+    if (twin) {
+      const x0 = px + rp * 0.75;
+      curve = new THREE.QuadraticBezierCurve3(v3(x0, py0 + 0.1 * hp, 0), v3(x0 + 0.6 * rp, py0 - 0.05 * L, 0), v3(x0 + 0.6 * rp, 0.55 * bellL, 0));
+    } else {
+      const yEnd = vacuum ? ySplit + 0.3 * (bellL - ySplit) : 0.42 * bellL;
+      const xEnd = radiusAt(yEnd) + rD * 1.3;
+      curve = new THREE.QuadraticBezierCurve3(v3(px + 0.3 * rp, py0, 0), v3(Math.max(px, xEnd) + rD, py0 - 0.35 * (py0 - yEnd), 0), v3(xEnd, yEnd, 0));
+    }
+    const e = curve.getPoint(1);
+    const s0 = curve.getPoint(0);
+    add(merge([new THREE.TubeGeometry(curve, 12, rD, 8, false), lathe([[rD * 1.4, -0.05 * L], [rD * 1.02, 0]], 12).translate(e.x, e.y, e.z), cyl(rD * 1.3, rD * 1.3, 0.012 * L, 10, s0.x, s0.y - 0.006 * L, s0.z)]), "powerhead", [-1, 1], { ds: true });
   }
-  // Feed pipes: LOX (pump → injector dome) and fuel (pump → chamber side), one branch per chamber.
+  // Throat: the converging section up from the throat with a knurled ring at the throat and a flange lip at
+  // the chamber joint.
+  const knurl = boltRing(rt * 1.16, bellL + 0.012 * L, 24, (TAU * rt * 1.16) / 48, 0.03 * L, 0.08 * rt);
+  const throat = [...prof.chamber.slice(0, 6), [rc * 1.08, yJ], [rc * 1.08, yJ - 0.012 * L]];
+  for (const z of zs) add(merge([lathe(throat, 24), knurl.clone()]).translate(0, 0, z), "chamber", [-1, 0], { sym: !twin, ds: true });
+  // Chamber: the cylinder with two raised cooling-jacket bands (the lens core).
+  const band = (y) => lathe([[rc * 1.002, y - 0.006 * L], [rc * 1.04, y - 0.006 * L], [rc * 1.04, y + 0.006 * L], [rc * 1.002, y + 0.006 * L]], 24);
+  for (const z of zs) add(merge([lathe([[rc, yJ], [rc, y1]], 24), band(yJ + 0.35 * chamberL), band(yJ + 0.7 * chamberL)]).translate(0, 0, z), "chamber", [0, 0], { sym: !twin, ds: true });
+  // Chamber brackets: gusset lugs on the diagonals (clear of pump, gas generator, valves and actuators).
+  const bracket = (phi, z) => {
+    const yb = yJ + 0.15 * chamberL;
+    const h = 0.7 * chamberL;
+    const d = 0.26 * rc;
+    const w = 0.07 * rc;
+    const o = radialPhi(phi);
+    // built along +X (radial) and turned onto the diagonal; r = distance of its centre from the chamber axis
+    const place = (g, r, y) => g.rotateY(phi - Math.PI / 2).translate(o.x * r, y, o.z * r + z);
+    return merge([
+      place(new THREE.BoxGeometry(d, h, w), rc + d / 2, yb + h / 2), // web
+      place(new THREE.BoxGeometry(0.04 * rc, h * 1.15, w * 3), rc * 1.02, yb + h / 2), // foot on the wall
+      place(new THREE.CylinderGeometry(0.06 * rc, 0.06 * rc, w * 1.8, 10).rotateX(Math.PI / 2), rc + d, yb + 0.75 * h), // lug boss
+    ]);
+  };
+  const bPhis = twin ? [] : vacuum ? [Math.PI / 4, (5 * Math.PI) / 4] : [Math.PI / 4, (3 * Math.PI) / 4, (5 * Math.PI) / 4, (7 * Math.PI) / 4];
+  for (const z of zs) for (const phi of bPhis) add(bracket(phi, z), "steelDark", [0, 0]);
+  // Gas generator (sea level): a small can with a domed top and an outlet stub, opposite the pump.
+  const rg = rc * (twin ? 0.36 : 0.3);
+  const hg = L * 0.1;
+  const gx = twin ? -(rp + rg + 0.03 * L) : -(rc + rg + 0.02 * L);
+  const gy = bellL + convL;
+  if (!vacuum) add(merge([cyl(rg, rg * 0.8, hg, 10, gx, gy), lathe(domePoints(rg, rg * 0.7, true, 4), 10).translate(gx, gy + hg, 0), cyl(rg * 1.15, rg * 1.15, 0.01 * L, 10, gx, gy + 0.3 * hg), cyl(rg * 0.35, rg * 0.35, 0.04 * L, 8, gx, gy - 0.04 * L)]), "powerhead", [0, 0]);
+  // Injector manifold ring just under the injector flange, with a bolt circle on its top face.
+  const mH = 0.022 * L;
+  const mTop = y1 - 0.006 * L;
+  const mb = 0.045 * rc;
+  for (const z of zs) add(machinedRing(rc * 1.006, rc * 1.27, mH, mTop - mH, 48).translate(0, 0, z), "machined", [1, 0], { sym: !twin, edges: true, details: [det("bolt", boltCircle(rc * 1.17, mTop, 16, mb, { h: Math.min(0.6 * mb, 0.6 * (y1 - mTop)), cz: z }))] });
+  // Injector dome with a bolt circle on its flange.
+  const bd = Math.min(0.01 * L, 0.06 * rc);
+  for (const z of zs) add(merge([lathe(prof.dome, 20), boltRing(rc * 1.09, y1 + 0.015 * L + bd / 2, 16, bd)]).translate(0, 0, z), "powerhead", [1, 1], { sym: !twin });
+  // Main valves on the injector (−Z): body, bonnet flange, actuator can, cap and two line stubs each.
+  const vz = twin ? -(rp + 0.3 * rc) : -rc * 1.3;
+  const xv = vacuum ? [0.25 * rc] : twin ? [0.62 * rc, -0.62 * rc] : [0.62 * rc, -0.8 * rc];
+  const stub = (x, s) => new THREE.CylinderGeometry(0.11 * rc, 0.11 * rc, 0.1 * rc, 10).rotateZ(Math.PI / 2).translate(x + s * 0.26 * rc, yTop - 0.035 * L, vz);
+  for (const x of xv) {
+    add(merge([box(0.42 * rc, 0.06 * L, 0.36 * rc, x, yTop - 0.035 * L, vz), cyl(0.17 * rc, 0.17 * rc, 0.008 * L, 10, x, yTop - 0.005 * L, vz), cyl(0.12 * rc, 0.12 * rc, 0.05 * L, 8, x, yTop + 0.003 * L, vz), cyl(0.08 * rc, 0.08 * rc, 0.015 * L, 8, x, yTop + 0.053 * L, vz), stub(x, 1), stub(x, -1)]), "valve", [1, 2]);
+  }
+  // Turbopump housing: cylinder, turbine cap, pump volute; a bolt circle round the cap.
+  add(merge([cyl(rp, rp, hp, 12, px, py0, 0), cyl(rp * 0.72, rp * 0.72, hp * 0.14, 10, px, py0 + hp, 0), new THREE.TorusGeometry(rp * 1.02, rp * 0.22, 6, 16).rotateX(Math.PI / 2).translate(px, py0 + hp * 0.3, 0)]), "pump", [1, 3], {
+    details: [det("bolt", boltCircle(rp * 0.86, py0 + hp, 12, 0.09 * rp, { cx: px }))],
+  });
+  // Pump inlet: a duct up from the pump to a bolted flange under the thrust frame (an elbow on a twin, whose
+  // pump sits under the gimbal block).
+  {
+    const rIn = rp * 0.42;
+    const yIn = L - 0.035 * L;
+    let duct;
+    let at;
+    if (twin) {
+      const xi = px + rp * 1.35;
+      duct = new THREE.TubeGeometry(new THREE.QuadraticBezierCurve3(v3(px + 0.85 * rp, py0 + 0.7 * hp, 0), v3(xi, py0 + 0.72 * hp, 0), v3(xi, yIn, 0)), 10, rIn, 8, false);
+      at = v3(xi, yIn, 0);
+    } else {
+      const y0 = py0 + hp * 1.14;
+      duct = cyl(rIn, rIn, Math.max(yIn - y0, 0.01 * L), 10, px, y0);
+      at = v3(px, yIn, 0);
+    }
+    add(merge([duct, cyl(rIn * 1.7, rIn * 1.7, 0.014 * L, 12, at.x, yIn - 0.014 * L, at.z)]), "pipe", [1, 4], { details: [det("bolt", boltCircle(rIn * 1.38, yIn, 8, 0.2 * rIn, { cx: at.x, cz: at.z }))] });
+  }
+  // Feed lines: LOX (pump → injector dome) and fuel (pump → chamber side), one branch per chamber, clamped.
   const rPipe = rc * (vacuum ? 0.16 : 0.2);
-  const lox = [];
-  const fuel = [];
+  const feed = { lox: [[], []], fuel: [[], []] };
   for (const z of zs) {
     const s = twin ? Math.sign(z) : 1;
-    lox.push(tube(v3(px, py0 + hp * 0.8, 0), v3(px * 0.6, yTop + domeL * 0.9, z * 0.4), v3(rc * 0.3, yTop - domeL * 0.3, z), rPipe));
-    fuel.push(tube(v3(px, py0 + hp * 0.35, rp * 0.6 * s), v3(px * 0.7 + rc * 0.4, py0 + hp * 0.2, rc * 1.3 * s + z * 0.5), v3(rc * 0.55, bellL + convL + chamberL * 0.5, z + rc * 0.75 * s), rPipe * 0.85));
+    const cl = new THREE.QuadraticBezierCurve3(v3(px, py0 + hp * 0.8, 0), v3(px * 0.6, yTop + domeL * 0.9, z * 0.4), v3(rc * 0.3, yTop - domeL * 0.3, z));
+    const cf = new THREE.QuadraticBezierCurve3(v3(px, py0 + hp * 0.35, rp * 0.6 * s), v3(px * 0.7 + rc * 0.4, py0 + hp * 0.2, rc * 1.3 * s + z * 0.5), v3(rc * 0.55, bellL + convL + chamberL * 0.5, z + rc * 0.75 * s));
+    feed.lox[0].push(new THREE.TubeGeometry(cl, 8, rPipe, 6, false));
+    feed.lox[1].push(...clampsAlong(cl, rPipe, 3));
+    feed.fuel[0].push(new THREE.TubeGeometry(cf, 8, rPipe * 0.85, 6, false));
+    feed.fuel[1].push(...clampsAlong(cf, rPipe * 0.85, 3));
   }
-  kit.push({ geo: merge(lox), mat: "pipe", ax: [1, 3] });
-  kit.push({ geo: merge(fuel), mat: "pipe", ax: [1, 3] });
-  if (!vacuum) {
-    // Gimbal actuator pair: two hydraulic rams from the thrust frame down to the chamber, ±Z.
-    const rams = [];
-    for (const s of [1, -1]) {
-      const zc = s * (twin ? off : 0);
-      const top = v3(-0.2 * rc, L - 0.03 * L, s * rc * 1.5 + zc);
-      const bot = v3(-0.2 * rc, bellL + convL + 0.6 * chamberL, s * rc * 1.05 + zc);
-      const mid = top.clone().lerp(bot, 0.5);
-      rams.push(rod(top, mid, 0.17 * rc), rod(mid, bot, 0.1 * rc), cyl(0.2 * rc, 0.2 * rc, 0.03 * L, 8, top.x, top.y - 0.005 * L, top.z));
+  for (const [geos, clamps] of [feed.lox, feed.fuel]) add(merge(geos), "pipe", [1, 4], { details: [det("clamp", clamps)] });
+  // High-pressure lines: pump discharge round to each main valve's outer stub.
+  const rHP = rPipe * 0.7;
+  xv.forEach((x, k) => {
+    const end = v3(x + (twin && x < 0 ? -0.31 : 0.31) * rc, yTop - 0.035 * L, vz);
+    let a;
+    let c;
+    if (twin) {
+      a = v3(Math.sign(x) * 0.5 * rp, py0 + 0.5 * hp, -0.85 * rp);
+      c = v3(Math.sign(x) * 0.95 * rc, yTop - 0.05 * L, vz - 0.12 * rc);
+    } else if (k === 0) {
+      a = v3(px - 0.25 * rp, py0 + 0.5 * hp, -0.85 * rp);
+      c = v3((px + end.x) / 2 + 0.2 * rc, yTop - 0.06 * L, vz - 0.1 * rc);
+    } else {
+      a = v3(px - 0.55 * rp, py0 + 0.8 * hp, -0.7 * rp);
+      c = v3(0.6 * rc, yTop + 0.03 * L, vz - 1.1 * rc);
     }
-    kit.push({ geo: merge(rams), mat: "actuator", ax: [1, 4] });
+    add(tube(a, c, end, rHP, 10), "pipe", [1, 4]);
+  });
+  // Ignition line (single-chamber sea level): from the gas generator's igniter cartridge up to the injector dome.
+  if (!vacuum && !twin) {
+    const g0 = v3(gx, gy + hg + rg * 0.55, 0);
+    const end = v3(-0.6 * rc, yTop - 0.01 * L, 0.5 * rc);
+    add(merge([tube(g0, v3(gx * 0.7, yTop + 0.03 * L, end.z * 0.8), end, 0.05 * rc, 10), box(0.16 * rc, 0.05 * L, 0.12 * rc, gx, g0.y + 0.02 * L, 0.2 * rc)]), "pipe", [1, 4]);
+    // Instrumentation box with its connector, on a standoff plate beside the injector.
+    const ib = v3(-0.85 * rc, yTop - 0.02 * L, 0.75 * rc);
+    add(merge([box(0.36 * rc, 0.07 * L, 0.26 * rc, ib.x, ib.y, ib.z), cyl(0.06 * rc, 0.06 * rc, 0.03 * L, 8, ib.x, ib.y + 0.035 * L, ib.z), box(0.42 * rc, 0.006 * L, 0.32 * rc, ib.x, ib.y - 0.038 * L, ib.z)]), "steelDark", [1, 5]);
+  }
+  // Gimbal actuators (±Z): hydraulic ram from the thrust frame down to a clevis on the chamber.
+  for (const s of [1, -1]) {
+    const zc = s * (twin ? off : 0);
+    const top = v3(-0.2 * rc, L - 0.03 * L, s * rc * 1.5 + zc);
+    const bot = v3(-0.2 * rc, bellL + convL + 0.6 * chamberL, s * rc * 1.05 + zc);
+    const mid = top.clone().lerp(bot, 0.5);
+    add(merge([rod(top, mid, 0.17 * rc), rod(mid, bot, 0.1 * rc), cyl(0.2 * rc, 0.2 * rc, 0.03 * L, 8, top.x, top.y - 0.005 * L, top.z), box(0.16 * rc, 0.045 * L, 0.2 * rc, bot.x, bot.y, bot.z - s * 0.05 * rc)]), "actuator", [1, 5]);
   }
   // Gimbal block + flange up to the mount plate.
   const gw = twin ? 2 * off + rc : rc * 1.1;
   const gh = L - yTop + 0.02 * L;
-  kit.push({
-    geo: merge([
+  add(
+    merge([
       box(twin ? rc * 1.1 : gw, gh, gw, 0, yTop - 0.02 * L + gh / 2, 0),
       cyl(rc * 0.95, rc * 0.95, 0.025 * L, 12, 0, L - 0.025 * L),
       boltRing(rc * 0.97, L - 0.0125 * L, 24, (TAU * rc) / 50, 0.02 * L, 0.06 * rc), // knurled gimbal ring
     ]),
-    mat: "gimbal",
-    ax: [1, 5],
-    sym: true,
-  });
+    "gimbal",
+    [1, 6],
+    { sym: true },
+  );
   Object.assign(kit, { radiusAt, bellL, rc, off, y1 });
   kitCache.set(key, kit);
   return kit;
@@ -1151,22 +1385,7 @@ function buildEngines(spec, mats) {
   const kit = engineKit({ exitD_m: g.exitD_m, L, vacuum: g.vacuum, chambers: g.chambers, overall: g.diameterKind === "overall", extFrac: g.extension?.startRadiusFraction ?? 0 });
   const { radiusAt, bellL, rc, off } = kit;
   const out = [];
-  // Exploded view: each engine's sub-pieces stack along the axis (axisOffset, group "e<i>") and the whole
-  // column moves outward from the cluster centre (explode), so neighbouring columns never touch.
-  const d = Math.max(0.15, 0.45 * L * S);
-  g.positions.forEach((p, i) => {
-    // Powerheads turn tangentially on a ring so pumps stay inside the cluster footprint.
-    const ry = p.r > 0 ? -p.a - Math.PI / 2 : 0;
-    const dir = p.r > 0 ? radial(p.a, -0.12) : DOWN;
-    const dist = p.r > 0 ? d : 0.25 * d;
-    kit.forEach((s, j) =>
-      out.push(
-        piece(s.geo, mats[s.mat === "engine" && g.bellFinish === "ablative" ? "ablative" : s.mat], { x: p.x, z: p.z, ry, order: i + j * 0.01, dir, dist, side: s.ds ? DS : undefined, ax: [`e${i}`, ...s.ax], sym: s.sym && p.r === 0, engine: i, kind: s.kind ?? "detail" }),
-      ),
-    );
-  });
   const n = g.positions.length;
-
   const Rm = g.mountD_m / 2;
   const mountH = g.mountH_m;
   const fairings = g.features.includes("engine-fairings");
@@ -1178,8 +1397,47 @@ function buildEngines(spec, mats) {
   const holeR = thrustSection ? radiusAt(yHs) * 1.12 + 0.02 * L : rc * 1.7;
   const hasCentre = g.positions.some((p) => p.r === 0);
   const innerR = hasCentre ? (g.chambers > 1 ? off + rc * 1.7 : holeR) : Math.min(holeR, 0.08 * Rm);
+  const hsDist = 0.12 + 0.35 * Rm * S;
+  // Heat-shield boot (sea-level engines): a bellows sleeve from the engine up into its hole in the heat shield.
+  // It hangs from the shield, so it takes the shield's lens layer and its sector's opening move. One geometry
+  // per hole size (ring engines / centre engine).
+  const boots = new Map();
+  const bootGeo = (rTop) => {
+    if (boots.has(rTop)) return boots.get(rTop);
+    const hB = 0.06 * L;
+    const yB = yHs - hB;
+    const rIn = (y) => radiusAt(y) * 1.03 + (g.chambers > 1 ? off : 0) + 0.004 * L;
+    const pts = [[rIn(yB), yB]];
+    for (let k = 1; k < 6; k++) {
+      const y = yB + (k / 6) * hB;
+      const r = lerp(rIn(y), rTop * 0.97, (k / 6) ** 2);
+      pts.push([r + (k % 2 ? 0.05 : -0.02) * Math.abs(rTop - rIn(y)) + (k % 2 ? 0.004 * L : 0), y]);
+    }
+    pts.push([rTop * 0.97, yHs], [rTop * 1.02, yHs]);
+    const geo = projectUV(lathe(pts, 32));
+    boots.set(rTop, geo);
+    return geo;
+  };
+  // Exploded view: each engine's sub-pieces stack along the axis (axisOffset, group "e<i>") and the whole
+  // column moves outward from the cluster centre (explode), so neighbouring columns never touch.
+  const d = Math.max(0.15, 0.45 * L * S);
+  g.positions.forEach((p, i) => {
+    // Powerheads turn tangentially on a ring so pumps stay inside the cluster footprint.
+    const ry = p.r > 0 ? -p.a - Math.PI / 2 : 0;
+    const dir = p.r > 0 ? radial(p.a, -0.12) : DOWN;
+    const dist = p.r > 0 ? d : 0.25 * d;
+    kit.forEach((s, j) => {
+      const pc = piece(s.geo, mats[s.mat === "engine" && g.bellFinish === "ablative" ? "ablative" : s.mat], { x: p.x, z: p.z, ry, order: i + j * 0.01, dir, dist, side: s.ds ? DS : undefined, ax: [`e${i}`, ...s.ax], sym: s.sym && p.r === 0, engine: i, kind: s.kind ?? "detail", edges: s.edges });
+      for (const dt of s.details ?? []) addDetail(pc, dt.type, dt.attr);
+      out.push(pc);
+    });
+    if (!g.vacuum) {
+      out.push(piece(bootGeo(p.r > 0 ? holeR : innerR), mats.skirt, { x: p.x, z: p.z, order: i + 0.035, dir: p.r > 0 ? radial(p.a, -0.15) : UP, dist: p.r > 0 ? hsDist : 0.1, side: DS, ax: ["top", 1, 0], engine: i }));
+    }
+  });
+
   heatShieldSectors(g, holeR, innerR, Rm * 0.98, yHs, 0.06).forEach(({ geo, mid, ry }, k) =>
-    out.push(piece(geo, mats.heatShield, { ry, order: n + 0.1 + k * 0.01, dir: radial(mid, -0.15), dist: 0.12 + 0.35 * Rm * S, ax: ["top", 1, 0], kind: "shell" })),
+    out.push(piece(geo, mats.heatShield, { ry, order: n + 0.1 + k * 0.01, dir: radial(mid, -0.15), dist: hsDist, ax: ["top", 1, 0], kind: "shell" })),
   );
   if (thrustSection) {
     // Thrust-section skin with 12 raised longerons (edges draw the ribs and the rims).
@@ -1221,6 +1479,13 @@ function buildEngines(spec, mats) {
 
 // ---------- tanks ----------
 
+// A tank (~56 pieces): skirt ring; inside, the bottom dome, two feed lines (tunnels) and the downcomer through
+// the lower tank, six slosh baffles and six ring frames, the common bulkhead, two pressurisation lines, four
+// line brackets, four pressurant bottles on four brackets, the top dome with two vent valves; eight stringer
+// sets and four skin quarters (rivet rows along the panel seams, instanced); outside, a raceway in four
+// segments (straps instanced) and four umbilical plates; the forward ring; legs and grid fins by feature.
+// Arrival bottom-up: the interior by height, then the skin closing round it, raceway, umbilicals, forward
+// ring, legs. Interior layout is visual (bulkheads, propellant split at 42 % of the height).
 function buildTank(spec, mats) {
   const g = spec.geom;
   const R = g.D_m / 2;
@@ -1228,9 +1493,11 @@ function buildTank(spec, mats) {
   const D = g.D_m;
   const T = (side, rank) => ["t", side, rank];
   const out = [];
-  // Arrival bottom-up: skirt ring, then the interior (bottom dome, downcomer, lower baffles, common bulkhead,
-  // upper baffles, pressurant bottles, top dome), then stringers and the skin closing around it, raceway,
-  // forward ring, legs. Interior layout is visual (bulkheads, propellant split at 42 % of the height).
+  const P = (geo, mat, o) => {
+    const pc = piece(geo, mat, o);
+    out.push(pc);
+    return pc;
+  };
   const domeH = 0.35 * R;
   const inset = 0.015 * H;
   const yMid = 0.42 * H;
@@ -1239,11 +1506,36 @@ function buildTank(spec, mats) {
   const inner = 0.15 + 0.2 * R * S;
   const tb = Math.max(0.02, 0.006 * D); // bolt head size (visual)
   const ringBolts = (y) => boltRing(R * 1.011, y, 24, tb, tb, tb * 0.8);
+  // Height of a dome's surface at radius rr (rim at y = rim, bulging up or down by h).
+  const domeY = (rr, rim, h, up) => rim + (up ? 1 : -1) * h * Math.sqrt(Math.max(0, 1 - (rr / (R * 0.985)) ** 2));
+  const yCopv = H - inset - domeH - 0.16 * D;
+  // Interior bays at the wall: the lower tank between the bottom dome's rim and the common bulkhead's rim,
+  // the upper one from clear of the bulkhead's crown up to below the pressurant bottles.
+  const lower = [inset + domeH, yMid];
+  const upper = [yMid + 0.55 * domeH, yCopv - 0.15 * D];
+  if (upper[1] - upper[0] < 0.08 * H) upper[1] = Math.max(upper[0] + 0.08 * H, H - inset - domeH - 0.02 * H);
+  const at = ([lo, hi], f) => lo + f * (hi - lo);
+  const orderAt = (y) => 0.12 + 0.56 * clamp(y / H, 0, 1);
+
   // The first stage's thrust-skirt flange is a little wider and taller (relief at the base).
-  const skirtRing = g.stageIndex === 0 ? machinedRing(R * 0.985, R * 1.025, skirtH * 1.3) : machinedRing(R * 0.985, R * 1.008, skirtH);
-  out.push(piece(merge([skirtRing.clone(), ringBolts(skirtH * 0.5)]), mats.skirt, { order: 0, dir: DOWN, dist: 0.15, ax: T(-1, 0), sym: true, edges: true, lineGeo: skirtRing }));
-  out.push(piece(projectUV(lathe(domePoints(R * 0.985, domeH, false), 36).translate(0, inset + domeH, 0)), mats.interior, { order: 0.1, dir: DOWN, dist: inner, side: DS, sym: true, kind: "interior", edges: true }));
-  out.push(piece(cyl(0.045 * D, 0.045 * D, yMid - inset, 16, 0, inset), mats.interior, { order: 0.2, dir: DOWN, dist: 0.05, sym: true, kind: "interior" }));
+  const skirtTop = g.stageIndex === 0 ? skirtH * 1.3 : skirtH;
+  const skirtRing = g.stageIndex === 0 ? machinedRing(R * 0.985, R * 1.025, skirtTop) : machinedRing(R * 0.985, R * 1.008, skirtH);
+  P(merge([skirtRing.clone(), ringBolts(skirtH * 0.5)]), mats.skirt, { order: 0, dir: DOWN, dist: 0.15, ax: T(-1, 0), sym: true, edges: true, lineGeo: skirtRing });
+  P(projectUV(lathe(domePoints(R * 0.985, domeH, false), 36).translate(0, inset + domeH, 0)), mats.interior, { order: 0.1, dir: DOWN, dist: inner, side: DS, sym: true, kind: "interior", edges: true });
+  // Two feed lines (propellant tunnels) through the lower tank, from the bottom dome up into the bulkhead's
+  // crown, flanged at both ends and clamped.
+  const rf = 0.5 * R;
+  const fr = 0.028 * D;
+  [0, Math.PI].forEach((phi, k) => {
+    const o = radialPhi(phi);
+    const yb = domeY(rf, inset + domeH, domeH, false) + 0.004 * D;
+    const yt = domeY(rf, yMid, 0.8 * domeH, true) - 0.004 * D;
+    const [x, z] = [o.x * rf, o.z * rf];
+    const fg = (y) => cyl(fr * 1.45, fr * 1.45, 0.014 * D, 12, x, y, z);
+    const pc = P(merge([cyl(fr, fr, yt - yb, 12, x, yb, z), fg(yb), fg(yt - 0.014 * D)]), mats.interior, { order: 0.15 + k * 0.01, dir: radialPhi(phi, -0.3), dist: 0.07, kind: "interior" });
+    addDetail(pc, "clamp", clampsAlong(new THREE.LineCurve3(v3(x, yb, z), v3(x, yt, z)), fr, 4, 0.15, 0.85));
+  });
+  P(cyl(0.045 * D, 0.045 * D, yMid - inset, 16, 0, inset), mats.interior, { order: 0.2, dir: DOWN, dist: 0.05, sym: true, kind: "interior" });
   // Slosh baffle: flat annulus with a ring of lightening cut-outs (edges draw the holes).
   const baffleShape = new THREE.Shape().absarc(0, 0, R * 0.985, 0, TAU, false);
   baffleShape.holes.push(new THREE.Path().absarc(0, 0, R * 0.78, 0, TAU, true));
@@ -1251,22 +1543,72 @@ function buildTank(spec, mats) {
     const a = (i / 12) * TAU;
     baffleShape.holes.push(new THREE.Path().absarc(Math.cos(a) * R * 0.88, Math.sin(a) * R * 0.88, R * 0.045, 0, TAU, true));
   }
-  const baffle0 = new THREE.ExtrudeGeometry(baffleShape, { depth: 0.012 * D, bevelEnabled: false, curveSegments: 16 }).rotateX(-Math.PI / 2);
-  const baffleGeo = () => baffle0; // one geometry shared by the tank's four baffles
-  const baffles = [0.13, 0.28, 0.6, 0.76];
-  baffles.forEach((f, i) => {
-    if (i === 2) out.push(piece(projectUV(lathe(domePoints(R * 0.985, domeH * 0.8, true), 36).translate(0, yMid, 0)), mats.interior, { order: 0.35, dir: UP, dist: 0.06, side: DS, sym: true, kind: "interior", edges: true }));
-    out.push(piece(baffleGeo(), mats.interior, { y: f * H, order: 0.3 + i * 0.02 + (i >= 2 ? 0.1 : 0), dir: f < 0.5 ? DOWN : UP, dist: 0.04, side: DS, sym: true, kind: "interior" }));
+  const baffleGeo = new THREE.ExtrudeGeometry(baffleShape, { depth: 0.012 * D, bevelEnabled: false, curveSegments: 16 }).rotateX(-Math.PI / 2); // shared by the six baffles
+  // Ring frame: a T-section ring against the stringers, flange inward; one geometry for the six, edge lines
+  // on the flange only.
+  const [rF, rI, rW, hf, tw] = [R * 0.922, R * 0.938, R * 0.972, 0.034 * D, 0.01 * D];
+  const frameGeo = lathe([[rF, hf / 2], [rF, -hf / 2], [rI, -hf / 2], [rI, -tw / 2], [rW, -tw / 2], [rW, tw / 2], [rI, tw / 2], [rI, hf / 2], [rF, hf / 2]], 64);
+  const frameLines = lathe([[rF, hf / 2], [rF, -hf / 2], [rI, -hf / 2], [rI, hf / 2], [rF, hf / 2]], 64);
+  // In each bay, alternating frame / baffle / frame / baffle / frame / baffle at sevenths of its height.
+  for (const bay of [lower, upper]) {
+    for (let j = 1; j <= 6; j++) {
+      const y = at(bay, j / 7);
+      const dir = y < yMid ? DOWN : UP;
+      if (j % 2) P(frameGeo, mats.interior, { y, order: orderAt(y), dir, dist: 0.03, sym: true, kind: "interior", edges: true, lineGeo: frameLines });
+      else P(baffleGeo, mats.interior, { y, order: orderAt(y), dir, dist: 0.04, side: DS, sym: true, kind: "interior" });
+    }
+  }
+  P(projectUV(lathe(domePoints(R * 0.985, domeH * 0.8, true), 36).translate(0, yMid, 0)), mats.interior, { order: orderAt(yMid), dir: UP, dist: 0.06, side: DS, sym: true, kind: "interior", edges: true });
+  // Pressurisation lines: one up the upper tank from the bulkhead to below the bottles, one down the lower
+  // tank from under the bulkhead to the bottom dome; flanged, clamped.
+  const rpl = 0.66 * R;
+  const pr = 0.009 * D;
+  [
+    { phi: Math.PI / 2, yb: domeY(rpl, yMid, 0.8 * domeH, true) + 0.01 * D, yt: yCopv - 0.04 * D },
+    { phi: (3 * Math.PI) / 2, yb: domeY(rpl, inset + domeH, domeH, false) + 0.01 * D, yt: yMid + 0.45 * domeH },
+  ].forEach(({ phi, yb, yt }) => {
+    const o = radialPhi(phi);
+    const [x, z] = [o.x * rpl, o.z * rpl];
+    const fg = (y) => cyl(pr * 1.9, pr * 1.9, 0.01 * D, 8, x, y, z);
+    const pc = P(merge([cyl(pr, pr, yt - yb, 8, x, yb, z), fg(yb), fg(yt - 0.01 * D)]), mats.pipe, { order: orderAt((yb + yt) / 2) + 0.004, dir: radialPhi(phi, 0.2), dist: 0.06, kind: "interior" });
+    addDetail(pc, "clamp", clampsAlong(new THREE.LineCurve3(v3(x, yb, z), v3(x, yt, z)), pr, 4, 0.12, 0.88));
   });
-  const yCopv = H - inset - domeH - 0.16 * D;
+  // Line brackets: flat struts from the downcomer out to each feed line, with collars, at two heights each.
+  [0, Math.PI].forEach((phi, k) => {
+    const o = radialPhi(phi);
+    for (const f of k ? [0.4, 0.79] : [0.33, 0.72]) {
+      const y = at(lower, f);
+      const geo = merge([
+        strut(o.clone().multiplyScalar(0.045 * D).setY(y), o.clone().multiplyScalar(rf - 0.9 * fr).setY(y), 0.03 * D, 0.012 * D, UP),
+        cyl(fr * 1.3, fr * 1.3, 0.02 * D, 12, o.x * rf, y - 0.01 * D, o.z * rf),
+        cyl(0.056 * D, 0.056 * D, 0.02 * D, 16, 0, y - 0.01 * D, 0),
+      ]);
+      P(geo, mats.steelDark, { order: orderAt(y) + 0.002, dir: radialPhi(phi, -0.1), dist: 0.05, kind: "interior" });
+    }
+  });
+  // Pressurant bottles, each on a bracket (saddle band + strut out to the wall).
   const copvGeo = new THREE.CapsuleGeometry(0.07 * D, 0.12 * D, 4, 12); // shared by the four bottles
+  const saddle = new THREE.TorusGeometry(0.074 * D, 0.006 * D, 4, 24).rotateX(Math.PI / 2);
   for (let k = 0; k < 4; k++) {
     const a = Math.PI / 4 + (k * TAU) / 4;
-    out.push(piece(copvGeo, mats.copv, { x: 0.32 * R * Math.cos(a), y: yCopv, z: 0.32 * R * Math.sin(a), order: 0.6 + k * 0.01, dir: radial(a, 0.6), dist: 0.08, kind: "interior" }));
+    const o = radial(a);
+    const [cx, cz] = [0.32 * R * o.x, 0.32 * R * o.z];
+    P(copvGeo, mats.copv, { x: cx, y: yCopv, z: cz, order: 0.6 + k * 0.01, dir: radial(a, 0.6), dist: 0.08, kind: "interior" });
+    const st = strut(o.clone().multiplyScalar(0.32 * R + 0.074 * D).setY(yCopv), o.clone().multiplyScalar(0.962 * R).setY(yCopv), 0.026 * D, 0.012 * D, UP);
+    P(merge([saddle.clone().translate(cx, yCopv, cz), st]), mats.steelDark, { order: 0.605 + k * 0.01, dir: radial(a, 0.6), dist: 0.12, kind: "interior" });
   }
-  out.push(piece(projectUV(lathe(domePoints(R * 0.985, domeH, true), 36).translate(0, H - inset - domeH, 0)), mats.interior, { order: 0.7, dir: UP, dist: inner, side: DS, sym: true, kind: "interior", edges: true }));
+  P(projectUV(lathe(domePoints(R * 0.985, domeH, true), 36).translate(0, H - inset - domeH, 0)), mats.interior, { order: 0.7, dir: UP, dist: inner, side: DS, sym: true, kind: "interior", edges: true });
+  // Two vent valves on the top dome (body, flange, stem, outlet bar); they lift off the dome when exploded.
+  [Math.PI / 2 + 0.4, (3 * Math.PI) / 2 + 0.4].forEach((phi, k) => {
+    const o = radialPhi(phi);
+    const rv = 0.5 * R;
+    const yv = domeY(rv, H - inset - domeH, domeH, true);
+    const [x, z] = [o.x * rv, o.z * rv];
+    const vr = 0.028 * D;
+    P(merge([cyl(vr, vr, 0.035 * D, 10, x, yv - 0.01 * D, z), cyl(vr * 1.5, vr * 1.5, 0.008 * D, 10, x, yv + 0.006 * D, z), cyl(vr * 0.55, vr * 0.55, 0.02 * D, 8, x, yv + 0.025 * D, z), box(vr * 1.6, 0.008 * D, vr * 0.6, x, yv + 0.03 * D, z)]), mats.valve, { order: 0.72 + k * 0.01, dir: UP, dist: inner + 0.07 });
+  });
 
-  // Skin: four shell quarters, each with its ring of internal stringers. An enclosed tank (it sits inside the
+  // Skin: four shell quarters, each with two sets of internal stringers. An enclosed tank (it sits inside the
   // interstage/fairing on the real vehicle) shows the plain white enclosure instead of a painted finish.
   const shellMat = g.enclosed ? mats.body : finishMat(mats, g.finish);
   const shellDist = 0.25 + 0.9 * R * S;
@@ -1285,59 +1627,92 @@ function buildTank(spec, mats) {
   }
   shellProfile.push([R, y1s]);
   // Quarter 0 is built once; quarters 1–3 are the same geometry turned by q·π/2 about Y (allowed by the
-  // piece rules), so each tank uploads one skin, one stringer set and one line set.
-  const str = [];
-  for (let j = 0; j < 6; j++) {
-    const phi = ((j + 0.5) * (Math.PI / 2)) / 6;
-    const r = R - 0.008 * D;
-    str.push(box(0.012 * D, 0.94 * H, 0.01 * D).rotateY(phi - Math.PI / 2).translate(Math.sin(phi) * r, H / 2, Math.cos(phi) * r));
-  }
-  const strGeo = merge(str);
+  // piece rules), so each tank uploads one skin, two stringer sets and one line set.
+  const strSet = (j0) => {
+    const s = [];
+    for (let j = j0; j < j0 + 3; j++) {
+      const phi = ((j + 0.5) * (Math.PI / 2)) / 6;
+      const r = R - 0.008 * D;
+      s.push(box(0.012 * D, 0.94 * H, 0.01 * D).rotateY(phi - Math.PI / 2).translate(Math.sin(phi) * r, H / 2, Math.cos(phi) * r));
+    }
+    return merge(s);
+  };
+  const [strA, strB] = [strSet(0), strSet(3)];
   // Raised panel seam strip on each quarter's leading edge (phi = 0, so four quarters give four seams).
   const seamStrip = projectUV(box(0.012 * D, y1s - y0s, 0.006 * D, 0, (y0s + y1s) / 2, R + 0.003 * D));
   const quarterGeo = merge([latheUV(lathe(shellProfile, 24, 0, Math.PI / 2), { phiStart: 0, phiLength: Math.PI / 2, H, R }), seamStrip.clone()]);
   const plain = lathe([[R, y0s], [R, y1s]], 24, 0, Math.PI / 2); // its boundary = the panel seams
   const seamWeldGeo = merge([plain, seamStrip, ...welds.map((y) => lathe([[R, y - ww], [R * 1.004, y - ww], [R * 1.004, y + ww], [R, y + ww]], 24, 0, Math.PI / 2))]);
-  for (let q = 0; q < 4; q++) {
-    const ry = (q * Math.PI) / 2;
-    out.push(piece(strGeo, mats.interior, { ry, order: 1 + q * 0.02, dir: radialPhi(ry + Math.PI / 4), dist: shellDist * 0.7, kind: "interior" }));
+  // Rivets (instanced, shared by the four quarters): a row each side of the seam strip, a row round the top
+  // and bottom of the quarter clear of the skirt and forward rings.
+  let rivets = null;
+  if (rivetsOn(g.finish)) {
+    const rv = Math.max(0.012, 0.0042 * D);
+    const pitch = 8 * rv;
+    const list = [];
+    const ya = Math.max(y0s, skirtTop) + 0.03 * D;
+    const yb = Math.min(y1s, H - fwdH) - 0.03 * D;
+    for (const sx of [-1, 1]) {
+      const o = radialPhi(Math.asin((sx * 0.0095 * D) / R)).multiplyScalar(R);
+      list.push(...rivetRow(o.clone().setY(ya + 0.03 * D), o.clone().setY(yb - 0.03 * D), pitch, rv));
+    }
+    const d0 = (0.02 * D) / R;
+    list.push(...rivetArc(R, ya, d0, Math.PI / 2 - d0, pitch, rv), ...rivetArc(R, yb, d0, Math.PI / 2 - d0, pitch, rv));
+    rivets = instAttr(list);
   }
   for (let q = 0; q < 4; q++) {
     const ry = (q * Math.PI) / 2;
-    out.push(piece(quarterGeo, shellMat, { ry, order: 1.5 + q * 0.02, dir: radialPhi(ry + Math.PI / 4), dist: shellDist, side: DS, kind: "shell", lineGeo: false, fineGeo: seamWeldGeo }));
+    P(strA, mats.interior, { ry, order: 1 + q * 0.02, dir: radialPhi(ry + Math.PI / 8), dist: shellDist * 0.7, kind: "interior" });
+    P(strB, mats.interior, { ry, order: 1.01 + q * 0.02, dir: radialPhi(ry + (3 * Math.PI) / 8), dist: shellDist * 0.64, kind: "interior" });
   }
-  // Raceway (cable/plumbing tunnel) along the full length.
+  for (let q = 0; q < 4; q++) {
+    const ry = (q * Math.PI) / 2;
+    const pc = P(quarterGeo, shellMat, { ry, order: 1.5 + q * 0.02, dir: radialPhi(ry + Math.PI / 4), dist: shellDist, side: DS, kind: "shell", lineGeo: false, fineGeo: seamWeldGeo });
+    if (rivets) addDetail(pc, "rivet", rivets, { lookOnly: "painted", color: rivetTint(pc.mesh) });
+  }
+  // Raceway (cable/plumbing tunnel) along the full length in four segments of cover plates (~2 m each with a
+  // small joint), straps every 1.5 m (instanced); the segments part a little along the axis when exploded.
   if (!g.enclosed) {
     const rwA = Math.PI / 2;
     const rwD = 0.03 * D;
+    const rwW = 0.07 * D;
     const rwH = H - skirtH - fwdH - 0.01 * H;
-    // The raceway as a run of cover plates (~2 m each with a small joint), structural lines on the plates.
-    const plates = [];
-    const pl = 2;
-    const nP = Math.max(1, Math.floor(rwH / pl));
-    for (let i = 0; i < nP; i++) {
-      const len = rwH / nP - 0.12;
-      plates.push(box(rwD, len, 0.07 * D, R + rwD / 2, skirtH + (i + 0.5) * (rwH / nP), 0));
-    }
-    const duct = merge(plates);
-    const clamps = [];
-    for (let y = skirtH + 1.5; y < skirtH + rwH - 0.5; y += 3) clamps.push(box(rwD * 1.7, 0.12, 0.07 * D * 1.5, R + rwD * 0.85, y, 0)); // every ~3 m
-    const clampGeo = clamps.length ? merge(clamps) : null;
-    out.push(piece(projectUV(merge([duct.clone(), ...(clampGeo ? [clampGeo] : [])])), mats.raceway, { ry: -rwA, order: 2, dir: radial(rwA), dist: shellDist * 1.1, edges: true, lineGeo: duct }));
-    if (g.stageIndex === 0) {
-      // Umbilical plate with two quick-disconnect ports near the base (visual sizes).
-      const ua = rwA + 0.55;
-      const uy = skirtH + 0.02 * H + 0.2 * D;
-      const port = (z) => new THREE.CylinderGeometry(0.035 * D, 0.035 * D, 0.05 * D, 10).rotateZ(Math.PI / 2).translate(R + 0.045 * D, uy, z);
-      const umb = merge([box(0.03 * D, 0.32 * D, 0.24 * D, R + 0.015 * D, uy, 0), port(-0.06 * D), port(0.06 * D)]);
-      // a bolt ring around each port on the plate face (ring built flat, turned to face +X)
+    const nP = Math.max(4, Math.floor(rwH / 2));
+    const pl = rwH / nP;
+    const segs = [[], [], [], []];
+    for (let i = 0; i < nP; i++) segs[Math.min(3, Math.floor((i * 4) / nP))].push(i);
+    segs.forEach((idx, k) => {
+      const duct = projectUV(merge(idx.map((i) => box(rwD, pl - 0.12, rwW, R + rwD / 2, skirtH + (i + 0.5) * pl, 0))));
+      const [ya, yb] = [skirtH + idx[0] * pl, skirtH + (idx.at(-1) + 1) * pl];
+      const straps = [];
+      for (let y = ya + 0.5; y < yb - 0.4; y += 1.5) straps.push(xf(v3(R + rwD * 0.85, y, 0), UP, rwD * 1.7, 0.1, rwW * 1.45));
+      const pc = P(duct, mats.raceway, { ry: -rwA, order: 2 + k * 0.01, dir: radial(rwA, (k - 1.5) * 0.08), dist: shellDist * 1.1, edges: true });
+      addDetail(pc, "strap", straps);
+    });
+    // Four umbilical plates beside the raceway, in the raceway's paint: a pair near the base with two
+    // quick-disconnect ports each, a smaller pair near the top with one; a bolt ring round every port (visual
+    // sizes).
+    const umb = (big) => {
+      const plate = box(0.025 * D, (big ? 0.26 : 0.12) * D, (big ? 0.15 : 0.09) * D, R + 0.0125 * D, 0, 0);
       const ub = 0.01 * D;
-      const portBolts = [-0.06, 0.06].map((zf) => boltRing(0.055 * D, 0, 8, ub).rotateZ(Math.PI / 2).translate(R + 0.03 * D + ub / 2, uy, zf * D));
-      out.push(piece(projectUV(merge([umb.clone(), ...portBolts])), mats.steelDark, { ry: -ua, order: 2.2, dir: radial(ua), dist: shellDist * 1.1, edges: true, lineGeo: umb }));
-    }
+      const parts = [plate.clone()];
+      const pr = big ? 0.035 * D : 0.025 * D;
+      for (const py of big ? [-0.065 * D, 0.065 * D] : [0]) {
+        parts.push(new THREE.CylinderGeometry(pr, pr, 0.045 * D, 10).rotateZ(Math.PI / 2).translate(R + 0.04 * D, py, 0));
+        parts.push(boltRing(pr * 1.45, 0, 8, ub).rotateZ(Math.PI / 2).translate(R + 0.025 * D + ub / 2, py, 0));
+      }
+      return [projectUV(merge(parts)), plate];
+    };
+    const [bigGeo, bigPlate] = umb(true);
+    const [smallGeo, smallPlate] = umb(false);
+    const yLo = skirtTop + 0.02 * H + 0.2 * D;
+    const yHi = H - fwdH - 0.02 * H - 0.12 * D;
+    [[rwA + 0.33, yLo, true], [rwA - 0.33, yLo, true], [rwA + 0.33, yHi, false], [rwA - 0.33, yHi, false]].forEach(([ua, uy, big], k) =>
+      P(big ? bigGeo : smallGeo, mats.raceway, { y: uy, ry: -ua, order: 2.2 + k * 0.01, dir: radial(ua), dist: shellDist * 1.1, edges: true, lineGeo: big ? bigPlate : smallPlate }),
+    );
   }
   const fwdRing = machinedRing(R * 0.985, R * 1.008, fwdH, H - fwdH);
-  out.push(piece(merge([fwdRing.clone(), ringBolts(H - fwdH * 0.5)]), mats.machined, { order: 2.5, dir: UP, dist: 0.12, ax: T(1, 0), sym: true, edges: true, lineGeo: fwdRing }));
+  P(merge([fwdRing.clone(), ringBolts(H - fwdH * 0.5)]), mats.machined, { order: 2.5, dir: UP, dist: 0.12, ax: T(1, 0), sym: true, edges: true, lineGeo: fwdRing });
 
   if (g.features.includes("landing-legs")) legs(out, mats, R, H, D, shellDist, skirtH);
   if (g.features.includes("grid-fins")) gridFins(out, mats, R, R, H * 0.985 - fwdH, D, shellDist);
@@ -1449,8 +1824,10 @@ function gridFins(out, mats, rBot, rTop, yTop, D, dist) {
 
 // ---------- interstage ----------
 
-// Four shell quarters, twelve stringers in two pieces, bottom and top machined rings, four separation pushers
-// in one piece (+ Falcon-style grid fins near the top when the lower stage has them).
+// Bottom and top machined joint rings, four stringer sets (three per quarter), eight separation pushers and
+// four separation clamps under the top ring (one lens layer above it), four shell quarters (rivet rows along
+// the seams and joints, instanced), a raceway in two segments (+ Falcon-style grid fins near the top when the
+// lower stage has them, Saturn ullage-motor housings) = 24 pieces before features.
 function buildInterstage(spec, mats) {
   const g = spec.geom;
   const Rb = g.bottomD_m / 2;
@@ -1461,6 +1838,11 @@ function buildInterstage(spec, mats) {
   const ringH = Math.min(0.06 * H, 0.05 * D);
   const shellDist = 0.3 + 0.8 * Math.max(Rb, Rt) * S;
   const out = [];
+  const P = (geo, mat, o) => {
+    const pc = piece(geo, mat, o);
+    out.push(pc);
+    return pc;
+  };
   // Joint rings: machined ring + bolt circle + three stacked thin tori (the lens-barrel look).
   const ib = Math.max(0.02, 0.006 * D);
   const tor = 0.006 * D;
@@ -1473,23 +1855,31 @@ function buildInterstage(spec, mats) {
     return [merge([lines.clone(), boltRing(r * 1.009, y0 + ringH * 0.5, 24, ib, ib, ib * 0.8)]), lines];
   };
   const [lowGeo, lowLines] = jointRing(Rb, 0, true);
-  out.push(piece(lowGeo, mats.machined, { order: 0, dir: DOWN, dist: 0.1, ax: ["i", -1, 0], sym: true, edges: true, lineGeo: lowLines }));
+  P(lowGeo, mats.machined, { order: 0, dir: DOWN, dist: 0.1, ax: ["i", -1, 0], sym: true, edges: true, lineGeo: lowLines });
   const str = [];
-  for (let j = 0; j < 6; j++) {
-    const phi = ((j + 0.5) * Math.PI) / 6;
-    const out_ = radialPhi(phi);
-    const at = (y) => out_.clone().multiplyScalar(rAt(y) - 0.012 * D).setY(y);
-    str.push(strut(at(ringH), at(H - ringH), 0.012 * D, 0.016 * D, out_));
+  for (let j = 0; j < 3; j++) {
+    const o = radialPhi(((j + 0.5) * (Math.PI / 2)) / 3);
+    const atS = (y) => o.clone().multiplyScalar(rAt(y) - 0.012 * D).setY(y);
+    str.push(strut(atS(ringH), atS(H - ringH), 0.012 * D, 0.016 * D, o));
   }
-  const strHalf = merge(str); // half 1 = half 0 turned by π
-  for (let h = 0; h < 2; h++) out.push(piece(strHalf, mats.interior, { ry: h * Math.PI, order: 0.2 + h * 0.02, dir: radialPhi(h * Math.PI + Math.PI / 2), dist: shellDist * 0.6, kind: "interior" }));
-  const pushers = [];
-  for (let k = 0; k < 4; k++) {
-    const a = Math.PI / 4 + (k * TAU) / 4;
+  const strQ = merge(str); // quarter q = quarter 0 turned by q·π/2
+  for (let q = 0; q < 4; q++) P(strQ, mats.interior, { ry: (q * Math.PI) / 2, order: 0.2 + q * 0.02, dir: radialPhi((q * Math.PI) / 2 + Math.PI / 4), dist: shellDist * 0.6, kind: "interior" });
+  // Separation pushers (base flange, cylinder, rod, pad) between the clamps, one shared geometry.
+  const pY = H - ringH - 0.12 * H;
+  const pusher = merge([cyl(0.045 * D, 0.045 * D, 0.012 * H, 12, 0, pY - 0.004 * H), cyl(0.03 * D, 0.03 * D, 0.085 * H, 12, 0, pY), cyl(0.018 * D, 0.018 * D, 0.03 * H, 10, 0, pY + 0.085 * H), cyl(0.03 * D, 0.03 * D, 0.006 * H, 10, 0, pY + 0.114 * H)]);
+  for (let k = 0; k < 8; k++) {
+    const a = ((k + 0.5) * TAU) / 8;
     const r = rAt(H) * 0.82;
-    pushers.push(cyl(0.035 * D, 0.035 * D, 0.12 * H, 12, r * Math.cos(a), H - ringH - 0.12 * H, r * Math.sin(a)), cyl(0.05 * D, 0.05 * D, 0.02 * H, 12, r * Math.cos(a), H - ringH - 0.12 * H, r * Math.sin(a)));
+    P(pusher, mats.actuator, { x: r * Math.cos(a), z: r * Math.sin(a), order: 0.4 + k * 0.004, dir: UP, dist: 0.08, ax: ["i", 1, 1] });
   }
-  out.push(piece(merge(pushers), mats.actuator, { order: 0.4, dir: UP, dist: 0.08, ax: ["i", 1, 1] }));
+  // Separation clamps against the top ring's inner face (block, jaw, tension bolt), built along +X and turned.
+  const yC = H - ringH - 0.035 * H;
+  const rC = rAt(H - ringH) * 0.97 - 0.045 * D;
+  const sepClamp = merge([box(0.05 * D, 0.07 * H, 0.09 * D, 0, yC, 0), box(0.02 * D, 0.05 * H, 0.12 * D, 0.03 * D, yC, 0), cyl(0.014 * D, 0.014 * D, 0.06 * H, 8, -0.02 * D, yC - 0.095 * H, 0)]);
+  for (let k = 0; k < 4; k++) {
+    const a = (k * TAU) / 4;
+    P(sepClamp, mats.steelDark, { x: rC * Math.cos(a), z: rC * Math.sin(a), ry: -a, order: 0.44 + k * 0.004, dir: UP, dist: 0.08, ax: ["i", 1, 1] });
+  }
   const mat = finishMat(mats, g.finish);
   const iq = latheUV(lathe([[rAt(ringH * 0.5), ringH * 0.5], [rAt(H - ringH * 0.5), H - ringH * 0.5]], 24, 0, Math.PI / 2), { phiStart: 0, phiLength: Math.PI / 2, H, R: (Rb + Rt) / 2 });
   // 12 raised external longerons (3 per quarter), drawn as structural lines; the panel seams stay fine.
@@ -1497,17 +1887,42 @@ function buildInterstage(spec, mats) {
   const ribs = [];
   for (let j = 0; j < 3; j++) {
     const o = radialPhi(((j + 0.5) * (Math.PI / 2)) / 3);
-    const at = (y) => o.clone().multiplyScalar(rAt(y) + ribD / 2).setY(y);
-    ribs.push(strut(at(ringH), at(H - ringH), 0.016 * D, ribD, o));
+    const atR = (y) => o.clone().multiplyScalar(rAt(y) + ribD / 2).setY(y);
+    ribs.push(strut(atR(ringH), atR(H - ringH), 0.016 * D, ribD, o));
   }
   const ribGeo = projectUV(merge(ribs));
   const iqRibbed = merge([iq.clone(), ribGeo.clone()]);
+  // Rivets (instanced, shared by the quarters): a row inside each seam, an arc above the bottom ring's tori
+  // and one below the top ring's.
+  const rv = Math.max(0.01, 0.0042 * D);
+  const pitch = 8 * rv;
+  const dl = (0.008 * D) / Math.max(Rb, Rt);
+  const rl = [];
+  const [ya, yb] = [ringH + 0.06 * D, H - ringH - 0.06 * D];
+  for (const phi of [dl, Math.PI / 2 - dl]) {
+    const o = radialPhi(phi);
+    rl.push(...rivetRow(o.clone().multiplyScalar(rAt(ya)).setY(ya), o.clone().multiplyScalar(rAt(yb)).setY(yb), pitch, rv));
+  }
+  for (const y of [ya - 0.012 * D, yb + 0.012 * D]) rl.push(...rivetArc(rAt(y), y, 2 * dl, Math.PI / 2 - 2 * dl, pitch, rv));
+  const rivets = rivetsOn(g.finish) ? instAttr(rl) : null;
   for (let q = 0; q < 4; q++) {
     const ry = (q * Math.PI) / 2;
-    out.push(piece(iqRibbed, mat, { ry, order: 1 + q * 0.02, dir: radialPhi(ry + Math.PI / 4), dist: shellDist, side: DS, kind: "shell", lineGeo: ribGeo, fineGeo: iq }));
+    const pc = P(iqRibbed, mat, { ry, order: 1 + q * 0.02, dir: radialPhi(ry + Math.PI / 4), dist: shellDist, side: DS, kind: "shell", lineGeo: ribGeo, fineGeo: iq });
+    if (rivets) addDetail(pc, "rivet", rivets, { lookOnly: "painted", color: rivetTint(pc.mesh) });
   }
+  // Raceway continuing up the interstage (in line with the tanks'), two segments with merged straps.
+  const rwA = Math.PI / 2;
+  const rwD = 0.025 * D;
+  const rwW = 0.06 * D;
+  const out_ = v3(1, 0, 0);
+  [[ringH + 0.05 * D, H / 2 - 0.01 * H], [H / 2 + 0.01 * H, H - ringH - 0.05 * D]].forEach(([y0, y1], k) => {
+    const plate = strut(v3(rAt(y0) + rwD / 2, y0, 0), v3(rAt(y1) + rwD / 2, y1, 0), rwW, rwD, out_);
+    const straps = [];
+    for (let y = y0 + 0.3; y < y1 - 0.2; y += 0.9) straps.push(strut(v3(rAt(y) + rwD * 0.85, y - 0.04, 0), v3(rAt(y) + rwD * 0.85, y + 0.04, 0), rwW * 1.4, rwD * 1.7, out_));
+    P(projectUV(merge([plate.clone(), ...straps])), mats.raceway, { ry: -rwA, order: 1.3 + k * 0.01, dir: radial(rwA, k ? 0.12 : -0.12), dist: shellDist * 1.1, edges: true, lineGeo: plate });
+  });
   const [topGeo, topLines] = jointRing(Rt, H - ringH, false);
-  out.push(piece(topGeo, mats.machined, { order: 2, dir: UP, dist: 0.1, ax: ["i", 1, 0], sym: true, edges: true, lineGeo: topLines }));
+  P(topGeo, mats.machined, { order: 2, dir: UP, dist: 0.1, ax: ["i", 1, 0], sym: true, edges: true, lineGeo: topLines });
   if (g.features?.includes("grid-fins")) {
     const yTop = H - ringH - 0.04 * H;
     gridFins(out, mats, rAt(yTop - 0.4 * D), rAt(yTop), yTop, D, shellDist);
@@ -1524,7 +1939,7 @@ function buildInterstage(spec, mats) {
       housings.push(projectUV(lathe(prof, 12, -Math.PI / 2, Math.PI).translate(0, y, 0).translate(rAt(y + hh / 2) - 0.2 * hr, 0, 0).rotateY(-a)));
       housings.push(projectUV(new THREE.CylinderGeometry(hr * 0.55, hr * 0.75, 0.06 * hh, 12, 1, true).translate(rAt(y) + 0.45 * hr, y - 0.03 * hh, 0).rotateY(-a)));
     }
-    out.push(piece(merge(housings), mats.trim, { order: 1.5, dir: UP, dist: shellDist * 1.1, side: DS, edges: true }));
+    P(merge(housings), mats.trim, { order: 1.5, dir: UP, dist: shellDist * 1.1, side: DS, edges: true });
   }
   return out;
 }
@@ -1557,8 +1972,13 @@ function buildPayload(spec, mats) {
   const y0 = g.adapterH_m;
   const R = g.D_m / 2;
   const H = g.H_m;
-  // P(geo, mat, { order, dir, dist, side, ax: [side, rank], sym, kind }) — ax defaults to the core.
-  const P = (geo, mat, { ax = [0, 0], ...o } = {}) => out.push(piece(geo, mat, { order: 1, dir: UP, dist: 0.35, ...o, ax: ["p", ...ax] }));
+  // P(geo, mat, { order, dir, dist, side, ax: [side, rank], sym, kind }) — ax defaults to the core; returns the
+  // piece (for instanced detail).
+  const P = (geo, mat, { ax = [0, 0], ...o } = {}) => {
+    const pc = piece(geo, mat, { order: 1, dir: UP, dist: 0.35, ...o, ax: ["p", ...ax] });
+    out.push(pc);
+    return pc;
+  };
   const isWebb = /jwst|webb/.test(spec.record?.id ?? "");
   switch (g.archetype) {
     case "telescope":
@@ -1613,9 +2033,12 @@ function nozzle(at, dir, len, r) {
   return new THREE.CylinderGeometry(r * 0.35, r, len, 10, 1, true).translate(0, len / 2, 0).applyQuaternion(new THREE.Quaternion().setFromUnitVectors(UP, dir.clone().normalize())).translate(at.x, at.y, at.z);
 }
 
-// Telescope (Hubble): aft shroud with bay doors and handrails, the light-shield tube with ring frames and
-// handrails, the aperture door on its hinge, two thin solar wings on masts.
+// Telescope (Hubble): aft bulkhead, aft shroud with bay doors, its trunnion pins, the light-shield tube with
+// ring frames and handrails, two thin solar wings on masts with their drive bases, two high-gain antennas
+// folded along the tube, two magnetometers, the aperture door on its hinge bracket.
 function telescope(P, mats, R, H, y0) {
+  const ribs = [...Array(8).keys()].map((k) => box(0.9 * R, 0.012 * H, 0.025 * R, 0.45 * R, y0 + 0.004 * H, 0).rotateY((-k * TAU) / 8));
+  P(projectUV(merge([cyl(0.95 * R, 0.95 * R, 0.012 * H, 32, 0, y0 + 0.008 * H), ...ribs])), mats.darkMetal, { order: 0.98, dist: 0.18, ax: [-1, 1], sym: true });
   const doors = [];
   for (let k = 0; k < 8; k++) {
     const a = ((k + 0.5) * TAU) / 8;
@@ -1623,6 +2046,9 @@ function telescope(P, mats, R, H, y0) {
   }
   const shroud = projectUV(cyl(R * 0.97, R * 0.97, 0.36 * H, 12, 0, y0));
   P(projectUV(merge([shroud.clone(), ...doors])), mats.mliSilver, { order: 1, dist: 0.2, ax: [-1, 0], sym: true, kind: "shell", lineGeo: shroud });
+  // trunnion pins between the bay doors (the shuttle-bay latches), stopping inside the envelope
+  const pins = [0, 1, 2, 3].map((k) => new THREE.CylinderGeometry(0.03 * R, 0.03 * R, 0.05 * R, 10).rotateZ(Math.PI / 2).translate(0.975 * R, y0 + 0.3 * H, 0).rotateY((-k * TAU) / 4 - Math.PI / 4));
+  P(projectUV(merge(pins)), mats.machined, { order: 1.01, dist: 0.25, ax: [-1, 0] });
   const tubeRings = [0.3, 0.55, 0.8, 0.94].map((f) => projectUV(new THREE.TorusGeometry(R * 0.745, 0.006 * R, 4, 32).rotateX(Math.PI / 2).translate(0, y0 + 0.36 * H + f * 0.6 * H, 0)));
   const rails = [0, 1, 2, 3].map((k) => {
     const a = (k * TAU) / 4 + 0.3;
@@ -1646,7 +2072,24 @@ function telescope(P, mats, R, H, y0) {
       // unfold 90° about the bottom inner edge so the array points out along ±Z (axis ±X turns +Y toward ±Z)
       deploy: { axis: v3(s, 0, 0), pivot: v3(0, y0 + 0.37 * H, s * 0.7 * R), angle: Math.PI / 2, order: 1 },
     });
+    // the wing's drive base on the shroud's rim (does not deploy)
+    P(projectUV(merge([box(0.14 * R, 0.03 * H, 0.12 * R, 0, y0 + 0.36 * H, s * 0.82 * R), cyl(0.03 * R, 0.03 * R, 0.02 * H, 10, 0, y0 + 0.375 * H, s * 0.82 * R)])), mats.darkMetal, { order: 1.19 + (s > 0 ? 0 : 0.02), dir: v3(0, 0.2, s), dist: 0.3 });
   }
+  // high-gain antennas folded along the tube at ±X: a boom, its hinge block and a dish facing out
+  const hgaDish = [];
+  for (let i = 0; i <= 8; i++) hgaDish.push([0.15 * R * (i / 8), 0.035 * R * (i / 8) ** 2]);
+  for (const sx of [1, -1]) {
+    const x = sx * 0.83 * R;
+    const dish = lathe(hgaDish, 20).rotateZ((-sx * Math.PI) / 2).translate(x + sx * 0.04 * R, y0 + 0.82 * H, 0);
+    P(projectUV(merge([cyl(0.015 * R, 0.015 * R, 0.37 * H, 8, x, y0 + 0.45 * H, 0), box(0.06 * R, 0.03 * H, 0.06 * R, x - sx * 0.05 * R, y0 + 0.45 * H, 0), dish])), mats.trim, { order: 1.15 + (sx > 0 ? 0 : 0.005), dir: v3(sx, 0.4, 0), dist: 0.45, side: DS });
+  }
+  // magnetometers near the top of the light shield
+  [Math.PI / 4, (5 * Math.PI) / 4].forEach((a, k) => {
+    const o = radial(a);
+    P(projectUV(box(0.08 * R, 0.05 * H, 0.08 * R, o.x * 0.79 * R, y0 + 0.9 * H, o.z * 0.79 * R)), mats.mliSilver, { order: 1.3 + k * 0.005, dir: radial(a, 0.5), dist: 0.5 });
+  });
+  // the door's hinge bracket on the tube rim (fixed; the door swings above it)
+  P(projectUV(merge([box(0.06 * R, 0.05 * H, 0.22 * R, 0.77 * R, y0 + 0.93 * H, 0), box(0.1 * R, 0.01 * H, 0.06 * R, 0.79 * R, y0 + 0.95 * H, 0.08 * R), box(0.1 * R, 0.01 * H, 0.06 * R, 0.79 * R, y0 + 0.95 * H, -0.08 * R)])), mats.darkMetal, { order: 1.38, dir: v3(1, 0.4, 0), dist: 0.5 });
   const door = merge([cyl(R * 0.77, R * 0.77, 0.025 * H, 40, 0, y0 + 0.96 * H), box(0.12 * R, 0.04 * H, 0.2 * R, R * 0.74, y0 + 0.965 * H, 0)]);
   P(projectUV(merge([door.clone(), new THREE.TorusGeometry(R * 0.6, 0.012 * R, 6, 40).rotateX(Math.PI / 2).translate(0, y0 + 0.987 * H, 0)])), mats.machined, {
     order: 1.4,
@@ -1659,11 +2102,19 @@ function telescope(P, mats, R, H, y0) {
   });
 }
 
-// Stowed JWST: spacecraft bus at the base, two folded sunshield pallets (stacked membranes in a frame), the
-// primary mirror of 18 gold hexagonal segments (the centre section facing out, the two three-segment wings
-// folded back), its black backplane and the folded secondary-mirror struts.
+// Stowed JWST: spacecraft bus at the base with its folded solar panel, high-gain antenna, momentum flap and
+// star trackers; two folded sunshield pallets (stacked membranes in a frame); the primary mirror of 18 gold
+// hexagonal segments (the centre section facing out, the two three-segment wings folded back); its black
+// backplane with the instrument radiators behind it; the aft optics bench; the folded secondary-mirror struts
+// and the secondary mirror.
 function webb(P, mats, R, H, y0) {
   P(projectUV(box(1.1 * R, 0.16 * H, 1.1 * R, 0, y0 + 0.08 * H)), mats.gold, { order: 1, dist: 0.2, ax: [-1, 0] });
+  P(projectUV(box(0.9 * R, 0.12 * H, 0.02 * R, 0, y0 + 0.08 * H, -0.565 * R)), mats.panel, { order: 1.01, dir: v3(0, -0.2, -1), dist: 0.3, ax: [-1, 0] });
+  const hga = [];
+  for (let i = 0; i <= 8; i++) hga.push([0.16 * R * (i / 8), 0.04 * R * (i / 8) ** 2]);
+  P(projectUV(merge([lathe(hga, 20).rotateX(Math.PI / 2).translate(0.25 * R, y0 + 0.08 * H, 0.6 * R), new THREE.CylinderGeometry(0.02 * R, 0.02 * R, 0.06 * R, 8).rotateX(Math.PI / 2).translate(0.25 * R, y0 + 0.08 * H, 0.575 * R)])), mats.trim, { order: 1.02, dir: v3(0, -0.2, 1), dist: 0.3, side: DS, ax: [-1, 0] });
+  P(projectUV(box(0.5 * R, 0.05 * H, 0.015 * R, 0, y0 + 0.185 * H, -0.56 * R)), mats.mliSilver, { order: 1.03, dir: v3(0, 0.3, -1), dist: 0.35 });
+  P(projectUV(merge([box(0.1 * R, 0.04 * H, 0.1 * R, 0.4 * R, y0 + 0.18 * H, -0.42 * R), box(0.1 * R, 0.04 * H, 0.1 * R, -0.4 * R, y0 + 0.18 * H, -0.42 * R)])), mats.darkMetal, { order: 1.04, dist: 0.3 });
   // Hex segments, flat-topped: column spacing 1.5 s, row spacing √3 s; rings 1-2 around an empty centre.
   const sH = 0.19 * R;
   const zc = 0.24 * R;
@@ -1695,29 +2146,34 @@ function webb(P, mats, R, H, y0) {
     const frame = [box(0.14 * R, 0.02 * H, 1.1 * R, s * 0.72 * R, y0 + 0.17 * H, 0), box(0.14 * R, 0.02 * H, 1.1 * R, s * 0.72 * R, y0 + 0.77 * H, 0)];
     P(projectUV(merge([...layers, ...frame])), mats.mliSilver, { order: 1.2 + (s > 0 ? 0 : 0.02), dir: v3(s, 0.3, 0), dist: 0.45, edges: true, lineGeo: merge(frame), deploy });
   }
-  P(
-    projectUV(
-      merge([
-        box(5 * sH, 5 * Math.sqrt(3) * sH, 0.08 * R, 0, yc, zc - 0.07 * R), // backplane, just behind the segments
-        box(0.5 * R, 0.3 * H, 0.4 * R, 0, y0 + 0.16 * H + 0.15 * H, -0.2 * R), // aft optics bench
-        cyl(0.04 * R, 0.04 * R, 0.16 * H, 8, -0.3 * R, y0 + 0.82 * H, 0.3 * R),
-        cyl(0.04 * R, 0.04 * R, 0.16 * H, 8, 0.3 * R, y0 + 0.82 * H, 0.3 * R),
-        cyl(0.18 * R, 0.18 * R, 0.02 * H, 24, 0, y0 + 0.96 * H, 0.3 * R),
-      ]),
-    ),
-    mats.darkMetal,
-    { order: 1.3, dist: 0.7, ax: [1, 0] },
-  );
+  P(projectUV(box(5 * sH, 5 * Math.sqrt(3) * sH, 0.08 * R, 0, yc, zc - 0.07 * R)), mats.darkMetal, { order: 1.12, dir: v3(0, 0.2, -1), dist: 0.45 }); // backplane, just behind the segments
+  P(projectUV(merge([box(0.6 * R, 0.1 * H, 0.015 * R, 0, yc - 0.12 * H, zc - 0.13 * R), box(0.6 * R, 0.1 * H, 0.015 * R, 0, yc + 0.12 * H, zc - 0.13 * R)])), mats.metal, { order: 1.13, dir: v3(0, 0.1, -1), dist: 0.55 }); // instrument radiators
+  P(projectUV(box(0.5 * R, 0.3 * H, 0.4 * R, 0, y0 + 0.16 * H + 0.15 * H, -0.2 * R)), mats.darkMetal, { order: 1.14, dist: 0.4 }); // aft optics bench
+  P(projectUV(merge([cyl(0.04 * R, 0.04 * R, 0.16 * H, 8, -0.3 * R, y0 + 0.82 * H, 0.3 * R), cyl(0.04 * R, 0.04 * R, 0.16 * H, 8, 0.3 * R, y0 + 0.82 * H, 0.3 * R)])), mats.darkMetal, { order: 1.3, dist: 0.7, ax: [1, 0] }); // secondary-mirror struts
+  P(projectUV(cyl(0.18 * R, 0.18 * R, 0.02 * H, 24, 0, y0 + 0.96 * H, 0.3 * R)), mats.mirror, { order: 1.31, dist: 0.8, ax: [1, 1], sym: true }); // secondary mirror
 }
 
-// Weather satellite (GOES-R): base ring with thrusters, the blanketed box bus, one large solar wing (five
-// framed panels on a yoke), the magnetometer boom as a folded lattice with its canister, the instrument deck
-// with apertures, and the dish.
+// Weather satellite (GOES-R): base ring (bolt circle instanced) with two thruster pods at the bus corners, the
+// blanketed box bus with radiator panels on two faces, one large solar wing (five framed panels on a yoke) on
+// its drive, the magnetometer boom as a folded lattice with its canister, the instrument deck with its
+// apertures, the imager with its sunshade, the lightning mapper, star trackers, two omni antennas, the dish.
 function weatherSat(P, mats, R, H, y0) {
   const s = 1.25 * R; // square bus inside the envelope (corner at 0.88 R)
-  const nozzles = [0, 1, 2, 3].map((k) => lathe([[0.05 * R, 0], [0.025 * R, 0.03 * H], [0.03 * R, 0.035 * H]], 12).translate(0.35 * R * Math.cos((k * TAU) / 4 + Math.PI / 4), y0 + 0.002 * H, 0.35 * R * Math.sin((k * TAU) / 4 + Math.PI / 4)));
-  P(projectUV(merge([cyl(0.5 * R, 0.5 * R, 0.08 * H, 32, 0, y0), ...nozzles])), mats.machined, { order: 1, dist: 0.15, ax: [-1, 0], sym: true });
+  const base = P(projectUV(merge([cyl(0.5 * R, 0.5 * R, 0.08 * H, 32, 0, y0), cyl(0.53 * R, 0.53 * R, 0.012 * H, 32, 0, y0 + 0.068 * H)])), mats.machined, { order: 1, dist: 0.15, ax: [-1, 0], sym: true });
+  addDetail(base, "bolt", boltCircle(0.515 * R, y0 + 0.08 * H, 24, 0.014 * R));
+  for (const sg of [1, -1]) {
+    // a thruster pod at a lower bus corner: block, one nozzle down, one canted out
+    const c = v3(sg * 0.66 * R, y0 + 0.12 * H, sg * 0.66 * R);
+    const o = v3(sg, 0, sg).normalize();
+    const pod = merge([box(0.09 * R, 0.05 * H, 0.09 * R, c.x, c.y, c.z), nozzle(c.clone().add(v3(0, -0.025 * H, 0)), DOWN, 0.04 * H, 0.03 * R), nozzle(c.clone().addScaledVector(o, 0.045 * R), o.clone().add(v3(0, -0.3, 0)), 0.035 * H, 0.025 * R)].map(indexed));
+    P(projectUV(pod), mats.darkMetal, { order: 1.02 + (sg > 0 ? 0 : 0.005), dir: v3(sg, -0.4, sg), dist: 0.25, side: DS });
+  }
   P(projectUV(box(s, 0.55 * H, s, 0, y0 + 0.08 * H + 0.275 * H)), mats.gold, { order: 1.1, dist: 0.3, kind: "shell" });
+  for (const sz of [1, -1]) {
+    // radiator panel (three ribs) on a ±Z face
+    const z = sz * (s / 2 + 0.008 * R);
+    P(projectUV(merge([box(0.9 * s, 0.4 * H, 0.012 * R, 0, y0 + 0.36 * H, z), ...[0, 1, 2].map((k) => box(0.9 * s, 0.006 * H, 0.02 * R, 0, y0 + 0.2 * H + k * 0.16 * H, z + sz * 0.006 * R))])), mats.metal, { order: 1.12 + (sz > 0 ? 0 : 0.005), dir: v3(0, 0.25, sz), dist: 0.4 });
+  }
   // solar wing: five panels up the hinge line with small gaps, a frame and a yoke down to the hinge
   const wing = [];
   const panelH = (0.8 * H - 4 * 0.012 * H) / 5;
@@ -1733,7 +2189,9 @@ function weatherSat(P, mats, R, H, y0) {
     // the wing unfolds 90° about its bottom edge on the bus side (axis −Z turns +Y toward +X)
     deploy: { axis: v3(0, 0, -1), pivot: v3(0.625 * R, y0 + 0.1 * H, 0), angle: Math.PI / 2, order: 0 },
   });
-  // magnetometer boom: a triangular lattice (three longerons, zigzag bracing), canister at the top
+  // the wing's drive (fixed, at the hinge on the bus face)
+  P(projectUV(merge([box(0.07 * R, 0.07 * H, 0.32 * R, 0.6 * R, y0 + 0.115 * H, 0), new THREE.CylinderGeometry(0.06 * R, 0.06 * R, 0.08 * R, 14).rotateZ(Math.PI / 2).translate(0.655 * R, y0 + 0.115 * H, 0)])), mats.darkMetal, { order: 1.19, dir: v3(1, 0.1, 0), dist: 0.3 });
+  // magnetometer boom: a triangular lattice (three longerons, zigzag bracing); its canister on top
   const boom = [];
   const bx = -0.66 * R;
   const br = 0.035 * R;
@@ -1747,11 +2205,20 @@ function weatherSat(P, mats, R, H, y0) {
     const yb = yb0 + ((yb1 - yb0) * (k + 1)) / bays;
     for (let i = 0; i < 3; i++) boom.push(rod(corner(i, ya), corner((i + 1) % 3, yb), 0.0035 * R, 1));
   }
-  boom.push(cyl(0.045 * R, 0.045 * R, 0.06 * H, 12, bx, yb1));
   P(projectUV(merge(boom)), mats.darkMetal, { order: 1.25, dir: v3(-1, 0.3, 0), dist: 0.4 });
+  P(projectUV(merge([cyl(0.045 * R, 0.045 * R, 0.06 * H, 12, bx, yb1), cyl(0.05 * R, 0.05 * R, 0.008 * H, 12, bx, yb1 + 0.06 * H)])), mats.mliSilver, { order: 1.26, dir: v3(-1, 0.6, 0), dist: 0.5 });
   const aperture = (z, r) => new THREE.CylinderGeometry(r, r, 0.08 * R, 24).rotateX(Math.PI / 2).translate(-0.15 * R, y0 + 0.75 * H, z);
   const deck = box(0.9 * R, 0.25 * H, 0.7 * R, -0.05 * R, y0 + 0.63 * H + 0.125 * H, 0);
   P(projectUV(merge([deck.clone(), aperture(0.37 * R, 0.12 * R), aperture(-0.37 * R, 0.08 * R)])), mats.mliSilver, { order: 1.3, dist: 0.5, ax: [1, 0], edges: true, lineGeo: deck });
+  // on the deck: the imager with its sunshade and aperture, the lightning mapper, two star trackers on the
+  // deck's −Z face, two omni antennas on masts
+  P(projectUV(merge([box(0.3 * R, 0.08 * H, 0.26 * R, -0.25 * R, y0 + 0.92 * H, -0.12 * R), box(0.32 * R, 0.012 * H, 0.06 * R, -0.25 * R, y0 + 0.966 * H, -0.24 * R), new THREE.CylinderGeometry(0.07 * R, 0.07 * R, 0.03 * R, 18).rotateX(Math.PI / 2).translate(-0.25 * R, y0 + 0.92 * H, 0.02 * R)])), mats.trim, { order: 1.32, dist: 0.55, ax: [1, 0] });
+  const tracker = (x) => merge([box(0.08 * R, 0.08 * R, 0.08 * R, x, y0 + 0.8 * H, -0.39 * R), lathe([[0.025 * R, 0], [0.04 * R, 0.06 * R]], 10).rotateX(-Math.PI / 2).translate(x, y0 + 0.8 * H, -0.43 * R)]);
+  P(projectUV(merge([tracker(-0.3 * R), tracker(-0.1 * R)])), mats.darkMetal, { order: 1.33, dist: 0.5, side: DS, ax: [1, 0] });
+  P(projectUV(merge([box(0.14 * R, 0.06 * H, 0.12 * R, 0.05 * R, y0 + 0.91 * H, -0.2 * R), cyl(0.04 * R, 0.04 * R, 0.02 * H, 14, 0.05 * R, y0 + 0.94 * H, -0.2 * R)])), mats.mliSilver, { order: 1.335, dist: 0.55, ax: [1, 0] });
+  const omni = (x, z) => merge([cyl(0.008 * R, 0.008 * R, 0.06 * H, 6, x, y0 + 0.88 * H, z), lathe([[0.035 * R, 0], [0.012 * R, 0.035 * H], [0.001, 0.04 * H]], 10).translate(x, y0 + 0.94 * H, z)]);
+  P(projectUV(omni(-0.45 * R, 0.28 * R)), mats.metal, { order: 1.34, dist: 0.6, ax: [1, 0] });
+  P(projectUV(omni(0.38 * R, -0.3 * R)), mats.metal, { order: 1.345, dist: 0.6, ax: [1, 0] });
   const dish = [];
   for (let i = 0; i <= 10; i++) dish.push([0.28 * R * (i / 10), 0.06 * H * (i / 10) ** 2]);
   // dish tilts out 60° about its base (axis +X turns +Y toward +Z, away from the deck)
@@ -1764,9 +2231,11 @@ function weatherSat(P, mats, R, H, y0) {
   });
 }
 
-// Lander (Nova-C): main engine, two propellant tanks (domes above the top deck), the hexagonal body in gold
-// MLI, solar panels on three faces, top deck with the dish, six RCS clusters at the corners, six legs (one
-// piece each, splaying about their own hinge) with a footpad on a ball joint, level once deployed.
+// Lander (Nova-C): main engine on its thrust ring, two propellant tanks and their domes above the top deck, the
+// hexagonal body in gold MLI, three solar panels on alternate faces, the laser rangefinder and cameras on
+// another, the top deck with the antenna mast and dish and a star tracker, six RCS clusters at the corners,
+// six legs (one piece each, splaying about their own hinge) with a footpad on a ball joint, level once
+// deployed.
 function lander(P, mats, R, H, y0) {
   const rb = 0.62 * R;
   const bell = [];
@@ -1776,31 +2245,44 @@ function lander(P, mats, R, H, y0) {
   }
   bell.push([0.1 * R, 0.15 * H], [0.1 * R, 0.17 * H], [0.06 * R, 0.18 * H]);
   P(projectUV(lathe(bell, 28).translate(0, y0 + 0.12 * H, 0)), mats.darkMetal, { order: 0.9, dist: 0.25, side: DS, ax: [-1, 0], sym: true });
-  const ts = 0.26 * R;
-  const domes = [-1, 1].map((sx) => new THREE.SphereGeometry(0.16 * R, 20, 8, 0, TAU, 0, Math.PI / 2).translate(sx * 0.27 * R, y0 + 0.9 * H, -0.15 * R));
-  P(merge([new THREE.SphereGeometry(ts, 20, 14).translate(0.3 * R, y0 + 0.5 * H, 0), new THREE.SphereGeometry(ts, 20, 14).translate(-0.3 * R, y0 + 0.5 * H, 0), ...domes]), mats.interior, { order: 0.95, dist: 0.15, kind: "interior" });
-  P(projectUV(cyl(rb, rb, 0.5 * H, 6, 0, y0 + 0.28 * H)), mats.gold, { order: 1, dist: 0.35, kind: "shell" });
-  const faces = [];
-  for (let i = 0; i < 3; i++) {
-    const a = ((2 * i + 0.5) * TAU) / 6;
-    faces.push(box(0.02 * R, 0.4 * H, rb * 0.85, rb * Math.cos(Math.PI / 6) + 0.012 * R, y0 + 0.53 * H, 0).rotateY(-a));
+  const mount = [new THREE.TorusGeometry(0.13 * R, 0.015 * R, 6, 24).rotateX(Math.PI / 2).translate(0, y0 + 0.27 * H, 0)];
+  for (let k = 0; k < 4; k++) {
+    const a = ((k + 0.5) * TAU) / 4;
+    mount.push(rod(v3(0.13 * R * Math.cos(a), y0 + 0.27 * H, 0.13 * R * Math.sin(a)), v3(0.45 * R * Math.cos(a), y0 + 0.285 * H, 0.45 * R * Math.sin(a)), 0.012 * R, 1));
   }
-  P(projectUV(merge(faces)), mats.panel, { order: 1.1, dist: 0.4 });
+  P(projectUV(merge(mount)), mats.darkMetal, { order: 0.91, dist: 0.2, sym: true });
+  const ts = 0.26 * R;
+  for (const sx of [1, -1]) P(new THREE.SphereGeometry(ts, 20, 14).translate(sx * 0.3 * R, y0 + 0.5 * H, 0), mats.interior, { order: 0.95 + (sx > 0 ? 0 : 0.005), dir: v3(sx, 0.4, 0), dist: 0.15, kind: "interior" });
+  for (const sx of [-1, 1]) P(new THREE.SphereGeometry(0.16 * R, 20, 8, 0, TAU, 0, Math.PI / 2).translate(sx * 0.27 * R, y0 + 0.9 * H, -0.15 * R), mats.interior, { order: 1.36 + (sx > 0 ? 0.005 : 0), dir: v3(sx, 1, 0), dist: 0.3, kind: "interior" });
+  P(projectUV(cyl(rb, rb, 0.5 * H, 6, 0, y0 + 0.28 * H)), mats.gold, { order: 1, dist: 0.35, kind: "shell" });
+  // Hex faces (CylinderGeometry corners at x = r sin a, z = r cos a, so face centres at azimuth 0°, 60°, …):
+  // panels on three alternate faces, the rangefinder box on another.
+  const apothem = rb * Math.cos(Math.PI / 6);
+  [0, 1, 2].forEach((i) => {
+    const a = (i * TAU) / 3;
+    P(projectUV(box(0.02 * R, 0.4 * H, rb * 0.85, apothem + 0.012 * R, y0 + 0.53 * H, 0).rotateY(-a)), mats.panel, { order: 1.1 + i * 0.005, dir: radial(a, 0.3), dist: 0.4 });
+  });
+  {
+    const a = Math.PI / 3;
+    const lidar = merge([box(0.06 * R, 0.07 * H, 0.12 * R, apothem + 0.03 * R, y0 + 0.42 * H, 0), new THREE.CylinderGeometry(0.03 * R, 0.03 * R, 0.03 * R, 12).rotateZ(Math.PI / 2).translate(apothem + 0.07 * R, y0 + 0.43 * H, 0.02 * R), new THREE.CylinderGeometry(0.02 * R, 0.02 * R, 0.03 * R, 10).rotateZ(Math.PI / 2).translate(apothem + 0.07 * R, y0 + 0.41 * H, -0.035 * R)]);
+    P(projectUV(lidar.rotateY(-a)), mats.darkMetal, { order: 1.12, dir: radial(a, 0.2), dist: 0.45 });
+  }
   const dish = [];
   for (let i = 0; i <= 8; i++) dish.push([0.2 * R * (i / 8), 0.05 * H * (i / 8) ** 2]);
-  const deck = cyl(0.4 * R, 0.45 * R, 0.12 * H, 6, 0, y0 + 0.78 * H);
-  P(projectUV(merge([deck.clone(), cyl(0.015 * R, 0.015 * R, 0.03 * H, 8, 0, y0 + 0.9 * H, 0.24 * R), lathe(dish, 24).translate(0, y0 + 0.93 * H, 0.24 * R)])), mats.gold, { order: 1.3, dist: 0.6, ax: [1, 0], edges: true, lineGeo: deck });
-  // RCS: a block at each hex corner with thrusters up, down and to both sides.
-  const rcs = [];
+  P(projectUV(cyl(0.4 * R, 0.45 * R, 0.12 * H, 6, 0, y0 + 0.78 * H)), mats.gold, { order: 1.3, dist: 0.6, ax: [1, 0], edges: true });
+  P(projectUV(cyl(0.015 * R, 0.015 * R, 0.03 * H, 8, 0, y0 + 0.9 * H, 0.24 * R)), mats.metal, { order: 1.31, dist: 0.65, ax: [1, 0] });
+  P(projectUV(lathe(dish, 24).translate(0, y0 + 0.93 * H, 0.24 * R)), mats.trim, { order: 1.315, dist: 0.7, side: DS, ax: [1, 1] });
+  P(projectUV(merge([box(0.07 * R, 0.04 * H, 0.07 * R, -0.25 * R, y0 + 0.92 * H, 0.2 * R), lathe([[0.02 * R, 0], [0.035 * R, 0.03 * H]], 10).translate(-0.25 * R, y0 + 0.94 * H, 0.2 * R)])), mats.darkMetal, { order: 1.32, dist: 0.6, side: DS, ax: [1, 0] });
+  // RCS: a block at each hex corner with thrusters up, down and to both sides, one piece per corner.
   for (let k = 0; k < 6; k++) {
     const a = (k * TAU) / 6; // CylinderGeometry corners: x = r sin a, z = r cos a
     const o = v3(Math.sin(a), 0, Math.cos(a));
     const t = v3(Math.cos(a), 0, -Math.sin(a));
     const c = o.clone().multiplyScalar(rb + 0.03 * R).setY(y0 + 0.74 * H);
     const n = 0.05 * R;
-    rcs.push(indexed(box(0.06 * R, 0.06 * R, 0.06 * R, c.x, c.y, c.z)), nozzle(c.clone().addScaledVector(UP, 0.03 * R), UP, n, 0.018 * R), nozzle(c.clone().addScaledVector(DOWN, 0.03 * R), DOWN, n, 0.018 * R), nozzle(c.clone().addScaledVector(t, 0.03 * R), t, n, 0.016 * R), nozzle(c.clone().addScaledVector(t, -0.03 * R), t.clone().negate(), n, 0.016 * R));
+    const rcs = [indexed(box(0.06 * R, 0.06 * R, 0.06 * R, c.x, c.y, c.z)), nozzle(c.clone().addScaledVector(UP, 0.03 * R), UP, n, 0.018 * R), nozzle(c.clone().addScaledVector(DOWN, 0.03 * R), DOWN, n, 0.018 * R), nozzle(c.clone().addScaledVector(t, 0.03 * R), t, n, 0.016 * R), nozzle(c.clone().addScaledVector(t, -0.03 * R), t.clone().negate(), n, 0.016 * R)];
+    P(projectUV(merge(rcs)), mats.darkMetal, { order: 1.33 + k * 0.002, dir: v3(o.x, 0.2, o.z), dist: 0.5, side: DS });
   }
-  P(projectUV(merge(rcs)), mats.darkMetal, { order: 1.32, dist: 0.5, side: DS });
   const splay = (35 * Math.PI) / 180;
   for (let i = 0; i < 6; i++) {
     const a = ((i + 0.5) * TAU) / 6;
@@ -1822,12 +2304,14 @@ function lander(P, mats, R, H, y0) {
   }
 }
 
-// Apollo-style stack from visuals dims (sourced) or visual fallbacks: spacecraft-LM adapter panels (stage D
-// → CSM D, ring frames and longerons inside) around the folded lander (octagonal descent stage in gold and
-// black foil with its legs folded, faceted ascent stage) and the SPS bell, the service module (radiator panels,
-// four RCS quads), the command module in silver foil, and the launch escape system above the envelope when its
-// height is sourced (a lattice tower and the motor with its nozzles, canards and nose; placing it on the CM is
-// a visual choice).
+// Apollo-style stack from visuals dims (sourced) or visual fallbacks: equipment boxes inside the instrument
+// ring; spacecraft-LM adapter panels (stage D → CSM D, ring frames and longerons inside) on their hinge
+// brackets, around the folded lander (octagonal descent stage in gold and black foil with its legs folded,
+// faceted ascent stage) and the SPS bell with its two gimbal actuators; the service module (body, aft heat
+// shield, two radiator panels, four RCS quads, joint bolt rings, the folded high-gain antenna); the command
+// module in silver foil on its heat shield with the umbilical fairing; and the launch escape system above the
+// envelope when its height is sourced (a lattice tower, the escape motor with its four nozzles, the jettison
+// motor, the canard section and the nose; placing it on the CM is a visual choice).
 function capsule(P, mats, g, y0) {
   const H = g.H_m;
   const dims = g.dims ?? {};
@@ -1842,6 +2326,11 @@ function capsule(P, mats, g, y0) {
   smH *= k;
   cmH *= k;
   const spsH = Math.min(dims.sm_bell_height_m ?? 0.3 * slaH, 0.45 * slaH);
+  // Instrument-ring equipment: eight boxes round its inner wall (moves with the ring in the lens view).
+  const Rt = g.stageD_m / 2;
+  const iu = [];
+  for (let i = 0; i < 8; i++) iu.push(box(0.035 * Rt, 0.55 * y0, 0.16 * Rt, Rt * 0.9, 0.5 * y0, 0).rotateY((-(i + 0.5) * TAU) / 8));
+  P(projectUV(merge(iu)), mats.darkMetal, { order: 0.05, dir: DOWN, dist: 0.12, ax: [-1, 9] });
   // Lander folded inside the adapter, below the SPS bell (only seen when the panels open).
   const rIn = (y) => lerp(Rb, Rs, y / slaH);
   const lmTop = Math.min(0.62 * slaH, slaH - spsH - 0.05 * slaH);
@@ -1901,8 +2390,16 @@ function capsule(P, mats, g, y0) {
     const deploy = { axis: v3(Math.cos(Math.PI / 4), 0, -Math.sin(Math.PI / 4)), pivot: o.clone().multiplyScalar(Rb).setY(y0), angle: Math.PI / 4, order: 0 };
     P(sla, mats.silver, { ry, order: 1 + q * 0.02, dir: radialPhi(ry + Math.PI / 4, 0.4), dist: 0.25 + 0.5 * Rb * S, side: DS, ax: [-1, 3], kind: "shell", lineGeo: slaSkin, deploy });
   }
+  // the petals' hinge brackets on the ring at their feet (fixed; one piece for the four)
+  const hinges = [];
+  for (let q = 0; q < 4; q++) {
+    const o = radialPhi((q * Math.PI) / 2 + Math.PI / 4);
+    hinges.push(box(0.05 * Rb, 0.03 * slaH, 0.16 * Rb, Rb * 0.96, y0 + 0.015 * slaH, 0).rotateY((q * Math.PI) / 2 + Math.PI / 4 - Math.PI / 2), cyl(0.015 * Rb, 0.015 * Rb, 0.03 * slaH, 8, o.x * Rb * 0.93, y0, o.z * Rb * 0.93));
+  }
+  P(projectUV(merge(hinges)), mats.darkMetal, { order: 1.09, dist: 0.25, ax: [-1, 3] });
   const ySm = y0 + slaH;
-  // SPS: a long bell (exit at the bottom), throat, chamber, and the gimbal ring under the SM
+  // SPS: a long bell (exit at the bottom), throat, chamber, and the gimbal ring under the SM; two gimbal
+  // actuators from the aft bulkhead down to the chamber
   const sps = [];
   for (let i = 0; i <= 14; i++) {
     const f = i / 14;
@@ -1910,27 +2407,57 @@ function capsule(P, mats, g, y0) {
   }
   sps.push([0.24 * Rc, 0.9 * spsH], [0.24 * Rc, 0.97 * spsH], [0.12 * Rc, spsH]);
   P(projectUV(merge([lathe(sps, 40).translate(0, ySm - spsH, 0), new THREE.TorusGeometry(0.3 * Rc, 0.02 * Rc, 6, 32).rotateX(Math.PI / 2).translate(0, ySm - 0.06 * spsH, 0)])), mats.darkMetal, { order: 1.2, dist: 0.45, side: DS, ax: [-1, 0], sym: true, edges: true, lineGeo: lathe(sps, 40).translate(0, ySm - spsH, 0) });
-  // SM: body, radiator panels (raised), four RCS quads with four nozzles each
-  const sm = [cyl(Rc, Rc, smH, 64, 0, ySm)];
-  for (const a0 of [0.35, 0.35 + Math.PI]) {
-    for (let j = 0; j < 4; j++) {
-      const a = a0 + j * 0.16;
-      sm.push(box(0.006 * Rc, 0.42 * smH, 0.14 * Rc, Rc + 0.003 * Rc, ySm + 0.45 * smH, 0).rotateY(-a));
-    }
+  for (const sx of [1, -1]) {
+    const top = v3(sx * 0.42 * Rc, ySm - 0.01 * spsH, 0);
+    const bot = v3(sx * 0.26 * Rc, ySm - 0.13 * spsH, 0);
+    const mid = top.clone().lerp(bot, 0.55);
+    P(projectUV(merge([rod(top, mid, 0.03 * Rc), rod(mid, bot, 0.018 * Rc), cyl(0.04 * Rc, 0.04 * Rc, 0.012 * spsH, 8, top.x, top.y - 0.006 * spsH, 0)])), mats.actuator, { order: 1.21 + (sx > 0 ? 0 : 0.005), dir: v3(sx, -0.4, 0), dist: 0.45, ax: [-1, 0] });
+  }
+  // SM aft heat shield: a ring under the module round the bell's throat
+  P(projectUV(lathe([[0.28 * Rc, ySm - 0.012 * smH], [0.98 * Rc, ySm - 0.012 * smH], [Rc * 1.004, ySm - 0.004 * smH], [Rc * 1.004, ySm + 0.003 * smH]], 48)), mats.skirt, { order: 1.25, dir: DOWN, dist: 0.5, side: DS, sym: true });
+  // SM: body (the shell), two raised radiator panels, four RCS quads with four nozzles each
+  const smBody = projectUV(cyl(Rc, Rc, smH, 64, 0, ySm));
+  P(smBody, mats.silver, { order: 1.3, dist: 0.6, kind: "shell" });
+  for (const [j, a0] of [0.35, 0.35 + Math.PI].entries()) {
+    const panels = [];
+    for (let i = 0; i < 4; i++) panels.push(box(0.006 * Rc, 0.42 * smH, 0.14 * Rc, Rc + 0.003 * Rc, ySm + 0.45 * smH, 0).rotateY(-(a0 + i * 0.16)));
+    P(projectUV(merge(panels)), mats.silver, { order: 1.31 + j * 0.005, dir: radial(a0 + 0.24, 0.2), dist: 0.7 });
   }
   for (let i = 0; i < 4; i++) {
     const a = (i * TAU) / 4 + Math.PI / 4;
     const o = v3(Math.cos(a), 0, Math.sin(a));
     const t = v3(-Math.sin(a), 0, Math.cos(a));
     const c = o.clone().multiplyScalar(Rc * 1.06).setY(ySm + 0.7 * smH);
-    sm.push(box(0.12 * Rc, 0.1 * smH, 0.2 * Rc, Rc + 0.05 * Rc, ySm + 0.7 * smH, 0).rotateY(-a));
-    for (const [dir, off] of [[UP, 0.05 * smH], [DOWN, 0.05 * smH], [t, 0.1 * Rc], [t.clone().negate(), 0.1 * Rc]]) sm.push(indexed(nozzle(c.clone().addScaledVector(dir, off), dir, 0.08 * Rc, 0.03 * Rc)));
+    const quad = [box(0.12 * Rc, 0.1 * smH, 0.2 * Rc, Rc + 0.05 * Rc, ySm + 0.7 * smH, 0).rotateY(-a)];
+    for (const [dir, off] of [[UP, 0.05 * smH], [DOWN, 0.05 * smH], [t, 0.1 * Rc], [t.clone().negate(), 0.1 * Rc]]) quad.push(nozzle(c.clone().addScaledVector(dir, off), dir, 0.08 * Rc, 0.03 * Rc));
+    P(projectUV(merge(quad.map(indexed))), mats.silver, { order: 1.32 + i * 0.003, dir: radial(a, 0.2), dist: 0.75, side: DS });
   }
-  const smBody = projectUV(cyl(Rc, Rc, smH, 64, 0, ySm));
-  P(projectUV(merge(sm.map(indexed))), mats.silver, { order: 1.3, dist: 0.6, kind: "shell", lineGeo: smBody });
   const jb = Math.max(0.03, 0.012 * Rc);
   P(merge([boltRing(Rc * 1.01, ySm + jb / 2, 32, jb), boltRing(Rc * 1.01, ySm + smH - jb / 2, 32, jb)]), mats.machined, { order: 1.35, dist: 0.6, sym: true });
+  // high-gain antenna folded under the SM's edge: a mast and four small dishes facing out
+  {
+    const az = (3 * Math.PI) / 2;
+    const o = radialPhi(az);
+    const m0 = o.clone().multiplyScalar(0.84 * Rc).setY(ySm - 0.02 * spsH);
+    const m1 = o.clone().multiplyScalar(0.84 * Rc).setY(ySm - 0.3 * spsH);
+    const hd = [];
+    for (let i = 0; i <= 6; i++) hd.push([0.07 * Rc * (i / 6), 0.02 * Rc * (i / 6) ** 2]);
+    const turn = new THREE.Quaternion().setFromUnitVectors(UP, o);
+    const t = v3(Math.cos(az), 0, -Math.sin(az)); // tangential
+    const dishes = [];
+    for (const sy of [-1, 1]) {
+      for (const st of [-1, 1]) {
+        const c = m1.clone().addScaledVector(o, 0.04 * Rc).addScaledVector(t, st * 0.075 * Rc).setY(m1.y + sy * 0.075 * Rc);
+        dishes.push(lathe(hd, 14).applyQuaternion(turn).translate(c.x, c.y, c.z));
+      }
+    }
+    P(projectUV(merge([rod(m0, m1, 0.012 * Rc), box(0.04 * Rc, 0.04 * Rc, 0.04 * Rc, m1.x, m1.y, m1.z), ...dishes])), mats.trim, { order: 1.36, dir: v3(o.x, -0.3, o.z), dist: 0.55, side: DS });
+  }
   const yCm = ySm + smH;
+  // CM heat shield band at its base, the umbilical fairing from the SM onto the CM, and the CM
+  P(projectUV(lathe([[0.001, yCm + 0.002 * cmH], [0.6 * Rc, yCm + 0.002 * cmH], [Rc * 1.006, yCm + 0.008 * cmH], [Rc * 1.006, yCm + 0.035 * cmH], [Rc * 0.97, yCm + 0.05 * cmH]], 48)), mats.darkMetal, { order: 1.39, dist: 0.75, ax: [1, 0], side: DS, sym: true });
+  const umb = strut(v3(Rc * 1.02, ySm + 0.85 * smH, 0), v3(Rc * 0.88, yCm + 0.18 * cmH, 0), 0.1 * Rc, 0.04 * Rc, v3(1, 0, 0)).rotateY(-Math.PI / 2);
+  P(projectUV(umb), mats.silver, { order: 1.395, dir: v3(0, 0.4, 1), dist: 0.8, ax: [1, 0] });
   const cm = [[Rc, 0], [Rc * 0.98, 0.04 * cmH], [0.24 * Rc, 0.86 * cmH], [0.16 * Rc, 0.95 * cmH], [0.001, cmH]];
   P(projectUV(lathe(cm, 48).translate(0, yCm, 0)), mats.mliSilver, { order: 1.4, dist: 0.8, ax: [1, 0], sym: true, edges: true, dock: true });
   const lesH = g.lesH_m ?? 0;
@@ -1955,48 +2482,96 @@ function capsule(P, mats, g, y0) {
       }
     }
     P(projectUV(merge(truss)), mats.darkMetal, { order: 1.5, dist: 1.0, ax: [1, 1] });
-    // motor: four canted escape nozzles at its base, the long case, the canard section, the nose
+    // escape motor case with its four canted nozzles at the base, then the jettison motor, the canard
+    // section (canards folded) and the nose, each its own lens layer
     const yM = yL + tH;
-    const motor = [[0.13 * Rc, 0], [0.13 * Rc, 0.42 * lesH], [0.09 * Rc, 0.46 * lesH], [0.09 * Rc, 0.5 * lesH], [0.06 * Rc, 0.54 * lesH], [0.03 * Rc, 0.58 * lesH], [0.001, 0.6 * lesH]];
-    const motorGeo = lathe(motor, 24).translate(0, yM, 0);
-    const extras = [];
+    const caseGeo = lathe([[0.001, 0], [0.13 * Rc, 0], [0.13 * Rc, 0.38 * lesH]], 24).translate(0, yM, 0);
+    P(projectUV(caseGeo.clone()), mats.trim, { order: 1.6, dist: 1.1, side: DS, ax: [1, 2], sym: true, edges: true, lineGeo: caseGeo });
+    const nozzles = [];
     for (let i = 0; i < 4; i++) {
-      const a = (i * TAU) / 4;
-      const o = v3(Math.cos(a), 0, Math.sin(a));
-      extras.push(indexed(nozzle(o.clone().multiplyScalar(0.1 * Rc).setY(yM + 0.02 * lesH), o.clone().multiplyScalar(0.55).add(DOWN), 0.06 * lesH, 0.045 * Rc)));
-      extras.push(box(0.08 * Rc, 0.03 * lesH, 0.006 * Rc, 0.12 * Rc, yM + 0.47 * lesH, 0).rotateY(-a)); // canards (folded)
+      const o = radial((i * TAU) / 4);
+      nozzles.push(nozzle(o.clone().multiplyScalar(0.1 * Rc).setY(yM + 0.02 * lesH), o.clone().multiplyScalar(0.55).add(DOWN), 0.06 * lesH, 0.045 * Rc));
     }
-    P(projectUV(merge([motorGeo.clone(), ...extras.map(indexed)])), mats.trim, { order: 1.6, dist: 1.1, ax: [1, 2], sym: true, edges: true, lineGeo: motorGeo });
+    P(projectUV(merge(nozzles.map(indexed))), mats.darkMetal, { order: 1.605, dist: 1.1, side: DS, ax: [1, 2] });
+    const jet = lathe([[0.13 * Rc, 0.38 * lesH], [0.135 * Rc, 0.4 * lesH], [0.135 * Rc, 0.42 * lesH], [0.09 * Rc, 0.46 * lesH]], 24).translate(0, yM, 0);
+    P(projectUV(jet.clone()), mats.trim, { order: 1.61, dist: 1.15, side: DS, ax: [1, 3], sym: true, edges: true, lineGeo: jet });
+    const canards = [lathe([[0.09 * Rc, 0.46 * lesH], [0.09 * Rc, 0.5 * lesH], [0.06 * Rc, 0.54 * lesH]], 24).translate(0, yM, 0)];
+    for (let i = 0; i < 4; i++) canards.push(box(0.08 * Rc, 0.03 * lesH, 0.006 * Rc, 0.12 * Rc, yM + 0.47 * lesH, 0).rotateY((-i * TAU) / 4));
+    P(projectUV(merge(canards)), mats.trim, { order: 1.62, dist: 1.2, side: DS, ax: [1, 4], sym: true });
+    P(projectUV(merge([lathe([[0.06 * Rc, 0.54 * lesH], [0.03 * Rc, 0.58 * lesH], [0.001, 0.6 * lesH]], 24).translate(0, yM, 0), new THREE.SphereGeometry(0.035 * Rc, 12, 8).translate(0, yM + 0.585 * lesH, 0)])), mats.darkMetal, { order: 1.63, dist: 1.25, side: DS, ax: [1, 5], sym: true });
   }
 }
 
 // ---------- fairing ----------
 
-// Base cone (boattail when the fairing is wider than the stage, else a short ring), machined separation
-// ring, two halves with the ogive nose, one access door on each half.
+// Base cone (the payload adapter section: a boattail when the fairing is wider than the stage, else a short
+// ring), machined separation ring, four separation pushers beside the seams, and per half: the shell with the
+// ogive nose (rivet rows along its seams, instanced), two half-ring frames inside, an access door and a vent
+// (16 pieces). Everything on a half moves with it (same explode and turn), so the halves part as units.
 function buildFairing(spec, mats) {
   const g = spec.geom;
   const Rf = g.D_m / 2;
   const Rb = g.baseD_m / 2;
+  const D = g.D_m;
   const baseH = Math.max(g.boattailH_m, 0.04 * g.D_m);
   const ringH = 0.03 * g.D_m;
   const halfDist = 0.35 + 1.25 * Rf * S;
   const out = [];
+  const P = (geo, mat, o) => {
+    const pc = piece(geo, mat, o);
+    out.push(pc);
+    return pc;
+  };
   const base = g.boattailH_m > 0 ? [[Rb, 0], [Rf, g.boattailH_m], [Rf, baseH]] : [[Rf, 0], [Rf, baseH]];
-  out.push(piece(latheUV(lathe(base, 64), { H: g.H_m, R: Rf }), mats.body, { order: 0, dir: DOWN, dist: 0.1, side: DS, ax: ["f", -1, 1], sym: true, kind: "shell" }));
+  P(latheUV(lathe(base, 64), { H: g.H_m, R: Rf }), mats.body, { order: 0, dir: DOWN, dist: 0.1, side: DS, ax: ["f", -1, 1], sym: true, kind: "shell" });
   const fb = Math.max(0.02, 0.006 * g.D_m);
   const sepRing = machinedRing(Rf * 0.97, Rf * 1.008, ringH, baseH);
-  out.push(piece(merge([sepRing.clone(), boltRing(Rf * 1.011, baseH + ringH / 2, 32, fb, fb, fb * 0.8)]), mats.machined, { order: 0.5, dir: DOWN, dist: 0.06, ax: ["f", -1, 0], sym: true, edges: true, lineGeo: sepRing }));
-  const pts = [[Rf, baseH + ringH], [Rf, g.cylTop_m], ...ogivePoints(Rf, g.noseH_m, g.cylTop_m)];
-  // Half 0 (phi ∈ [0, π], the +X half) and its door; half 1 is the same geometry turned by π.
+  P(merge([sepRing.clone(), boltRing(Rf * 1.011, baseH + ringH / 2, 32, fb, fb, fb * 0.8)]), mats.machined, { order: 0.5, dir: DOWN, dist: 0.06, ax: ["f", -1, 0], sym: true, edges: true, lineGeo: sepRing });
+  // Separation pushers on the ring beside the two seams (±Z): plate, cylinder, rod. They stay with the base
+  // when the halves swing off (|dir.x| < 0.3).
+  const y0 = baseH + ringH;
+  const pusher = merge([box(0.06 * Rf, 0.006 * D, 0.035 * D, 0.015 * Rf, 0.003 * D, 0), cyl(0.012 * D, 0.012 * D, 0.06 * D, 10, 0, 0.006 * D), cyl(0.007 * D, 0.007 * D, 0.035 * D, 8, 0, 0.066 * D)]);
+  [0.22, -0.22, Math.PI + 0.22, Math.PI - 0.22].forEach((phi, k) => {
+    const o = radialPhi(phi);
+    const r = 0.945 * Rf;
+    P(pusher, mats.actuator, { x: o.x * r, y: y0, z: o.z * r, ry: phi - Math.PI / 2, order: 0.6 + k * 0.01, dir: radialPhi(phi, -0.5), dist: 0.06 });
+  });
+  const pts = [[Rf, y0], [Rf, g.cylTop_m], ...ogivePoints(Rf, g.noseH_m, g.cylTop_m)];
+  // Half 0 (phi ∈ [0, π], the +X half) and what rides on it; half 1 is the same geometry turned by π.
   const half = latheUV(lathe(pts, 40, 0, Math.PI), { phiStart: 0, phiLength: Math.PI, H: g.H_m, R: Rf });
   const doorH = 0.09 * g.D_m;
   const yDoor = baseH + 0.3 * (g.cylTop_m - baseH);
   const door = projectUV(box(0.012 * g.D_m, doorH, 0.12 * g.D_m, Rf + 0.006 * g.D_m, yDoor + doorH / 2, 0.25 * Rf));
+  // Half-ring T-section frames at 30 % and 65 % of the barrel.
+  const barrel = g.cylTop_m - y0;
+  const [rF, rI, rW, hf, tw] = [Rf * 0.958, Rf * 0.968, Rf * 0.992, 0.022 * D, 0.008 * D];
+  const frames = [0.3, 0.65].map((f) => {
+    const y = y0 + f * barrel;
+    return lathe([[rF, y + hf / 2], [rF, y - hf / 2], [rI, y - hf / 2], [rI, y - tw / 2], [rW, y - tw / 2], [rW, y + tw / 2], [rI, y + tw / 2], [rI, y + hf / 2], [rF, y + hf / 2]], 32, 0, Math.PI);
+  });
+  // A louvred vent low on the half, across from its door (built at +X, turned onto its azimuth).
+  const phiV = Math.PI / 2 + 0.5;
+  const yV = y0 + 0.12 * barrel;
+  const vent = projectUV(merge([box(0.008 * D, 0.06 * D, 0.1 * D, Rf + 0.004 * D, yV, 0), ...[0, 1, 2, 3].map((k) => box(0.012 * D, 0.004 * D, 0.085 * D, Rf + 0.009 * D, yV - 0.021 * D + k * 0.014 * D, 0))]).rotateY(phiV - Math.PI / 2));
+  // Rivets (instanced, shared by the halves): a row inside each seam edge and arcs round the barrel's ends.
+  const rv = Math.max(0.01, 0.004 * D);
+  const pitch = 8 * rv;
+  const dl = (0.008 * D) / Rf;
+  const rl = [];
+  for (const phi of [dl, Math.PI - dl]) {
+    const o = radialPhi(phi).multiplyScalar(Rf);
+    rl.push(...rivetRow(o.clone().setY(y0 + 0.04 * D), o.clone().setY(g.cylTop_m - 0.03 * D), pitch, rv));
+  }
+  rl.push(...rivetArc(Rf, y0 + 0.02 * D, 2 * dl, Math.PI - 2 * dl, pitch, rv), ...rivetArc(Rf, g.cylTop_m - 0.012 * D, 2 * dl, Math.PI - 2 * dl, pitch, rv));
+  const rivets = instAttr(rl);
   for (let h = 0; h < 2; h++) {
     const dir = v3(h === 0 ? 1 : -1, 0.12, 0);
-    out.push(piece(half, mats.body, { ry: h * Math.PI, order: 1 + h * 0.05, dir, dist: halfDist, side: DS, kind: "shell" }));
-    out.push(piece(door, mats.raceway, { ry: h * Math.PI, order: 1.02 + h * 0.05, dir, dist: halfDist }));
+    const ry = h * Math.PI;
+    const pc = P(half, mats.body, { ry, order: 1 + h * 0.05, dir, dist: halfDist, side: DS, kind: "shell" });
+    addDetail(pc, "rivet", rivets, { lookOnly: "painted", color: rivetTint(pc.mesh) });
+    frames.forEach((fg, f) => P(fg, mats.interior, { ry, order: 1.005 + h * 0.05 + f * 0.002, dir, dist: halfDist, kind: "interior", side: DS, edges: true }));
+    P(door, mats.raceway, { ry, order: 1.02 + h * 0.05, dir, dist: halfDist });
+    P(vent, mats.raceway, { ry, order: 1.03 + h * 0.05, dir, dist: halfDist });
   }
   return out;
 }
@@ -2071,11 +2646,17 @@ export function createPart(spec, mats) {
   const group = new THREE.Group();
   group.name = spec.id;
   group.position.y = spec.slotY;
+  detailMats = new Map(); // the part's detail materials (addDetail)
   const built = BUILDERS[spec.kind](spec, mats);
+  detailMats = null;
   const pieces = built.map((p, i) => {
     const bb = p.mesh.geometry.boundingBox;
     p.mesh.userData.partId = spec.id;
     p.mesh.name = `${spec.id}:${i}`;
+    for (const d of p.mesh.userData.details ?? []) {
+      d.userData.partId = spec.id;
+      d.name = `${p.mesh.name}:${d.userData.detail}`;
+    }
     group.add(p.mesh);
     return {
       mesh: p.mesh,
@@ -2287,6 +2868,12 @@ export function setShellOpacity(part, value) {
       e.userData.base0 ??= e.userData.base;
       e.userData.base = paint ? e.userData.base0 * lineK : e.userData.base0;
       e.material.opacity = e.userData.base;
+    }
+    // Instanced detail follows its piece's look; detail on a shell shows in the painted look only.
+    for (const d of p.mesh.userData.details ?? []) {
+      const dl = d.userData.looks;
+      if (dl) d.material = paint ? dl.painted : dl.xray;
+      if (d.userData.lookOnly) d.visible = d.userData.lookOnly === (paint ? "painted" : "xray");
     }
   }
   if (paint) return;

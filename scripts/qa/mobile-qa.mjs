@@ -195,7 +195,7 @@ const PAGE_SRC = `(() => {
     const hudText = document.getElementById("hud-text");
     const onLanding = document.body.classList.contains("landing") || !!document.querySelector(".landing");
     if (!onLanding && hudText?.textContent.trim() && !(styleShown(hudText) && hudText.getBoundingClientRect().width > 0)) {
-      add("hidden information", "major", "#hud", "the HUD line is not shown at this size (verdict, launch telemetry and outcome); it reads '" + hudText.textContent.replace(/\\s+/g, " ").trim().slice(0, 60) + "'");
+      add("hidden information", "major", "#hud", "the HUD line has text but is not shown at this size, so the GO / NO-GO verdict, launch telemetry and outcome never appear");
     }
     if (document.documentElement.scrollWidth > W + 1) add("sideways scroll", "major", "page", "content is " + document.documentElement.scrollWidth + " px wide in a " + W + " px viewport");
     return issues;
