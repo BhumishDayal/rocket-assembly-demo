@@ -587,7 +587,7 @@ function reset() {
 const telemetry = { final: null, last: 0 };
 const pad2 = (n) => String(Math.floor(n)).padStart(2, "0");
 function telemetryHtml(tel) {
-  if (tel.countdown != null) return `<strong>${f.esc(current.preset.name)}</strong> · <strong>T−${tel.countdown}</strong>`;
+  if (tel.countdown != null) return `<strong>${f.esc(current.preset.name)}</strong> · <strong>T−${tel.countdown}</strong>${tel.label ? ` · <strong>${f.esc(tel.label)}</strong>` : ""}`;
   const t = Math.max(0, tel.t);
   return [
     `<strong>T+${pad2(t / 60)}:${pad2(t % 60)}</strong>`,
@@ -698,7 +698,7 @@ function presimulate() {
     if (isComplete() && !choreo.state.launch) simFor(current.build);
   });
 }
-async function launch({ countdown } = {}) {
+async function launch({ countdown, brief = false } = {}) {
   if (!isComplete() || choreo.state.busy || choreo.state.launch) return;
   setRocketsOpen(false);
   if (choreo.state.exploded && !(await choreo.assemble())) return;
@@ -715,7 +715,7 @@ async function launch({ countdown } = {}) {
   telemetry.final = null;
   selector.clear();
   const arrival = arrivalTimeline(current.build, catalog, sim.summary);
-  choreo.launch(sim, { pad: pad.group, anchors, onTelemetry, arrival, countdown });
+  choreo.launch(sim, { pad: pad.group, anchors, onTelemetry, arrival, countdown, brief });
 }
 
 // ---------- twin compare (design B8/C10) ----------
@@ -1024,7 +1024,7 @@ async function runStory() {
     selector.clear();
 
     // Launch (a shorter countdown in the story), watch it to the outcome, hold.
-    launch({ countdown: 1.5 });
+    launch({ countdown: 1.5, brief: true }); // no pad camera: the story stays within 45 s
     await until(() => choreo.state.launch === "done");
     await until(() => !choreo.state.ending && !choreo.state.deploying); // the planet ending (≤ 8 s)
     await hold(600);

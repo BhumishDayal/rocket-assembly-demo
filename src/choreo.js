@@ -24,7 +24,8 @@ import * as THREE from "three";
 import { animate, spring } from "animejs";
 import { createHologramMaterial } from "./fx/hologram.js";
 import { createBoltFlash } from "./fx/flash.js";
-import { COLORS, LOOK, deployables, setShellOpacity as setShell } from "./parts.js";
+import { COLORS, LOOK, deployables, padLayout, setShellOpacity as setShell } from "./parts.js";
+import { createVents, createDeluge, createTrenchJet, createSteamCloud } from "./fx/launchfx.js";
 import { attachPlumes, createPadLight, createPlume, P0 } from "./plume.js";
 import { createPlanet, createSurfacePatch, createDustPuff } from "./planet.js";
 import { createDroneShip } from "./anchors.js";
@@ -988,8 +989,19 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   // tumbles), the next stage lights, the fairing halves swing off. Long burns are time-compressed (first
   // seconds and event clusters near real time). Outcome: orbit → slow drift; suborbital/impact → arcs back and
   // fades. Telemetry goes out through onTelemetry every frame; the caller renders it.
-  const EVENT_LABEL = { ignition: "IGNITION", liftoff: "LIFTOFF", maxq: "MAX-Q", meco: "MECO", sep: "STAGE SEP", ignition2: "IGNITION", fairing: "FAIRING SEP", seco: "SECO", orbit: "ORBIT", shortfall: "SHORTFALL", impact: "IMPACT" };
-  const COUNTDOWN_S = 3;
+  const EVENT_LABEL = {
+    ignition: "IGNITION", liftoff: "LIFTOFF", "tower-clear": "TOWER CLEARED", "throttle-down": "THROTTLE DOWN", transonic: "MACH 1", maxq: "MAX-Q",
+    "throttle-up": "THROTTLE UP", meco: "MECO", sep: "STAGE SEP", "tea-teb": "TEA-TEB", igniter: "IGNITER", ignition2: "IGNITION", fairing: "FAIRING SEP",
+    seco: "SECO", orbit: "ORBIT", "payload-release": "PAYLOAD RELEASE", shortfall: "SHORTFALL", impact: "IMPACT",
+  };
+  const COUNTDOWN_S = 10;
+  // Pad sequence (design round 14 B), seconds of countdown before T0 (sim t = 0, liftoff); a shorter countdown
+  // (the story's) scales them. Umbilical arms swing away from T−10 (top arm first), the strongback leans back
+  // 10° over 4 s from T−8, vents wisp at the umbilical ports until liftoff, the deluge floods the deck from T−3,
+  // the first-stage engines start in pairs from T−2.4 while the hold-down clamps keep the vehicle down, and the
+  // clamps open at T0. The low pad camera holds until the vehicle clears the tower, then cuts to the tracker.
+  const PAD = { arms: -10, armS: 1.6, armGap: 0.45, lean: -8, leanS: 4, leanDeg: 10, deluge: -3, ignite: -2.4, pairGap: 0.15 };
+  const padT = (key) => (PAD[key] * Math.min(L.countdown, COUNTDOWN_S)) / COUNTDOWN_S;
   const SCALE_HEIGHT_M = 8434; // isothermal atmosphere, for the plume's ambient pressure only (visual)
   let L = null;
 
@@ -999,7 +1011,9 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   // SECO → outcome 1.5 s. Phases a flight does not have are skipped.
   const PHASE_S = { toMaxQ: 3, toMeco: 3, sep: 1.5, midBurn: 2.5, lastBurn: 4, coast: 1.5 };
   const PHASE_TOTAL_S = 13; // after the real-time opening; more stages share it (Saturn V scales down)
-  function playbackKeys(events, tEnd) {
+  // opening: the sim time played in real time from T0 (liftoff + 2.5 s, or past tower clear for the pad camera),
+  // with at most maxOpen seconds of screen time (a slow Saturn V clears its tower at T+11 s).
+  function playbackKeys(events, tEnd, { opening = null, maxOpen = 9 } = {}) {
     const lift = events.find((e) => e.type === "liftoff")?.t ?? 0;
     const plan = []; // [sim t, planned seconds]
     const maxq = events.find((e) => e.type === "maxq");
@@ -1022,7 +1036,8 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       const t = Math.min(simT, tEnd);
       if (t > s0 + 1e-6) keys.push([t, r0 + realDur]);
     };
-    add(lift + 2.5, lift + 2.5);
+    const open = opening ?? lift + 2.5;
+    add(open, Math.min(open, maxOpen));
     for (const [t, d] of plan) add(t, Math.max(1, d * k));
     return keys;
   }
@@ -1076,7 +1091,8 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     const part = parts.find((p) => p.kind === "engines" && p.stageIndex === stage);
     if (!part) return;
     const plumes = attachPlumes(part);
-    for (const plume of plumes) L.plumes.push({ plume, stage, ignite: t + plume.engine * (stage === 0 ? 0.07 : 0.05), dead: false });
+    // First stage: the engines start in pairs (as on Falcon 9's Merlins); upper stages one after another.
+    for (const plume of plumes) L.plumes.push({ plume, stage, ignite: t + (stage === 0 ? Math.floor(plume.engine / 2) * PAD.pairGap : plume.engine * 0.05), dead: false });
     if (stage === 0 && L.pad && plumes.length) {
       L.padLight = adoptPadLight(createPadLight({ baseRadius_u: bounds?.baseRadius_u ?? 1, bellExitRadius_u: Math.max(...plumes.map((p) => p.exitRadius_u ?? 0.1)) }));
       L.pad.add(L.padLight.object3d);
@@ -1113,18 +1129,13 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     L.labelUntil = L.real + 1.5;
     switch (e.type) {
       case "ignition":
-        ignite(0, e.t);
-        sfx.play("whoosh", { rate: 0.5, gain: 1.2 });
+        if (!L.ignited) ignite(0, e.t); // normally already lit in the countdown (padSequence)
+        L.ignited = true;
         break;
       case "liftoff":
         sfx.play("clunk"); // hold-down release
         state.shake = 1;
-        for (const [i, arm] of (L.anchors?.arms ?? []).entries()) {
-          const k = { v: 0 };
-          const r0 = arm.mesh.rotation.y;
-          const swing = THREE.MathUtils.degToRad(70) * (i % 2 ? -1 : 1);
-          run(k, { v: 1, duration: D(900), ease: "outCubic", onUpdate: () => (arm.mesh.rotation.y = r0 + swing * k.v) });
-        }
+        openClamps();
         break;
       case "meco":
         for (const pl of L.plumes) if (pl.stage === e.stage) pl.dead = true;
@@ -1155,7 +1166,119 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     }
   }
 
+  // Plumes: each ramps up over 0.25 s from its ignite time (in the countdown for the first stage); returns the
+  // first stage's throttle (pad light, trench jet, steam).
+  function updatePlumes(dt, t, s) {
+    const ambient = P0 * Math.exp(-Math.max(0, s.alt_m) / SCALE_HEIGHT_M);
+    const camD = camera.position.distanceTo(controls.target);
+    let padThrottle = 0;
+    for (const pl of L.plumes) {
+      const ramp = THREE.MathUtils.clamp((t - pl.ignite) / 0.25, 0, 1);
+      const thr = pl.dead ? 0 : ramp * (s.stage === pl.stage || t < 1 ? Math.max(0.4, s.throttle ?? 1) : 0);
+      pl.plume.update(dt, { throttle: thr, ambientPressure_Pa: ambient, cameraDistance: camD });
+      if (pl.stage === 0) padThrottle = Math.max(padThrottle, thr);
+    }
+    return padThrottle;
+  }
+
+  // The pad sequence before T0 (see PAD): arms, strongback, vents, deluge, engine start behind the clamps.
+  const ease3 = (x) => (x <= 0 ? 0 : x >= 1 ? 1 : x < 0.5 ? 4 * x * x * x : 1 - (-2 * x + 2) ** 3 / 2);
+  function padSequence(t, dt) {
+    const arms = L.anchors?.arms ?? [];
+    const top = [...arms].sort((a, b) => b.y_u - a.y_u);
+    top.forEach((arm, i) => {
+      const k = ease3((t - padT("arms") - i * PAD.armGap * (L.countdown / COUNTDOWN_S)) / (PAD.armS * Math.min(1, L.countdown / COUNTDOWN_S + 0.3)));
+      arm.mesh.rotation.y = L.arms0[arms.indexOf(arm)] + THREE.MathUtils.degToRad(70) * (arms.indexOf(arm) % 2 ? -1 : 1) * k;
+    });
+    if (L.anchors?.tower) L.anchors.tower.rotation.z = L.tower0 - THREE.MathUtils.degToRad(PAD.leanDeg) * ease3((t - padT("lean")) / ((PAD.leanS * L.countdown) / COUNTDOWN_S));
+    if (t < 0) {
+      if (!L.said.lean && t >= padT("lean")) say("lean", "STRONGBACK RETRACT");
+      if (!L.said.deluge && t >= padT("deluge")) say("deluge", "DELUGE");
+      if (!L.ignited && t >= padT("ignite")) {
+        ignite(0, padT("ignite"));
+        L.ignited = true;
+        state.shake = Math.max(state.shake, 0.5);
+        say("ignite", "ENGINE START");
+      }
+      const s0 = L.samples[0];
+      const thr = updatePlumes(dt, t, s0);
+      L.padLight?.update(dt, thr, 0);
+      if (thr > 0) state.shake = Math.max(state.shake, 0.3 * thr);
+      padEffects(dt, t, thr, 0);
+    }
+  }
+  function say(key, label) {
+    L.said[key] = true;
+    L.label = label;
+    L.labelUntil = L.real + 1.6;
+  }
+  // Pad effects (UI4's launchfx): vents until liftoff, deluge from its start, trench jet and steam from ignition.
+  function padEffects(dt, t, throttle, alt_m) {
+    const fx = L.fx;
+    if (!fx) return;
+    fx.vents?.update(dt, { intensity: t < 0 ? 1 : Math.max(0, 1 - t / 0.6) });
+    const td = t - padT("deluge");
+    fx.deluge?.update(dt, { t: Math.max(0, td), intensity: td >= 0 ? 1 : 0 });
+    fx.trench?.update(dt, { throttle, bellHeight_m: alt_m });
+    const ti = t - padT("ignite");
+    fx.steam?.update(dt, { t: Math.max(0, ti), glow: throttle, intensity: ti >= 0 ? 1 : 0 });
+  }
+  // Hold-down release: UI4's clamps are one merged mesh, so they retract into the deck together.
+  function openClamps() {
+    const clamps = L.pad?.getObjectByName("pad-clamps");
+    if (!clamps) return;
+    L.clamps = { mesh: clamps, y0: clamps.position.y };
+    const k = { v: 0 };
+    const drop = 0.18 * (bounds?.baseRadius_u ?? 1);
+    run(k, { v: 1, duration: D(450), ease: "outCubic", onUpdate: () => (clamps.position.y = L?.clamps ? L.clamps.y0 - drop * k.v : clamps.position.y) });
+  }
+
+  // The low pad camera: from beside the tower's side of the pad, a little above the deck, looking up at the
+  // stack; it rides with the pad (which drops away as the vehicle climbs) and keeps the rocket in frame.
+  function padCamPose() {
+    const H = stackHeight();
+    const tw = L.anchors?.tower?.position;
+    const phiT = tw ? Math.atan2(tw.x, tw.z) : 0.58 + 2.4;
+    const opts = [phiT - 1.15, phiT + 1.15];
+    const near = (a) => Math.abs(Math.atan2(Math.sin(a - 0.58), Math.cos(a - 0.58)));
+    const az = near(opts[0]) < near(opts[1]) ? opts[0] : opts[1];
+    // Low (12 % of the stack's height) and 1.9 heights out: the base and the deck sit ~20 % up the frame, clear of
+    // the button bar, with the nose still in; the aim lifts with the vehicle (padCam).
+    const d = Math.max(controls.minDistance, H * 1.9);
+    return { position: new THREE.Vector3(Math.sin(az) * d, Math.max(0.5, H * 0.12), Math.cos(az) * d), target: new THREE.Vector3(0, H * 0.39, 0) };
+  }
+  const aim = new THREE.Vector3();
+  function padCam(dt) {
+    if (L.cam !== "pad" || !L.padCam) return;
+    const padY = L.pad ? L.pad.position.y : 0;
+    const k = L.padCam.k.v;
+    camera.position.lerpVectors(L.padCam.from, L.padCam.pose.position, k).y += padY * k;
+    // Aim: the stack's middle on the pad, then the climbing vehicle (eased, so the tilt up is smooth).
+    L.flight.localToWorld(aim.set(0, L.trackLocalY ?? 0, 0));
+    aim.y = Math.max(aim.y, L.padCam.pose.target.y + padY);
+    L.padCam.aim.lerp(aim, 1 - Math.exp(-dt * 3));
+    controls.target.lerpVectors(L.padCam.fromTarget, L.padCam.aim, k);
+    camera.lookAt(controls.target);
+  }
+  // The cut's black frame: the tracker, side-on from the home side, a little above the vehicle.
+  function toTracker() {
+    L.cam = "track";
+    const el = THREE.MathUtils.degToRad(8);
+    const dir = new THREE.Vector3(Math.sin(0.58) * Math.cos(el), Math.sin(el), Math.cos(0.58) * Math.cos(el));
+    const place = () => {
+      const goal = L.flight.localToWorld(new THREE.Vector3(0, L.trackLocalY, 0));
+      controls.target.copy(goal);
+      camera.position.copy(goal).addScaledVector(dir, L.trackDist);
+      camera.lookAt(goal);
+    };
+    place(); // the tracker's direction first: retarget sizes the distance for the camera's pitch
+    retarget();
+    place();
+    L.tracking = true;
+  }
+
   function launchUpdate(dt) {
+    if (L.cut) stepCut(L, dt);
     if (L.done) {
       if (L.drifting) L.flight.rotateY(dt * 0.15); // slow roll in orbit; the outcome line stays in the HUD
       updateDebris(dt);
@@ -1164,8 +1287,10 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     }
     L.real += dt;
     const t = simTime(L.keys, L.real);
+    padSequence(t, dt);
     if (t < 0) {
-      L.onTelemetry({ countdown: Math.ceil(-t) });
+      L.onTelemetry({ countdown: Math.ceil(-t), label: L.real < L.labelUntil ? L.label : "" });
+      padCam(dt);
       return;
     }
     while (L.next < L.events.length && L.events[L.next].t <= t) onEvent(L.events[L.next++]);
@@ -1185,21 +1310,18 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     }
 
     // Plumes and pad light.
-    const ambient = P0 * Math.exp(-Math.max(0, s.alt_m) / SCALE_HEIGHT_M);
-    const camD = camera.position.distanceTo(controls.target);
-    let padThrottle = 0;
-    for (const pl of L.plumes) {
-      const ramp = THREE.MathUtils.clamp((t - pl.ignite) / 0.25, 0, 1);
-      const thr = pl.dead ? 0 : ramp * (s.stage === pl.stage || t < 1 ? Math.max(0.4, s.throttle ?? 1) : 0);
-      pl.plume.update(dt, { throttle: thr, ambientPressure_Pa: ambient, cameraDistance: camD });
-      if (pl.stage === 0) padThrottle = Math.max(padThrottle, thr);
-    }
+    const padThrottle = updatePlumes(dt, t, s);
     L.padLight?.update(dt, padThrottle, Math.max(0, s.alt_m));
     if (padThrottle > 0 && s.alt_m < 300) state.shake = Math.max(state.shake, 0.35 * padThrottle * (1 - s.alt_m / 300));
+    padEffects(dt, t, padThrottle, Math.max(0, s.alt_m));
     updateDebris(dt);
 
-    // Camera: tracking once the rocket leaves the launch frame.
-    if (below > 0 || L.tracking) {
+    // Camera: the low pad camera until the vehicle clears the tower (then a cut through black to the tracker);
+    // without it (story), tracking once the rocket leaves the launch frame.
+    if (L.cam === "pad") {
+      padCam(dt);
+      if (t >= L.towerClear && !L.cut) L.cut = { t: 0, up: 0, fired: false, hold: 0, fn: toTracker };
+    } else if (below > 0 || L.tracking) {
       if (!L.tracking) {
         L.tracking = true;
         camAnim?.cancel();
@@ -1277,7 +1399,8 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   }
 
   // launch(sim, { pad, onTelemetry }) -> Promise<outcome>. The stack must be complete and assembled.
-  function launch(sim, { pad = null, anchors = null, onTelemetry = () => {}, arrival = null, countdown = COUNTDOWN_S } = {}) {
+  // brief (the story): no pad camera, the old short opening (liftoff + 2.5 s in real time).
+  function launch(sim, { pad = null, anchors = null, onTelemetry = () => {}, arrival = null, countdown = COUNTDOWN_S, brief = false } = {}) {
     if (state.busy || state.exploded || state.launch || !parts.length || !parts.every((p) => p.built) || !sim?.samples?.length) {
       return Promise.resolve(false);
     }
@@ -1299,12 +1422,20 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     fwd.y = 0;
     if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
     fwd.normalize();
+    const towerClear = sim.events.find((e) => e.type === "tower-clear")?.t ?? null;
+    const opening = brief || towerClear == null ? null : towerClear + 0.6;
     L = {
       sim,
       samples: sim.samples,
       events: sim.events,
-      keys: playbackKeys(sim.events, sim.samples[sim.samples.length - 1].t),
+      keys: playbackKeys(sim.events, sim.samples[sim.samples.length - 1].t, { opening }),
       real: -countdown,
+      countdown,
+      cam: opening == null ? "launch" : "pad",
+      towerClear: opening ?? Infinity,
+      ignited: false,
+      said: {},
+      cut: null,
       next: 0,
       flight,
       pad,
@@ -1324,10 +1455,34 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       arrival,
       anchors,
       arms0: (anchors?.arms ?? []).map((a) => a.mesh.rotation.y),
+      tower0: anchors?.tower?.rotation.z ?? 0,
+      maxPolar0: controls.maxPolarAngle,
     };
+    retarget();
     controls.autoRotate = false;
-    sfx.play("launch-swell"); // 3 s riser, peaks at ignition (end of the countdown)
-    frameSpan(0, H + L.riseMax, stackRadius(), 0.85, { pitch: HERO_PITCH, mode: "stack" });
+    controls.maxPolarAngle = Math.PI * 0.95; // the pad camera looks up from near the deck
+    sfx.play("launch-swell");
+    // Pad effects: vents at the umbilical ports (where the arms meet the vehicle), deluge, trench jet, steam.
+    if (pad) {
+      const layout = padLayout({ baseRadius_u: bounds?.baseRadius_u ?? 1 });
+      const r = stackRadius();
+      const ports = (anchors?.arms ?? []).slice(0, 6).map((arm) => {
+        const hinge = arm.mesh.getWorldPosition(new THREE.Vector3());
+        const out = hinge.clone().setY(0).normalize();
+        return { position: out.clone().multiplyScalar(r * 1.02).setY(hinge.y), dir: out.clone().add(new THREE.Vector3(0, 0.25, 0)).normalize() };
+      });
+      L.fx = { vents: createVents(ports, { scale_u: r * 0.6 }), deluge: createDeluge({ layout }), trench: createTrenchJet({ layout }), steam: createSteamCloud({ layout }) };
+      root.add(L.fx.vents.object3d);
+      pad.add(L.fx.deluge.object3d, L.fx.trench.object3d, L.fx.steam.object3d);
+    }
+    if (L.cam === "pad") {
+      camAnim?.cancel();
+      const pose = padCamPose();
+      L.padCam = { from: camera.position.clone(), fromTarget: controls.target.clone(), pose, aim: pose.target.clone(), k: { v: 0 } };
+      framedR = stackRadius() * 3;
+      framedMode = "stack";
+      run(L.padCam.k, { v: 1, duration: D(1800), ease: "inOutCubic" });
+    } else frameSpan(0, H + L.riseMax, stackRadius(), 0.85, { pitch: HERO_PITCH, mode: "stack" });
     changed();
     return new Promise((resolve) => (L.resolve = resolve));
   }
@@ -1418,14 +1573,14 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     placeBackdrop();
   }
 
-  // Scene changes inside the ending (to the booster, back to the payload, down to the surface) go through black:
-  // 120 ms down while the old scene plays on, the change on a black frame (held one more frame so first-use
-  // uploads land unseen), 130 ms up. state.cut is the overlay's opacity.
+  // Camera cuts (pad camera → tracker; inside the ending: to the booster, back to the payload, down to the
+  // surface) go through black: 120 ms down while the old scene plays on, the change on a black frame (held one
+  // more frame so first-use uploads land unseen), 130 ms up. state.cut is the overlay's opacity; h is L or E.
   const CUT_DOWN = 0.12;
   const CUT_UP = 0.13;
   const CUT_LEGS = new Set(["booster", "earth-payload", "stranded", "descent"]);
-  function cutUpdate(dt) {
-    const c = E.cut;
+  function stepCut(h, dt) {
+    const c = h.cut;
     if (!c.fired) {
       c.t += dt;
       state.cut = Math.min(1, c.t / CUT_DOWN);
@@ -1439,7 +1594,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     c.up += dt;
     state.cut = Math.max(0, 1 - c.up / CUT_UP);
     if (c.up >= CUT_UP) {
-      E.cut = null;
+      h.cut = null;
       state.cut = 0;
     }
   }
@@ -1772,7 +1927,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   }
   function endingUpdate(dt) {
     if (E.cut) {
-      cutUpdate(dt);
+      stepCut(E, dt);
       if (!E) return;
     }
     const leg = E.legs[E.i];
@@ -1859,6 +2014,14 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     for (const pl of L.plumes) pl.plume.dispose();
     dropPadLight(L.padLight);
     (L.anchors?.arms ?? []).forEach((arm, i) => (arm.mesh.rotation.y = L.arms0[i] ?? arm.mesh.rotation.y));
+    if (L.anchors?.tower) L.anchors.tower.rotation.z = L.tower0;
+    if (L.clamps) L.clamps.mesh.position.y = L.clamps.y0;
+    for (const fx of Object.values(L.fx ?? {})) {
+      fx.object3d.removeFromParent();
+      fx.dispose();
+    }
+    controls.maxPolarAngle = L.maxPolar0;
+    if (L.cut) state.cut = 0;
     if (L.pad) {
       L.pad.position.y = 0;
       L.pad.visible = true;
@@ -2018,6 +2181,11 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     if (L && !L.done) {
       L.real = Math.max(L.real, L.keys[L.keys.length - 1][1] + 0.01);
       L.skipEnding = true;
+      if (L.cut || L.cam === "pad") {
+        L.cut = null;
+        state.cut = 0;
+        if (L.cam === "pad") toTracker();
+      }
       return "launch";
     }
     if (E && state.ending) {
@@ -2087,6 +2255,10 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         ...["moon", "mars"].map((kind) => createSurfacePatch({ kind, radius_u: 0.5 }).object3d),
         createDustPuff().object3d,
         createDroneShip({ size_u: 0.5 }).object3d,
+        ...(() => {
+          const layout = padLayout({ baseRadius_u: 0.5 });
+          return [createVents([{ position: new THREE.Vector3() }], { scale_u: 0.2 }), createDeluge({ layout }), createTrenchJet({ layout }), createSteamCloud({ layout })].map((fx) => fx.object3d);
+        })(),
       );
       warmFx.position.set(0, -50, 0);
       scene.add(warmFx);
