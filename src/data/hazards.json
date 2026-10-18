@@ -1,0 +1,306 @@
+{
+  "_about": "Launch factors for src/hazards.js: launch weather commit criteria, NOAA space weather scales, launch collision avoidance limits, launch-window basics. Every threshold carries the URL it comes from and a verbatim quote; threshold.quoted is the exact text of the number inside that quote (scripts/check-hazards.mjs checks it). Superscripts, maths and line breaks in the sources are flattened to plain text (10^-6 is written 10−6, m^2 is m2). Numbers derived here (unit conversions, per-day rates) are marked derived; the demo's own choices are marked est.",
+  "_units": {
+    "kt_per_mph": { "value": 0.868976, "derived": "1 mph = 1,609.344 m per hour and 1 knot = 1,852 m per hour (both exact definitions), so 1 mph = 0.868976 kt" },
+    "ms_per_kt": { "value": 0.514444, "derived": "1 knot = 1,852 m per hour = 0.514444 m/s" },
+    "km_per_nm": { "value": 1.852, "derived": "1 nautical mile = 1,852 m (exact definition)" },
+    "days_per_cycle": { "value": 4017.75, "derived": "NOAA's scales give frequencies per solar cycle, \"(1 cycle = 11 years)\"; 11 × 365.25 days" }
+  },
+
+  "weather": [
+    {
+      "id": "surface-wind-falcon-9",
+      "rule": "Sustained wind at the 162-foot level of the pad",
+      "appliesTo": { "firstStageTank": ["falcon9-s1-tank"], "name": "Falcon 9" },
+      "threshold": { "value": 30, "unit": "mph", "quoted": "30 mph", "compare": "exceeds" },
+      "quote": "Do not launch if the sustained wind at the 162-foot level of the launch pad exceeds 30 mph.",
+      "url": "https://www.nasa.gov/wp-content/uploads/2021/07/falcon9_crewdragon_launch_weather_criteria_fact_sheet.pdf",
+      "tier": "official: NASA Kennedy fact sheet FS-2020-05-568-KSC, Falcon 9 Crew Dragon Launch Weather Criteria",
+      "note": "The sheet is for Crew Dragon flights; the uncrewed Falcon 9 limit is not published there. hazards.js converts it to knots (derived: 26.1 kt). It is also the stand-in for vehicles with no published pad-wind limit (est.)."
+    },
+    {
+      "id": "surface-wind-atlas-v",
+      "rule": "Wind at the launch pad",
+      "appliesTo": { "firstStageTank": ["atlas-v-ccb-tank"], "name": "Atlas V" },
+      "threshold": { "value": 33, "unit": "kt", "quoted": "33 knots", "compare": "exceeds" },
+      "quote": "Do not launch if the wind at the launch pad exceeds 33 knots (38 mph).",
+      "url": "https://www3.nasa.gov/centers/kennedy/pdf/633165main_atlas-5-weather.pdf",
+      "tier": "official: NASA Kennedy fact sheet FS-2013-01-010-KSC, Atlas V Launch Weather Criteria",
+      "note": "The same sheet's lightning, field-mill and thick-cloud rules match the Falcon 9 sheet; its cumulus rule reads \"within five to 10 miles\". hazards.js applies the Falcon 9 cloud and lightning wording to every vehicle."
+    },
+    {
+      "id": "lightning",
+      "rule": "Lightning near the pad or flight path in the last 30 minutes",
+      "threshold": { "value": 10, "unit": "nm", "quoted": "10 nautical miles", "compare": "within", "window_min": 30, "windowQuoted": "30 minutes" },
+      "quote": "Do not launch for 30 minutes after lightning is observed within 10 nautical miles of the launch pad or the flight path, unless specified conditions can be met.",
+      "url": "https://www.nasa.gov/wp-content/uploads/2021/07/falcon9_crewdragon_launch_weather_criteria_fact_sheet.pdf",
+      "tier": "official: NASA Kennedy fact sheet FS-2020-05-568-KSC (the Atlas V sheet FS-2013-01-010-KSC has the same sentence)",
+      "note": "The \"specified conditions\" exceptions are not modelled: lightning within 10 nm always scrubs."
+    },
+    {
+      "id": "thunderstorm-edge",
+      "rule": "Edge of a thunderstorm that is producing lightning",
+      "threshold": { "value": 10, "unit": "nm", "quoted": "10 nautical miles", "compare": "within", "window_min": 30, "windowQuoted": "30 minutes" },
+      "quote": "Do not launch within 10 nautical miles of the edge of a thunderstorm that is producing lightning within 30 minutes after the last lightning is observed.",
+      "url": "https://www.nasa.gov/wp-content/uploads/2021/07/falcon9_crewdragon_launch_weather_criteria_fact_sheet.pdf",
+      "tier": "official: NASA Kennedy fact sheet FS-2020-05-568-KSC",
+      "note": "Folded into the lightning distance in hazards.js (the simulated storm is the lightning source)."
+    },
+    {
+      "id": "anvil-attached",
+      "rule": "Attached thunderstorm anvil cloud",
+      "threshold": { "value": 10, "unit": "nm", "quoted": "10 nautical miles", "compare": "within" },
+      "quote": "Do not launch within 10 nautical miles of an attached thunderstorm anvil cloud, unless temperature and time-associated distance criteria can be met.",
+      "url": "https://www.nasa.gov/wp-content/uploads/2021/07/falcon9_crewdragon_launch_weather_criteria_fact_sheet.pdf",
+      "tier": "official: NASA Kennedy fact sheet FS-2020-05-568-KSC",
+      "note": "The temperature/time exceptions are not modelled."
+    },
+    {
+      "id": "anvil-detached",
+      "rule": "Detached thunderstorm anvil cloud",
+      "threshold": { "value": 10, "unit": "nm", "quoted": "10 nautical miles", "compare": "within" },
+      "quote": "Do not launch within 10 nautical miles of a detached thunderstorm anvil cloud.",
+      "url": "https://www.nasa.gov/wp-content/uploads/2021/07/falcon9_crewdragon_launch_weather_criteria_fact_sheet.pdf",
+      "tier": "official: NASA Kennedy fact sheet FS-2020-05-568-KSC"
+    },
+    {
+      "id": "cumulus",
+      "rule": "Cumulus clouds with tops in freezing air",
+      "threshold": { "value": 10, "unit": "nm", "quoted": "10 nautical miles", "compare": "within" },
+      "quote": "Do not launch within 10 nautical miles of cumulus clouds with tops that extend into freezing temperatures, unless specific height-associated distance criteria can be met.",
+      "url": "https://www.nasa.gov/wp-content/uploads/2021/07/falcon9_crewdragon_launch_weather_criteria_fact_sheet.pdf",
+      "tier": "official: NASA Kennedy fact sheet FS-2020-05-568-KSC",
+      "note": "The height-associated exceptions are not modelled: any freezing-top cumulus within 10 nm scrubs."
+    },
+    {
+      "id": "thick-cloud-layer",
+      "rule": "Flight through a thick cloud layer in freezing air",
+      "threshold": { "value": 4500, "unit": "ft", "quoted": "4,500 feet", "compare": "greater than" },
+      "quote": "Do not launch through a cloud layer greater than 4,500 feet thick that extends into freezing temperatures, unless other specific criteria can be met.",
+      "url": "https://www.nasa.gov/wp-content/uploads/2021/07/falcon9_crewdragon_launch_weather_criteria_fact_sheet.pdf",
+      "tier": "official: NASA Kennedy fact sheet FS-2020-05-568-KSC",
+      "note": "hazards.js only generates this cloud when it lies across the flight path, so it always scrubs."
+    },
+    {
+      "id": "field-mill",
+      "rule": "Surface electric field (field mills within 5 nm of the pad)",
+      "threshold": { "value": 1500, "unit": "V/m", "quoted": "1,500 volts per meter", "compare": "exceed", "window_min": 15, "windowQuoted": "15 minutes" },
+      "quote": "Do not launch for 15 minutes if field mill instrument readings within five nautical miles of the launch pad exceed +/- 1,500 volts per meter, or +/- 1,000 volts per meter if specified criteria can be met.",
+      "url": "https://www.nasa.gov/wp-content/uploads/2021/07/falcon9_crewdragon_launch_weather_criteria_fact_sheet.pdf",
+      "tier": "official: NASA Kennedy fact sheet FS-2020-05-568-KSC",
+      "note": "The stricter 1,000 V/m variant is not modelled."
+    },
+    {
+      "id": "upper-wind-shear",
+      "rule": "Upper-level wind shear",
+      "threshold": null,
+      "quote": "Do not launch through upper-level conditions containing wind shear that could lead to control problems for the launch vehicle.",
+      "url": "https://www.nasa.gov/wp-content/uploads/2021/07/falcon9_crewdragon_launch_weather_criteria_fact_sheet.pdf",
+      "tier": "official: NASA Kennedy fact sheet FS-2020-05-568-KSC",
+      "process": {
+        "quote": "These data are used by the MSFC/MSC wind monitoring team in vehicle flight digital simulations to verify the capability of the vehicle with these winds. Angle of attack, engine deflections, and structural loads are calculated and compared against vehicle limits.",
+        "quote2": "At T-2 1/4 hours a go/no-go recommendation is transmitted to KSC by the wind monitoring team.",
+        "url": "https://ntrs.nasa.gov/api/citations/19750063889/downloads/19750063889.pdf",
+        "tier": "official: Saturn V Flight Manual SA-503, MSFC-MAN-503, Section IX Mission Control Monitoring, Prelaunch Wind Monitoring (the first quote continues across a page break)"
+      },
+      "note": "No published number: the real rule is a per-vehicle loads simulation on balloon soundings. hazards.js uses three levels (low, moderate, high) and treats high as \"could lead to control problems\" (est.)."
+    }
+  ],
+
+  "spaceWeather": {
+    "url": "https://www.swpc.noaa.gov/noaa-scales-explanation",
+    "pdf": "https://www.swpc.noaa.gov/sites/default/files/images/NOAAscales.pdf",
+    "tier": "official: NOAA Space Weather Prediction Center, NOAA Space Weather Scales",
+    "cycleQuote": "Average Frequency (1 cycle = 11 years)",
+    "geomagnetic": {
+      "measure": "Kp",
+      "measureQuote": "Geomagnetic Storms Kp values*",
+      "levels": [
+        { "level": 1, "name": "Minor", "kp": 5, "threshold": { "value": 5, "unit": "Kp", "quoted": "Kp = 5" }, "daysPerCycle": 900, "frequencyQuoted": "900 days per cycle",
+          "quote": "Spacecraft operations: Minor impact on satellite operations possible.",
+          "auroraQuote": "aurora is commonly visible at high latitudes (northern Michigan and Maine). Kp = 5 1700 per cycle (900 days per cycle)" },
+        { "level": 2, "name": "Moderate", "kp": 6, "threshold": { "value": 6, "unit": "Kp", "quoted": "Kp = 6" }, "daysPerCycle": 360, "frequencyQuoted": "360 days per cycle",
+          "quote": "Spacecraft operations: Corrective actions to orientation may be required by ground control; possible changes in drag affect orbit predictions.",
+          "auroraQuote": "aurora has been seen as low as New York and Idaho (typically 55° geomagnetic lat.). Kp = 6 600 per cycle (360 days per cycle)" },
+        { "level": 3, "name": "Strong", "kp": 7, "threshold": { "value": 7, "unit": "Kp", "quoted": "Kp = 7" }, "daysPerCycle": 130, "frequencyQuoted": "130 days per cycle",
+          "quote": "Spacecraft operations: Surface charging may occur on satellite components, drag may increase on low-Earth-orbit satellites, and corrections may be needed for orientation problems.",
+          "auroraQuote": "aurora has been seen as low as Illinois and Oregon (typically 50° geomagnetic lat.). Kp = 7 200 per cycle (130 days per cycle)" },
+        { "level": 4, "name": "Severe", "kp": 8, "threshold": { "value": 8, "unit": "Kp", "quoted": "Kp = 8" }, "daysPerCycle": 60, "frequencyQuoted": "60 days per cycle",
+          "quote": "Spacecraft operations: May experience surface charging and tracking problems, corrections may be needed for orientation problems.",
+          "auroraQuote": "aurora has been seen as low as Alabama and northern California (typically 45° geomagnetic lat.). Kp = 8, including a 9- 100 per cycle (60 days per cycle)" },
+        { "level": 5, "name": "Extreme", "kp": 9, "threshold": { "value": 9, "unit": "Kp", "quoted": "Kp = 9" }, "daysPerCycle": 4, "frequencyQuoted": "4 days per cycle",
+          "quote": "Spacecraft operations: May experience extensive surface charging, problems with orientation, uplink/downlink and tracking satellites.",
+          "auroraQuote": "aurora has been seen as low as Florida and southern Texas (typically 40° geomagnetic lat.). Kp = 9 4 per cycle (4 days per cycle)" }
+      ]
+    },
+    "radiation": {
+      "measure": "flux of >= 10 MeV particles, pfu",
+      "measureQuote": "Flux levels are 5 minute averages. Flux in particles·s-1·ster-1·cm-2",
+      "measureUrl": "https://www.swpc.noaa.gov/sites/default/files/images/NOAAscales.pdf",
+      "levels": [
+        { "level": 1, "name": "Minor", "threshold": { "value": 10, "unit": "pfu", "quoted": "10" }, "eventsPerCycle": 50, "frequencyQuoted": "50 per cycle",
+          "quote": "Satellite operations: None. Other systems: Minor impacts on HF radio in the polar regions. 10 50 per cycle" },
+        { "level": 2, "name": "Moderate", "threshold": { "value": 100, "unit": "pfu", "quoted": "10 2" }, "eventsPerCycle": 25, "frequencyQuoted": "25 per cycle",
+          "quote": "Satellite operations: Infrequent single-event upsets possible. Other systems: Small effects on HF propagation through the polar regions and navigation at polar cap locations possibly affected. 10 2 25 per cycle" },
+        { "level": 3, "name": "Strong", "threshold": { "value": 1000, "unit": "pfu", "quoted": "10 3" }, "eventsPerCycle": 10, "frequencyQuoted": "10 per cycle",
+          "quote": "Satellite operations: Single-event upsets, noise in imaging systems, and slight reduction of efficiency in solar panel are likely. Other systems: Degraded HF radio propagation through the polar regions and navigation position errors likely. 10 3 10 per cycle" },
+        { "level": 4, "name": "Severe", "threshold": { "value": 10000, "unit": "pfu", "quoted": "10 4" }, "eventsPerCycle": 3, "frequencyQuoted": "3 per cycle",
+          "quote": "Satellite operations: May experience memory device problems and noise on imaging systems; star-tracker problems may cause orientation problems, and solar panel efficiency can be degraded. Other systems: Blackout of HF radio communications through the polar regions and increased navigation errors over several days are likely. 10 4 3 per cycle" },
+        { "level": 5, "name": "Extreme", "threshold": { "value": 100000, "unit": "pfu", "quoted": "10 5" }, "eventsPerCycle": 0, "frequencyQuoted": "Fewer than 1 per cycle",
+          "quote": "Satellite operations: Satellites may be rendered useless, memory impacts can cause loss of control, may cause serious noise in image data, star-trackers may be unable to locate sources; permanent damage to solar panels possible. Other systems: Complete blackout of HF (high frequency) communications possible through the polar regions, and position errors make navigation operations extremely difficult. 10 5 Fewer than 1 per cycle" }
+      ],
+      "note": "The page renders the flux exponents as \"10 2\" … \"10 5\" (superscripts flattened). NOAA counts events, not days, for this scale; hazards.js counts each event as one day (est.). \"Fewer than 1 per cycle\" is stored as 0 and never generated (only reachable through conditions overrides)."
+    },
+    "radioBlackout": {
+      "measure": "GOES X-ray peak flux, W/m2",
+      "measureQuote": "Flux, measured in the 0.1-0.8 nm range, in W· m-2",
+      "measureUrl": "https://www.swpc.noaa.gov/sites/default/files/images/NOAAscales.pdf",
+      "levels": [
+        { "level": 1, "name": "Minor", "flareClass": "M1", "threshold": { "value": 1e-5, "unit": "W/m2", "quoted": "M1 (10 -5 )" }, "daysPerCycle": 950, "frequencyQuoted": "950 days per cycle",
+          "quote": "HF Radio: Weak or minor degradation of HF radio communication on sunlit side, occasional loss of radio contact. Navigation: Low-frequency navigation signals degraded for brief intervals. M1 (10 -5 ) 2000 per cycle (950 days per cycle)" },
+        { "level": 2, "name": "Moderate", "flareClass": "M5", "threshold": { "value": 5e-5, "unit": "W/m2", "quoted": "M5 (5 x 10 -5 )" }, "daysPerCycle": 300, "frequencyQuoted": "300 days per cycle",
+          "quote": "HF Radio: Limited blackout of HF radio communication on sunlit side, loss of radio contact for tens of minutes. Navigation: Degradation of low-frequency navigation signals for tens of minutes. M5 (5 x 10 -5 ) 350 per cycle (300 days per cycle)" },
+        { "level": 3, "name": "Strong", "flareClass": "X1", "threshold": { "value": 1e-4, "unit": "W/m2", "quoted": "X1 (10 -4 )" }, "daysPerCycle": 140, "frequencyQuoted": "140 days per cycle",
+          "quote": "HF Radio: Wide area blackout of HF radio communication, loss of radio contact for about an hour on sunlit side of Earth. Navigation: Low-frequency navigation signals degraded for about an hour. X1 (10 -4 ) 175 per cycle (140 days per cycle)" },
+        { "level": 4, "name": "Severe", "flareClass": "X10", "threshold": { "value": 1e-3, "unit": "W/m2", "quoted": "X10 (10 -3 )" }, "daysPerCycle": 8, "frequencyQuoted": "8 days per cycle",
+          "quote": "HF Radio: HF radio communication blackout on most of the sunlit side of Earth for one to two hours. HF radio contact lost during this time. Navigation: Outages of low-frequency navigation signals cause increased error in positioning for one to two hours. Minor disruptions of satellite navigation possible on the sunlit side of Earth. X10 (10 -3 ) 8 per cycle (8 days per cycle)" },
+        { "level": 5, "name": "Extreme", "flareClass": "X20", "threshold": { "value": 2e-3, "unit": "W/m2", "quoted": "X20 (2 x 10 -3 )" }, "daysPerCycle": 0, "frequencyQuoted": "Less than 1 per cycle",
+          "quote": "HF Radio: Complete HF (high frequency) radio blackout on the entire sunlit side of the Earth lasting for a number of hours. This results in no HF radio contact with mariners and en route aviators in this sector. Navigation: Low-frequency navigation signals used by maritime and general aviation systems experience outages on the sunlit side of the Earth for many hours, causing loss in positioning. Increased satellite navigation errors in positioning for several hours on the sunlit side of Earth, which may spread into the night side. X20 (2 x 10 -3 ) Less than 1 per cycle" }
+      ],
+      "note": "NOAA lists no spacecraft effects for radio blackouts (HF radio and navigation only), so hazards.js shows R3 and above as cautions, never a scrub. \"Less than 1 per cycle\" is stored as 0 and never generated."
+    },
+    "precedents": [
+      {
+        "id": "escapade-g4-hold",
+        "what": "A launch stood down for space weather: NASA's ESCAPADE on Blue Origin's New Glenn, 12 Nov 2025, under a NOAA G4 (Severe) watch",
+        "threshold": { "value": 4, "unit": "G", "quoted": "G4 Severe Watch" },
+        "quote": "In a post on social media, the company said NASA made the call to stand down “due to highly elevated solar activity and its potential effects on the ESCAPADE spacecraft.”",
+        "quote2": "On Tuesday afternoon, NOAA’s Space Weather Prediction Center forecast a G4 Severe Watch connected to a coronal mass ejection first detected on Sunday, Nov. 9.",
+        "url": "https://spaceflightnow.com/2025/11/11/live-coverage-blue-origin-targets-nov-12-new-glenn-launch-following-weekend-weather-scrub/",
+        "tier": "news: Spaceflight Now, quoting Blue Origin's post",
+        "note": "A payload owner's call, not a range rule: no published launch-commit threshold for space weather was found. hazards.js holds at G4 and above as a model rule (est.) on this precedent."
+      },
+      {
+        "id": "starlink-2022-drag",
+        "what": "Storm-driven drag in a low deployment orbit: Starlink Group 4-7, February 2022",
+        "threshold": { "value": 210, "unit": "km", "quoted": "210 km" },
+        "quote": "On 03 February 2022, SpaceX launched 49 Starlink satellites, 38 of which re-entered the atmosphere on or about 07 February 2022 due to unexpectedly high atmospheric drag.",
+        "quote2": "thermospheric density was at least 20%–30% higher at 210 km relative to the 9 days prior to the launch due to consecutive geomagnetic storms",
+        "url": "https://impacts.ucar.edu/en/publications/the-thermosphere-is-a-drag-the-2022-starlink-incident-and-the-thr/",
+        "tier": "peer-reviewed: Berger et al. 2023, \"The Thermosphere Is a Drag\", Space Weather (abstract on the UCAR page)",
+        "note": "ascent.js parks every flight at 200 km, close to that 210 km, so any storm (G1+) adds a drag caution."
+      }
+    ],
+    "radiationHoldNote": "No launch was found held for a solar radiation storm. hazards.js holds at S4 and above as a model rule (est.), on NOAA's S4 wording (star-tracker problems may cause orientation problems)."
+  },
+
+  "debris": {
+    "screening": {
+      "quote": "an operator must establish window closures needed to ensure that the launch or reentry vehicle, any jettisoned components, or payloads meet the following requirements with respect to orbiting objects",
+      "quote2": "For an orbital launch, during ascent from a minimum of 150 km to initial orbital insertion and for a minimum of 3 hours from liftoff",
+      "url": "https://www.ecfr.gov/current/title-14/chapter-III/subchapter-C/part-450/subpart-C/section-450.169",
+      "tier": "official: 14 CFR § 450.169(a) and (b)(2), FAA launch and reentry collision avoidance"
+    },
+    "limits": [
+      {
+        "id": "pc-inhabitable",
+        "object": "inhabitable",
+        "label": "a crewed station",
+        "threshold": { "value": 1e-6, "unit": "Pc", "quoted": "1 × 10−6", "compare": "exceed" },
+        "quote": "The probability of collision between the launching or reentering objects and any inhabitable object must not exceed 1 × 10−6;",
+        "alternative": "The launching or reentering objects must maintain a spherical separation distance of 200 km from the inhabitable object.",
+        "url": "https://www.ecfr.gov/current/title-14/chapter-III/subchapter-C/part-450/subpart-C/section-450.169",
+        "tier": "official: 14 CFR § 450.169(a)(1)(i), (iii)"
+      },
+      {
+        "id": "pc-spacecraft",
+        "object": "spacecraft",
+        "label": "a satellite",
+        "threshold": { "value": 1e-5, "unit": "Pc", "quoted": "1 × 10−5", "compare": "exceed" },
+        "quote": "For objects that are neither orbital debris nor inhabitable, one of the two criteria below must be met: (i) The probability of collision between the launching or reentering objects and any object must not exceed 1 × 10−5;",
+        "alternative": "The launching or reentering objects must maintain a spherical separation distance of 25 km from the object.",
+        "url": "https://www.ecfr.gov/current/title-14/chapter-III/subchapter-C/part-450/subpart-C/section-450.169",
+        "tier": "official: 14 CFR § 450.169(a)(2)"
+      },
+      {
+        "id": "pc-debris",
+        "object": "debris",
+        "label": "tracked debris",
+        "threshold": { "value": 1e-5, "unit": "Pc", "quoted": "1 × 10−5", "compare": "exceed" },
+        "quote": "The probability of collision between the launching or reentering objects and any known orbital debris must not exceed 1 × 10−5;",
+        "alternative": "The launching or reentering objects must maintain a spherical separation distance of 2.5 km.",
+        "url": "https://www.ecfr.gov/current/title-14/chapter-III/subchapter-C/part-450/subpart-C/section-450.169",
+        "tier": "official: 14 CFR § 450.169(a)(3)",
+        "note": "Applies to debris with radar cross section above 0.1 m2 (\"large objects with radar cross section greater than 1 m2 and medium objects with radar cross section 0.1 m2 to 1 m2\")."
+      },
+      {
+        "id": "pc-cara-attention",
+        "object": "any",
+        "label": "NASA's on-orbit practice",
+        "threshold": { "value": 1e-7, "unit": "Pc", "quoted": "1E‑07", "compare": "greater than" },
+        "mitigation": { "value": 1e-4, "unit": "Pc", "quoted": "1E-04" },
+        "quote": "At NASA CARA, Pc values greater than 1E‑07 merit operational attention, and values greater than 1E-04 require mitigation actions.",
+        "url": "https://www.nasa.gov/cara/close-approach-risk-assessment/",
+        "tier": "official: NASA Conjunction Assessment Risk Analysis (CARA), Close Approach Risk Assessment",
+        "note": "On-orbit spacecraft practice (maneuver at 1E-04), not a launch rule; hazards.js shows Pc above 1E-07 as a caution. The quote's first hyphen is a non-breaking hyphen on the page."
+      }
+    ]
+  },
+
+  "window": {
+    "kinds": [
+      {
+        "id": "flexible",
+        "line": "Window: flexible",
+        "quote": "For trips into largely arbitrary Earth orbits, no specific launch time is required.",
+        "url": "https://en.wikipedia.org/w/index.php?title=Launch_window&oldid=1303974744",
+        "tier": "secondary: Wikipedia, Launch window (revision 1303974744)",
+        "missions": ["leo"]
+      },
+      {
+        "id": "parking-orbit",
+        "line": "Window: flexible (parking orbit)",
+        "quote": "For launches above low Earth orbit (LEO), the actual launch time can be somewhat flexible if a parking orbit is used, because the inclination and time the spacecraft initially spends in the parking orbit can be varied.",
+        "url": "https://en.wikipedia.org/w/index.php?title=Launch_window&oldid=1303974744",
+        "tier": "secondary: Wikipedia, Launch window (revision 1303974744)",
+        "missions": ["gto", "earth-escape"]
+      },
+      {
+        "id": "lunar",
+        "line": "Window: 2 TLI chances per launch",
+        "quote": "Two opportunities for translunar injection are provided.",
+        "url": "https://ntrs.nasa.gov/api/citations/19750063889/downloads/19750063889.pdf",
+        "tier": "official: Saturn V Flight Manual SA-503, MSFC-MAN-503, Section II Performance (Flight Performance and Flight Geometry Reserves, Option 1 mission)",
+        "note": "First opportunity after about 1.5 parking-orbit revolutions, second after 2.5 (same section). Combined with the parking-orbit flexibility above.",
+        "missions": ["moon-transfer", "lunar-orbit"]
+      },
+      {
+        "id": "planetary",
+        "line": "Window: Mars every 26 months",
+        "quote": "a few weeks every 26 months (e.g. Mars launch periods)",
+        "quote2": "in the case of Mars, the period is 780 days (2.1 years)",
+        "threshold": { "value": 780, "unit": "days", "quoted": "780 days" },
+        "url": "https://en.wikipedia.org/w/index.php?title=Launch_window&oldid=1303974744",
+        "tier": "secondary: Wikipedia, Launch window (revision 1303974744), citing NASA's InSight launch announcement",
+        "missions": ["mars-transfer"]
+      },
+      {
+        "id": "instantaneous",
+        "line": "Window: instantaneous",
+        "quote": "For missions with very specific orbits, such as rendezvousing with the International Space Station, the launch window may be a single moment in time, known as an instantaneous launch window.",
+        "url": "https://en.wikipedia.org/w/index.php?title=Launch_window&oldid=1303974744",
+        "tier": "secondary: Wikipedia, Launch window (revision 1303974744)",
+        "note": "No mission in missions.json rendezvouses; kept for a future ISS mission.",
+        "missions": []
+      }
+    ],
+    "planeChange": {
+      "formula": "dv = 2 v sin(di / 2)",
+      "quote": "Where both orbits are circular (i.e. e = 0) and have the same radius the Delta-v (Δv_i) required for an inclination change (Δi) can be calculated using: Δv_i = 2v sin(Δi/2) where v is the orbital velocity and has the same units as Δv_i.",
+      "quote2": "In general, inclination changes can take a very large amount of delta-v to perform, and most mission planners try to avoid them whenever possible to conserve fuel.",
+      "url": "https://en.wikipedia.org/w/index.php?title=Orbital_inclination_change&oldid=1296348363",
+      "tier": "secondary: Wikipedia, Orbital inclination change (revision 1296348363), citing Braeunig, Basics of Space Flight: Orbital Mechanics",
+      "note": "A formula, not a rule of thumb: hazards.planeChangeDeltaV_ms(v, di) computes it (derived)."
+    }
+  }
+}

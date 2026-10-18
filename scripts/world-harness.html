@@ -1,0 +1,178 @@
+<!doctype html>
+<!--
+  Visual harness for the round-15 photoreal world in src/planet.js. Not part of the demo.
+  Serve the repo root with Vite on a free port (never 5173), then open
+    /scripts/world-harness.html?view=orbit     photoreal Earth from orbit: clouds, terminator, city lights, limb
+    /scripts/world-harness.html?view=moon      Nova-C (legs out) on lunar terrain, low sun, real shadows, Earth up
+    /scripts/world-harness.html?view=mars      Nova-C on Mars terrain under a butterscotch sky with dust haze
+    /scripts/world-harness.html?view=ocean     the drone ship bobbing on the ocean, sky reflection and sun glint
+  Params: build (moon/mars: preset whose payload lands, default delta-iv-m = Nova-C), lm=1 (land only the payload's
+  landable sub-part, landerOf: the Apollo LM), kind (orbit: earth|moon|mars), t (seconds of self-rotation, orbit), seed (terrain), close=1 (moon/mars:
+  camera close on the lander).
+  window.__ready is set after ~45 frames once every texture has loaded.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>World harness</title>
+    <style>
+      html, body { margin: 0; background: #000; overflow: hidden; }
+      canvas { display: block; }
+    </style>
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+    <script type="module">
+      import * as THREE from "three";
+      import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+      import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+      import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+      import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+      import { createPlanet, createTerrain, createOcean, createSkyDome, skyAt, enableShadowCasting } from "../src/planet.js";
+      import { applyDeploy, createMaterials, createPart, createStars, deployables, landerOf, setShellOpacity } from "../src/parts.js";
+      import { createDroneShip } from "../src/anchors.js";
+      import { lightingFor } from "../src/arrival.js";
+      import { buildManifest } from "../src/layout.js";
+      import { catalog, getPreset, presetToBuild } from "../src/data/catalog.js";
+
+      const q = new URLSearchParams(location.search);
+      const view = q.get("view") ?? "orbit";
+      let loading = false;
+      THREE.DefaultLoadingManager.onStart = () => (loading = true);
+      THREE.DefaultLoadingManager.onLoad = () => (loading = false);
+      THREE.DefaultLoadingManager.onError = (url) => console.error("texture failed", url);
+      const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("c"), antialias: true, preserveDrawingBuffer: true });
+      renderer.setPixelRatio(1);
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.0;
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x000000);
+      const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.05, 6000);
+      const updates = [];
+
+      // Nova-C (Delta IV M preset payload), adapter hidden, legs deployed, standing on y = 0.
+      function lander() {
+        const manifest = buildManifest(presetToBuild(getPreset(q.get("build") ?? "delta-iv-m")), catalog);
+        const spec = manifest.find((s) => s.kind === "payload");
+        const part = createPart(spec, createMaterials());
+        setShellOpacity(part, 0.92);
+        for (const p of part.pieces) if (p.mesh.userData.adapter) p.mesh.visible = false; // adapter cone + clamp band
+        const lm = q.get("lm") === "1" ? landerOf(part) : null;
+        if (lm) {
+          // only the landable sub-part (Apollo LM), legs out, feet on the ground
+          for (const d of lm.deployables) applyDeploy(d, 1);
+          lm.group.position.y = -lm.feetY_u;
+          enableShadowCasting(lm.group);
+          lm.group.traverse((o) => o.isLine && (o.castShadow = false));
+          return { part: { group: lm.group, size_u: lm.height_u + Math.abs(lm.feetY_u) }, spec };
+        }
+        for (const p of deployables(part)) applyDeploy(p, 1);
+        part.group.position.y = 0;
+        part.group.updateMatrixWorld(true);
+        const bb = new THREE.Box3();
+        for (const p of part.pieces) if (p.mesh.visible) bb.expandByObject(p.mesh);
+        part.group.position.y = -bb.min.y;
+        part.size_u = bb.max.y - bb.min.y;
+        enableShadowCasting(part.group);
+        part.group.traverse((o) => o.isLine && (o.castShadow = false));
+        return { part, spec };
+      }
+
+      if (view === "orbit") {
+        const R = 40;
+        const stars = createStars(); // a 90-130 u shell: push it out past the globe
+        stars.scale.setScalar(30);
+        stars.material.size *= 30;
+        scene.add(stars);
+        const planet = createPlanet({ kind: q.get("kind") ?? "earth", radius_u: R, mode: "photoreal" });
+        planet.setSunDir(new THREE.Vector3(-0.9, 0.35, 0.1)); // from the left: day, terminator and night side in frame
+        scene.add(planet.object3d);
+        const t0 = +(q.get("t") ?? 0);
+        updates.push((t) => planet.update(t0 + t));
+        camera.position.set(R * 0.35, R * 0.55, R * 2.55);
+        camera.lookAt(R * 0.1, R * 0.05, 0);
+      } else if (view === "moon" || view === "mars") {
+        const body = view;
+        const light = lightingFor(body);
+        const sunDir = new THREE.Vector3(...light.sunDir);
+        const terrain = createTerrain({ body, size_u: 60, seed: +(q.get("seed") ?? 7), padRadius_u: 2 });
+        scene.add(terrain.object3d);
+        scene.add(new THREE.HemisphereLight(body === "mars" ? 0xc9a27a : 0x9aa4b4, body === "mars" ? 0x5a3a28 : 0x111111, body === "mars" ? 0.9 : 0.12));
+        const { part } = lander();
+        scene.add(part.group);
+        if (body === "moon") {
+          scene.add(createStars());
+          const earth = createPlanet({ kind: "earth", radius_u: 2.2, mode: "photoreal" });
+          earth.setSunDir(sunDir);
+          earth.object3d.position.set(-14, 9, -60);
+          scene.add(earth.object3d);
+          updates.push((t) => earth.update(t + 40));
+          if (q.get("close") === "1") {
+            const k = Math.max(1, part.size_u / 1.1); // framed for Nova-C's ~1.1 u, scaled for bigger payloads
+            camera.position.set(1.7 * k, 0.75 * k, 1.6 * k); // close-up on the lander
+            camera.lookAt(0, 0.38 * k, 0);
+          } else {
+            camera.position.set(6.5, 2.4, 5.5); // sun side, so the long shadow runs away from the camera
+            camera.lookAt(-2.5, 0.2, -0.5);
+          }
+        } else {
+          const sky = skyAt(0, sunDir, "mars");
+          const dome = createSkyDome({ radius_u: 2000 });
+          dome.set(sky, sunDir);
+          scene.add(dome.object3d);
+          scene.fog = new THREE.Fog(sky.horizon.clone(), 12, 60);
+          updates.push(() => dome.update(camera));
+          camera.position.set(2.4, 1.1, 6.6);
+          camera.lookAt(-0.6, 0.6, 0);
+        }
+      } else {
+        const sunDir = new THREE.Vector3(-0.45, 0.32, -0.83).normalize(); // low, behind the ship: a glint path
+        const sky = skyAt(0, sunDir, "earth");
+        const dome = createSkyDome({ radius_u: 2000 });
+        dome.set(sky, sunDir);
+        scene.add(dome.object3d);
+        scene.fog = new THREE.Fog(sky.horizon.clone(), 300, 1900);
+        const ocean = createOcean({ size_u: 4000, sunDir });
+        ocean.setSky(sky);
+        scene.add(ocean.object3d);
+        const key = new THREE.DirectionalLight(0xfff1e0, 2.4);
+        key.position.copy(sunDir).multiplyScalar(100);
+        scene.add(key, new THREE.HemisphereLight(0x9cc0ff, 0x0a1a28, 0.6));
+        const ship = createDroneShip({ size_u: 22 });
+        scene.add(ship.object3d);
+        ocean.setHull({ position: ship.object3d.position, length_u: ship.length_u, width_u: ship.width_u, yaw: 0 });
+        updates.push((t, dt) => {
+          ocean.update(dt);
+          dome.update(camera);
+          const b = ocean.bob(t);
+          ship.object3d.position.y = ship.freeboard_u + b.y;
+          ship.object3d.rotation.set(b.rx, 0, b.rz);
+        });
+        camera.position.set(14, 6, 30);
+        camera.lookAt(0, 0, 0);
+      }
+
+      const composer = new EffectComposer(renderer);
+      composer.addPass(new RenderPass(scene, camera));
+      composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.3, 0.5, 0.85));
+      composer.addPass(new OutputPass());
+      let frame = 0;
+      let time = 0;
+      function tick() {
+        const dt = 1 / 60; // fixed step so shots are repeatable
+        time += dt;
+        for (const u of updates) u(time, dt, frame);
+        composer.render();
+        if (!loading && ++frame === 45) {
+          document.title = `ready ${view} · ${renderer.info.render.calls} calls`;
+          window.__ready = true;
+        }
+        requestAnimationFrame(tick);
+      }
+      tick();
+    </script>
+  </body>
+</html>

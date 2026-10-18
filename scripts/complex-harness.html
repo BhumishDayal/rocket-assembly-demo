@@ -1,0 +1,227 @@
+<!doctype html>
+<!--
+  Visual harness for src/complex.js (the launch complex around the pad). Not part of the demo.
+  Serve the repo root with Vite on a free port (never 5173; own cacheDir, no HMR), then open
+    /scripts/complex-harness.html?view=home      the builder's home framing (stack at ~85 % of the height)
+    /scripts/complex-harness.html?view=wide      the whole complex from high up
+    /scripts/complex-harness.html?view=pad       the director's low pad camera
+    /scripts/complex-harness.html?view=top       plan view (layout debugging)
+  Params: build (preset id, default falcon-9), look (painted | xray), spots (1 | 0: the two SpotLights),
+  complex (0: leave the complex out, a baseline for __perf), hide (comma-separated object names to hide, perf
+  bisection), rss (deg, 0 parked … 120 mated), gtao (1 | 0), lite (1: no post), az / el / dist (override the
+  camera), t (seconds for the beacons), dpr (pixel ratio; 2+ stresses the GPU for __perf comparisons).
+  Scene set-up mirrors src/main.js: renderer, exposure, key / fill / hemisphere lights, room environment,
+  key-light shadow box from the stack, stars, half-res GTAO + bloom; the pad from createPad, the stack from
+  createPart (painted), the line-art ground map, and the complex added under the pad group. The fog band is
+  complex.fogRange(dist) (main.js's builder band would hide the complex; see the module header).
+  window.__ready is set after ~45 frames; window.__perf(frames) resolves to { ms, fps, calls, triangles }.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Complex harness</title>
+    <style>
+      html, body { margin: 0; background: #0b0d12; overflow: hidden; }
+      canvas { display: block; }
+    </style>
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+    <script type="module">
+      import * as THREE from "three";
+      import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+      import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+      import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+      import { GTAOPass } from "three/addons/postprocessing/GTAOPass.js";
+      import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+      import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+      import { createMaterials, createPart, createPad, createStars, setShellOpacity } from "../src/parts.js";
+      import { buildManifest, sceneBounds } from "../src/layout.js";
+      import { catalog, getPreset, presetToBuild } from "../src/data/catalog.js";
+      import { createGroundMap } from "../src/fx/launchfx.js";
+      import { createLaunchComplex } from "../src/complex.js";
+
+      const q = new URLSearchParams(location.search);
+      const view = q.get("view") ?? "home";
+      const lite = q.get("lite") === "1";
+      const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("c"), antialias: !lite, powerPreference: "high-performance", preserveDrawingBuffer: true });
+      renderer.setPixelRatio(+(q.get("dpr") ?? 1)); // dpr=2: a GPU stress setting for __perf comparisons
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 0.95;
+      renderer.shadowMap.enabled = !lite;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0b0d12);
+      scene.fog = new THREE.Fog(0x0b0d12, 45, 130);
+      const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 6000);
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+      scene.environmentIntensity = 0.25;
+      const KEY_DIR = new THREE.Vector3(-0.34, 1.1, 0.94).normalize();
+      const key = new THREE.DirectionalLight(0xffb48a, 2.8);
+      key.castShadow = !lite;
+      key.shadow.mapSize.set(2048, 2048);
+      key.shadow.bias = -0.0004;
+      key.shadow.normalBias = 0.02;
+      scene.add(key, key.target);
+      const fill = new THREE.DirectionalLight(0x6a7fa8, 0.3);
+      fill.position.set(0.34, 0.45, -0.94).multiplyScalar(40);
+      scene.add(fill, new THREE.HemisphereLight(0x8fa6c8, 0x0f1118, 0.08));
+      const stars = createStars();
+      stars.scale.setScalar(30);
+      stars.material.size *= 30;
+      scene.add(stars);
+
+      // Stack (painted), pad, ground map, complex.
+      const preset = getPreset(q.get("build") ?? "falcon-9") ?? getPreset("falcon-9");
+      const manifest = buildManifest(presetToBuild(preset), catalog);
+      const bounds = sceneBounds(manifest);
+      const H = bounds.height_u;
+      const mats = createMaterials();
+      const root = new THREE.Group();
+      scene.add(root);
+      for (const spec of manifest) {
+        const part = createPart(spec, mats);
+        setShellOpacity(part, q.get("look") === "xray" ? 0.3 : 0.92);
+        root.add(part.group);
+      }
+      const pad = createPad({ baseRadius_u: bounds.baseRadius_u });
+      const map = createGroundMap({ y_u: -pad.layout.plinthH - 0.01 });
+      pad.group.add(map.object3d);
+      root.add(pad.group);
+      const t0 = performance.now();
+      const complex = createLaunchComplex({ baseRadius_u: bounds.baseRadius_u, stackHeight_u: H, manifest, spotLights: q.get("spots") !== "0" });
+      const buildMs = performance.now() - t0;
+      if (q.get("complex") !== "0") pad.group.add(complex.object3d); // adopts the pad: hides its ground disc + grid, lowers the map
+      for (const name of (q.get("hide") ?? "").split(",").filter(Boolean)) complex.object3d.traverse((o) => o.name === name && (o.visible = false)); // perf bisection
+      if (q.get("look") === "xray") complex.setLook("xray");
+      complex.setRssAngle(+(q.get("rss") ?? 0));
+
+      // Key-light shadow box (main.js applyBounds / placeShadow, at rest).
+      const half = Math.max(8, H * 0.85, bounds.radius_u * 6);
+      const sc = key.shadow.camera;
+      sc.left = sc.bottom = -half;
+      sc.right = sc.top = half;
+      sc.near = 1;
+      sc.far = H * 3.2 + 45;
+      sc.updateProjectionMatrix();
+      key.target.position.set(0, H * 0.45, 0);
+      key.position.copy(key.target.position).addScaledVector(KEY_DIR, H * 1.5 + 20);
+
+      // Cameras.
+      const HOME_PITCH = 0.24314628747881506; // main.js's starting camera elevation
+      const tanHalf = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+      function fitDist(h, r, frac, pitch) {
+        const dv = (h * Math.cos(pitch) + 2 * r * Math.sin(pitch)) / (2 * tanHalf * frac);
+        const dh = (2 * r) / (2 * tanHalf * camera.aspect * frac);
+        return Math.max(dv, dh) + r;
+      }
+      const place = (target, az, el, dist) => {
+        camera.position.copy(target).add(new THREE.Vector3(Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el)).multiplyScalar(dist));
+        camera.lookAt(target);
+        return dist;
+      };
+      let dist;
+      let target;
+      if (view === "wide") {
+        target = new THREE.Vector3(0, H * 0.1, 0).addScaledVector(new THREE.Vector3(Math.sin(0.58 + Math.PI), 0, Math.cos(0.58 + Math.PI)), complex.radius_u * 0.12);
+        dist = place(target, +(q.get("az") ?? 0.58 + 0.5), THREE.MathUtils.degToRad(+(q.get("el") ?? 27)), +(q.get("dist") ?? complex.radius_u * 1.05));
+        scene.fog.near = dist * 0.6;
+        scene.fog.far = dist + complex.radius_u * 1.5;
+      } else if (view === "top") {
+        target = new THREE.Vector3(0, 0, -complex.radius_u * 0.15);
+        camera.position.set(0, complex.radius_u * 3, -complex.radius_u * 0.15 + 0.01);
+        camera.lookAt(target);
+        dist = complex.radius_u * 3;
+        scene.fog.near = dist;
+        scene.fog.far = dist * 3;
+      } else if (view === "pad") {
+        const phiT = Math.atan2(complex.tower.position.x, complex.tower.position.z);
+        const opts = [phiT - 1.15, phiT + 1.15];
+        const near = (a) => Math.abs(Math.atan2(Math.sin(a - 0.58), Math.cos(a - 0.58)));
+        const az = near(opts[0]) < near(opts[1]) ? opts[0] : opts[1];
+        const d = H * 1.9;
+        camera.position.set(Math.sin(az) * d, Math.max(0.5, H * 0.12), Math.cos(az) * d);
+        target = new THREE.Vector3(0, H * 0.39, 0);
+        camera.lookAt(target);
+        dist = camera.position.distanceTo(target);
+        Object.assign(scene.fog, complex.fogRange(dist));
+      } else {
+        const pitch = q.get("el") ? THREE.MathUtils.degToRad(+q.get("el")) : HOME_PITCH;
+        const d = +(q.get("dist") ?? fitDist(H, bounds.radius_u, 0.83, pitch));
+        target = new THREE.Vector3(0, H / 2 - 0.02 * 2 * d * tanHalf, 0);
+        dist = place(target, +(q.get("az") ?? 0.58), pitch, d);
+        Object.assign(scene.fog, complex.fogRange(dist));
+      }
+
+      let composer = null;
+      if (!lite) {
+        composer = new EffectComposer(renderer);
+        composer.addPass(new RenderPass(scene, camera));
+        if (q.get("gtao") !== "0") {
+          // as main.js's SolidGTAOPass: half resolution, skipping what writes no depth
+          class SolidGTAOPass extends GTAOPass {
+            setSize(width, height) {
+              super.setSize(Math.max(1, Math.round(width / 2)), Math.max(1, Math.round(height / 2)));
+            }
+            _overrideVisibility() {
+              super._overrideVisibility();
+              const cache = this._visibilityCache;
+              this.scene.traverse((o) => {
+                if (o.isMesh && o.visible && o.material && o.material.depthWrite === false) {
+                  o.visible = false;
+                  cache.push(o);
+                }
+              });
+            }
+          }
+          const pr = renderer.getPixelRatio();
+          const gtao = new SolidGTAOPass(scene, camera, innerWidth * pr, innerHeight * pr);
+          gtao.updateGtaoMaterial({ radius: 0.6, distanceExponent: 1.5, thickness: 1.2, scale: 1, samples: 16 });
+          gtao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 6, rings: 2, samples: 16 });
+          gtao.blendIntensity = 0.55;
+          composer.addPass(gtao);
+        }
+        composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.36, 0.55, 0.8));
+        composer.addPass(new OutputPass());
+      }
+
+      let frame = 0;
+      let time = +(q.get("t") ?? 0);
+      const waiters = [];
+      renderer.info.autoReset = false; // count every pass of a frame
+      function tick(now) {
+        renderer.info.reset();
+        time += 1 / 60;
+        complex.update(time);
+        if (composer) composer.render();
+        else renderer.render(scene, camera);
+        for (const w of [...waiters]) w(now);
+        if (++frame === 45) {
+          document.title = `ready ${view} · ${renderer.info.render.calls} calls · build ${buildMs.toFixed(0)} ms`;
+          window.__ready = true;
+        }
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+      // Average frame time over n frames (rAF to rAF), plus the renderer's counts for the last frame.
+      window.__perf = (n = 120) =>
+        new Promise((resolve) => {
+          const stamps = [];
+          const w = (now) => {
+            stamps.push(now);
+            if (stamps.length > n) {
+              waiters.splice(waiters.indexOf(w), 1);
+              const ms = (stamps[stamps.length - 1] - stamps[0]) / (stamps.length - 1);
+              resolve({ ms, fps: 1000 / ms, calls: renderer.info.render.calls, triangles: renderer.info.render.triangles, programs: renderer.info.programs.length });
+            }
+          };
+          waiters.push(w);
+        });
+      window.__complex = complex;
+      window.__info = () => ({ calls: renderer.info.render.calls, triangles: renderer.info.render.triangles, buildMs, dist, radius_u: complex.radius_u });
+    </script>
+  </body>
+</html>

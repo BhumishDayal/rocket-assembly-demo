@@ -1,0 +1,137 @@
+<!doctype html>
+<!--
+  Visual harness for src/plume.js, src/silhouette.js and src/anchors.js: a built stack firing one stage, with
+  the round-10 light rig and bloom. Not part of the demo.
+  Serve the repo root with Vite on a free port (never 5173), then open
+    /scripts/plume-harness.html?build=falcon-9&p=101325&throttle=1      sea level
+    /scripts/plume-harness.html?build=falcon-9&p=0                      vacuum
+  Params: build (preset id), cam=x,y,z&look=x,y,z (absolute camera override, scene units), stage (engines part to fire, default 0), p (ambient Pa), throttle (0..1),
+  alt (metres the stack is lifted off the pad, as in flight; on the pad the plume goes into the deck),
+  ty / dist (camera target above the lifted base and distance, as fractions of the stack), twin=1 (adds a silhouette),
+  anchors=1 (scale anchors: person, tower, trench, floodlight masts), deploy=0..1 (articulated deploys at that
+  fraction, by the hinge formula in parts.js), hide=fairing,s1-tank (part ids not drawn), focus=<part id> (frame
+  that part instead of the stack; ty/dist then relative to the part).
+  window.__ready is set after ~40 animated frames.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Plume harness</title>
+    <style>
+      html, body { margin: 0; background: #0b0d12; overflow: hidden; }
+      canvas { display: block; }
+    </style>
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+    <script type="module">
+      import * as THREE from "three";
+      import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+      import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+      import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+      import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+      import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+      import { buildManifest, sceneBounds } from "../src/layout.js";
+      import { applyDeploy, createMaterials, createPart, createPad, createStars, deployables, setBellGlow } from "../src/parts.js";
+      import { attachPlumes, createPadLight, P0 } from "../src/plume.js";
+      import { createSilhouette } from "../src/silhouette.js";
+      import { createAnchors } from "../src/anchors.js";
+      import { catalog, getPreset, presetToBuild } from "../src/data/catalog.js";
+
+      const q = new URLSearchParams(location.search);
+      const num = (k, d) => (q.has(k) ? +q.get(k) : d);
+      const pressure = num("p", P0);
+      const throttle = num("throttle", 1);
+      const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("c"), antialias: true, preserveDrawingBuffer: true });
+      renderer.setPixelRatio(1);
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 0.95;
+      renderer.shadowMap.enabled = true;
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0b0d12);
+      const manifest = buildManifest(presetToBuild(getPreset(q.get("build") ?? "falcon-9")), catalog);
+      const bounds = sceneBounds(manifest);
+      const H = bounds.height_u;
+      scene.fog = new THREE.Fog(0x0b0d12, H * 2.5, H * 7);
+      scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+      scene.environmentIntensity = 0.25;
+      const key = new THREE.DirectionalLight(0xffb48a, 2.2);
+      key.position.set(-H * 0.45, H * 0.95, H * 0.75);
+      key.castShadow = true;
+      Object.assign(key.shadow, { bias: -0.0004, normalBias: 0.02 }); // as main.js
+      key.shadow.mapSize.set(2048, 2048);
+      Object.assign(key.shadow.camera, { left: -H * 0.75, right: H * 0.75, top: H * 0.75, bottom: -H * 0.75, near: 1, far: H * 3 });
+      const fill = new THREE.DirectionalLight(0x6a7fa8, 0.5);
+      fill.position.set(H * 0.6, H * 0.3, -H * 0.6);
+      scene.add(key, fill, new THREE.HemisphereLight(0x8fa6c8, 0x0f1118, 0.2));
+      scene.add(createPad({ baseRadius_u: bounds.baseRadius_u }).group, createStars());
+
+      const mats = createMaterials();
+      const stage = num("stage", 0);
+      const alt = num("alt", 0) * 0.25; // metres → scene units (SCALE)
+      const stack = new THREE.Group();
+      stack.position.y = alt;
+      scene.add(stack);
+      let plumes = [];
+      let firing = null; // the engines part that fires (bell glow follows the throttle)
+      const hide = new Set((q.get("hide") ?? "").split(",").filter(Boolean));
+      const k = num("deploy", 0);
+      for (const spec of manifest) {
+        const part = createPart(spec, mats);
+        if (hide.has(spec.id)) continue;
+        stack.add(part.group);
+        // p = pivot + R(axis, k·angle)·(rest − pivot), q = R·restQ; applyDeploy also poses the followers (pistons)
+        for (const piece of deployables(part)) applyDeploy(piece, k);
+        if (spec.kind === "engines" && spec.stageIndex === stage) (plumes = attachPlumes(part)), (firing = part);
+      }
+      const padLight = createPadLight({ baseRadius_u: bounds.baseRadius_u, bellExitRadius_u: Math.max(0.01, ...plumes.map((p) => p.exitRadius_u)) });
+      scene.add(padLight.object3d);
+      const anchors = q.get("anchors") === "1" ? createAnchors({ baseRadius_u: bounds.baseRadius_u, stackHeight_u: H, manifest }) : null;
+      if (anchors) scene.add(anchors.object3d);
+      let twin = null;
+      if (q.get("twin") === "1") {
+        twin = createSilhouette({ name: "twin", length_m: bounds.height_m, diameter_m: (bounds.baseRadius_u / 0.25) * 2, stages: 2 });
+        twin.object3d.position.x = bounds.radius_u * 6;
+        scene.add(twin.object3d);
+      }
+
+      const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.05, 600);
+      const focus = manifest.find((s) => s.id === q.get("focus"));
+      const ty = focus ? alt + focus.slotY + num("ty", 0.5) * focus.height : alt + num("ty", 0.5) * H;
+      const dist = focus ? num("dist", 1) * Math.max(2, focus.height * 2.4) : num("dist", 1) * Math.max(15, H * 1.42 + 5);
+      const az = (num("az", 35) * Math.PI) / 180;
+      const el = (num("el", 10) * Math.PI) / 180;
+      camera.position.set(Math.cos(el) * Math.sin(az) * dist, ty + Math.sin(el) * dist, Math.cos(el) * Math.cos(az) * dist);
+      camera.lookAt(0, ty, 0);
+      if (q.get("cam")) {
+        camera.position.set(...q.get("cam").split(",").map(Number));
+        camera.lookAt(...(q.get("look") ?? "0,0,0").split(",").map(Number));
+      }
+      const composer = new EffectComposer(renderer);
+      composer.addPass(new RenderPass(scene, camera));
+      composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.36, 0.55, 0.8));
+      composer.addPass(new OutputPass());
+
+      let frames = 0;
+      const clock = new THREE.Clock();
+      function frame() {
+        const dt = Math.min(clock.getDelta(), 0.05);
+        const camDist = camera.position.length();
+        for (const p of plumes) p.update(dt, { throttle, ambientPressure_Pa: pressure, cameraDistance: camDist });
+        if (firing) setBellGlow(firing, throttle);
+        padLight.update(dt, stage === 0 ? throttle : 0, alt / 0.25); // altitude in metres
+        twin?.update(camera);
+        anchors?.update(clock.elapsedTime);
+        composer.render();
+        if (q.get("debug") === "1") Object.assign(window, { __scene: scene, __renderer: renderer, __camera: camera });
+        if (++frames === 40) {
+          document.title = `ready ${plumes.length} plumes · p ${pressure} Pa · ${renderer.info.render.calls} calls`;
+          window.__ready = true;
+        }
+        requestAnimationFrame(frame);
+      }
+      frame();
+    </script>
+  </body>
+</html>

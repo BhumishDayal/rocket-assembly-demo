@@ -1,0 +1,170 @@
+<!doctype html>
+<!--
+  Visual harness for src/world.js (the far layer) under a near layer, composited like the flight will be:
+  world.createPass() first, then the near RenderPass with clear = false and clearDepth = true. Not part of the demo.
+  Serve the repo root with Vite on a free port (never 5173), then open
+    /scripts/far-harness.html?view=pad      on the pad at night, 2 m up, looking east: flat horizon, stars, haze
+    /scripts/far-harness.html?view=alt&km=100     100 km up over the Cape, looking east: curvature and the limb
+    /scripts/far-harness.html?view=alt&km=2000    2 000 km up looking down: the whole Earth (wide lens)
+    /scripts/far-harness.html?view=moon     on the Moon's landing site: local terrain aligned to the far Moon
+    /scripts/far-harness.html?view=mars     the same on Mars
+    /scripts/far-harness.html?view=aurora   400 km up over 50° N, looking north: the auroral oval (storm 1)
+    /scripts/far-harness.html?view=pad&lightning=1   a distant strike behind the pad, frozen near its first stroke
+  Params: km (alt view), pitch / yaw (degrees, camera), fov, res (world.setResolutionScale).
+  window.__ready is set after ~45 frames once every texture has loaded.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Far harness</title>
+    <style>
+      html, body { margin: 0; background: #000; overflow: hidden; }
+      canvas { display: block; }
+    </style>
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+    <script type="module">
+      import * as THREE from "three";
+      import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+      import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+      import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+      import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+      import { createWorld } from "../src/world.js";
+      import { createAurora, createLightning } from "../src/fx/launchfx.js";
+      import { createMaterials, createPart, createPad, deployables, applyDeploy, setShellOpacity } from "../src/parts.js";
+      import { enableShadowCasting } from "../src/planet.js";
+      import { buildManifest, sceneBounds } from "../src/layout.js";
+      import { catalog, getPreset, presetToBuild } from "../src/data/catalog.js";
+
+      const q = new URLSearchParams(location.search);
+      const view = q.get("view") ?? "pad";
+      let loading = false;
+      THREE.DefaultLoadingManager.onStart = () => (loading = true);
+      THREE.DefaultLoadingManager.onLoad = () => (loading = false);
+      const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("c"), antialias: true, preserveDrawingBuffer: true });
+      renderer.setPixelRatio(1);
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.0;
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      const near = new THREE.Scene();
+      near.background = null;
+      const camera = new THREE.PerspectiveCamera(+(q.get("fov") ?? 50), innerWidth / innerHeight, 0.05, 20000);
+      const world = createWorld({ renderer });
+      if (q.get("res")) world.setResolutionScale(+q.get("res"));
+      const R = world.bodies.earth.radius_km;
+      const U = 250; // near units per km
+      const deg = Math.PI / 180;
+      const aim = (pitch, yaw) => camera.quaternion.setFromEuler(new THREE.Euler(pitch * deg, yaw * deg, 0, "YXZ"));
+      let viewerBody = "earth";
+      let originKm = new THREE.Vector3(0, R, 0); // near origin, body-relative km
+      let frame = new THREE.Quaternion();
+
+      const fxUpdates = [];
+      let lightning = null;
+      if (view === "aurora") {
+        // 400 km above 50° N 80° W, looking north and a little down at the oval
+        const toWorld = world.bodies.earth.toBody.clone().transpose();
+        const ll = (lat, lon) => new THREE.Vector3(Math.cos(lat * deg) * Math.cos(lon * deg), Math.cos(lat * deg) * Math.sin(lon * deg), Math.sin(lat * deg)).applyMatrix3(toWorld).normalize();
+        const up = ll(50, -80);
+        const northPole = new THREE.Vector3(0, 0, 1).applyMatrix3(toWorld);
+        const north = northPole.clone().addScaledVector(up, -northPole.dot(up)).normalize();
+        originKm = up.clone().multiplyScalar(R + 400);
+        const f = north.clone().multiplyScalar(Math.cos(-12 * deg)).addScaledVector(up, Math.sin(-12 * deg));
+        camera.quaternion.setFromRotationMatrix(new THREE.Matrix4().lookAt(new THREE.Vector3(), f, up));
+        camera.fov = 70;
+        camera.position.set(0, 0, 0);
+        const aurora = createAurora();
+        world.attach("earth", aurora);
+        aurora.setIntensity(+(q.get("storm") ?? 1));
+        fxUpdates.push((dt) => aurora.update(dt));
+      } else if (view === "pad") {
+        // the pad and a built Falcon 9 at night: dim moonlight-like fill so the forms read
+        const manifest = buildManifest(presetToBuild(getPreset("falcon-9")), catalog);
+        const b = sceneBounds(manifest);
+        const pad = createPad({ baseRadius_u: b.baseRadius_u });
+        near.add(pad.group);
+        const mats = createMaterials();
+        for (const spec of manifest) {
+          const p = createPart(spec, mats);
+          setShellOpacity(p, 0.92);
+          near.add(p.group);
+        }
+        near.add(new THREE.HemisphereLight(0x3a4a6a, 0x0a0c10, 0.6));
+        const key = new THREE.DirectionalLight(0x9fb4ff, 0.6);
+        key.position.set(-30, 60, 40);
+        near.add(key);
+        camera.position.set(14, 1.2, 26);
+        aim(+(q.get("pitch") ?? 6), +(q.get("yaw") ?? 18));
+        if (q.get("lightning") === "1") {
+          lightning = createLightning({ ground_u: -0.6 });
+          near.add(lightning.object3d);
+        }
+      } else if (view === "alt") {
+        const km = +(q.get("km") ?? 100);
+        originKm = new THREE.Vector3(0, R + km, 0);
+        camera.position.set(0, 0, 0);
+        if (km >= 1000) {
+          camera.fov = +(q.get("fov") ?? 105);
+          aim(-90, 0);
+        } else aim(+(q.get("pitch") ?? -8), +(q.get("yaw") ?? -90));
+        camera.updateProjectionMatrix();
+      } else {
+        // a landing site: the near layer built y-up there; the far layer turned by the site frame
+        viewerBody = view;
+        const site = world.landingSite(view);
+        const ground = world.createLocalGround({ body: view, pos_km: site.pos_km, size_km: 0.4 });
+        frame = ground.frame;
+        originKm = ground.surface_km.clone();
+        ground.place(originKm);
+        near.add(ground.object3d);
+        const manifest = buildManifest(presetToBuild(getPreset("delta-iv-m")), catalog);
+        const part = createPart(manifest.find((s) => s.kind === "payload"), createMaterials());
+        setShellOpacity(part, 0.92);
+        for (const p of part.pieces) if (p.mesh.userData.adapter) p.mesh.visible = false;
+        for (const d of deployables(part)) applyDeploy(d, 1);
+        part.group.position.y = 0; // createPart puts it at its slot on the stack
+        part.group.updateMatrixWorld(true);
+        const bb = new THREE.Box3();
+        for (const p of part.pieces) if (p.mesh.visible) bb.expandByObject(p.mesh);
+        part.group.position.y = -bb.min.y;
+        enableShadowCasting(part.group);
+        near.add(part.group);
+        near.add(new THREE.HemisphereLight(view === "mars" ? 0xc9a27a : 0x8a92a0, 0x111111, view === "mars" ? 0.7 : 0.08));
+        camera.position.set(2.6, 0.8, 3.6);
+        camera.lookAt(0, 0.55, 0);
+      }
+      camera.updateProjectionMatrix();
+
+      const composer = new EffectComposer(renderer);
+      composer.addPass(world.createPass());
+      const rp = new RenderPass(near, camera);
+      rp.clear = false;
+      rp.clearDepth = true;
+      composer.addPass(rp);
+      composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.3, 0.5, 0.85));
+      composer.addPass(new OutputPass());
+      let frameN = 0;
+      function tick() {
+        // lightning: strike at frame 43, then freeze its state so the shot catches the first stroke
+        if (lightning) {
+          if (frameN === 43) lightning.fire({ azimuth: +(q.get("az") ?? 335), distance_km: +(q.get("km") ?? 9), seed: 7 });
+          lightning.update(frameN < 45 ? 1 / 60 : 0);
+        }
+        for (const u of fxUpdates) u(1 / 60);
+        // the viewer: the near camera's position, in km, from the near origin (rotated into world axes)
+        const posKm = originKm.clone().add(camera.position.clone().divideScalar(U).applyQuaternion(frame));
+        world.setViewer({ body: viewerBody, pos_km: posKm, camera, frame });
+        composer.render();
+        if (!loading && ++frameN === 45) {
+          document.title = `ready ${view} · far ${world.stats.width}×${world.stats.height} ${world.stats.cpuMs.toFixed(2)} ms cpu${world.stats.gpuMs !== null ? ` ${world.stats.gpuMs.toFixed(2)} ms gpu` : ""}`;
+          window.__ready = true;
+        }
+        requestAnimationFrame(tick);
+      }
+      tick();
+    </script>
+  </body>
+</html>

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Rocket Assembly</title>
-    <meta name="description" content="Animation demo: click a part, watch it fly in, crystallize and lock onto the rocket." />
+    <meta name="description" content="Animation demo: click the ghost to build the next part, watch it fly in, crystallize and lock onto the rocket." />
     <link rel="stylesheet" href="./src/style.css" />
   </head>
   <body>
@@ -12,14 +12,16 @@
 
     <header class="brand">
       <h1>Rocket assembly</h1>
-      <p>Click a part to build it · <kbd>Space</kbd> explode / assemble · <kbd>B</kbd> build all · <kbd>R</kbd> reset</p>
+      <p>Click the ghost to build the next part · click a part for details · <kbd>Space</kbd> explode · <kbd>B</kbd> build all · <kbd>R</kbd> reset · <kbd>[</kbd> <kbd>]</kbd> change rocket · <kbd>L</kbd> launch · <kbd>S</kbd> save card</p>
     </header>
 
-    <aside class="parts" id="parts" aria-label="Parts"></aside>
+    <aside class="detail" id="detail" aria-live="polite"></aside>
 
     <div class="hud" id="hud"><span id="hud-text">Pad ready</span></div>
 
     <footer class="bar">
+      <button id="btn-rockets" type="button" class="quiet" aria-expanded="false" aria-controls="rockets">Rockets</button>
+      <div class="rockets" id="rockets" aria-label="Pre-made rockets" hidden></div>
       <button id="btn-build-all" type="button">Build all</button>
       <button id="btn-explode" type="button" disabled>Explode</button>
       <button id="btn-reset" type="button" class="quiet">Reset</button>

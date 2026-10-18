@@ -1,0 +1,10 @@
+[
+  {
+    "id": "apollo-csm-lm",
+    "name": "Apollo 11 CSM + LM in adapter (at trans-lunar injection)",
+    "mass_kg": 45693,
+    "diameter_m": 6.604,
+    "height_m": 16.535,
+    "source": "https://www.nasa.gov/wp-content/uploads/2023/04/sp-4029.pdf (Ground Ignition Weights, Apollo 11: \"Spacecraft/Lunar Module Adapter 3,951\", \"LM 33,278\", \"Command and Service Module 63,507\" lb = 100,736 lb = 45,693 kg; launch escape system excluded, jettisoned before TLI; Key Facts, Apollo 11: SLA \"Height, ft 27.999\", \"Maximum diameter, ft 21.667\"; SM \"Height (with engine bell), ft 24.583\", \"Height (engine bell), ft 9.750\"; CM \"Height, ft 11.417\"; height = SLA + SM without bell + CM = 54.249 ft; diameter = SLA base, 260 in per https://web.archive.org/web/20200120024821/https://www.hq.nasa.gov/alsj/a11/A11_PressKit.pdf \"tapering from 260 inches diameter at the base\"). Cross-check: AS-506 flight evaluation report MPR-SAT-FE-69-9 Table 20-7 \"TOTAL SPACECRAFT\" at S-IVB cutoff \"45693.\" kg actual, https://ibiblio.org/apollo/Documents/lvfea-AS506-Apollo11.pdf"
+  }
+]

@@ -1,0 +1,231 @@
+<!doctype html>
+<!--
+  Visual harness for src/fx/launchfx.js. Not part of the demo.
+  Serve the repo root with Vite on a free port (never 5173), then open
+    /scripts/fx-harness.html?scene=ignition&k=1     F9 on the pad at ignition: plumes into the trench, pad light +
+                                                   splash, steam cloud, deluge, trench jet, vents
+    /scripts/fx-harness.html?scene=entry&k=1        the booster falling engines-first: plasma glow, grid fins
+                                                   out, legs stowed, cloud layer below, sea far below
+    /scripts/fx-harness.html?scene=gallery&k=0.5    every effect side by side at intensity k
+    /scripts/fx-harness.html?scene=entry&breakup=1  the booster falling back uncontrolled: plasma + break-up
+    /scripts/fx-harness.html?scene=impact&kind=sea|ground&at=0.8   a failed ascent's impact at night, frozen
+                                                   `at` seconds after it hits
+  Params: k (intensity 0..1, default 1), t (seconds since ignition for the steam, default 4).
+  window.__ready is set after ~45 frames.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>FX harness</title>
+    <style>
+      html, body { margin: 0; background: #0b0d12; overflow: hidden; }
+      canvas { display: block; }
+    </style>
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+    <script type="module">
+      import * as THREE from "three";
+      import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+      import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+      import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+      import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+      import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+      import { buildManifest, sceneBounds } from "../src/layout.js";
+      import { createMaterials, createPart, createPad, createStars, deployables } from "../src/parts.js";
+      import { createAnchors, createDroneShip } from "../src/anchors.js";
+      import { attachPlumes, createPadLight } from "../src/plume.js";
+      import { createShadowDecal, createOcean } from "../src/planet.js";
+      import * as FX from "../src/fx/launchfx.js";
+      import { catalog, getPreset, presetToBuild } from "../src/data/catalog.js";
+
+      const q = new URLSearchParams(location.search);
+      const scene_ = q.get("scene") ?? "ignition";
+      const k = +(q.get("k") ?? 1);
+      const tSteam = +(q.get("t") ?? 4);
+      const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("c"), antialias: true, preserveDrawingBuffer: true });
+      renderer.setPixelRatio(1);
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 0.95;
+      renderer.shadowMap.enabled = true;
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0b0d12);
+      scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+      scene.environmentIntensity = 0.25;
+      scene.add(createStars());
+      const manifest = buildManifest(presetToBuild(getPreset("falcon-9")), catalog);
+      const bounds = sceneBounds(manifest);
+      const H = bounds.height_u;
+      const key = new THREE.DirectionalLight(0xffb48a, 2.2);
+      key.position.set(-H * 0.45, H * 0.95, H * 0.75);
+      const fill = new THREE.DirectionalLight(0x6a7fa8, 0.5);
+      fill.position.set(H * 0.6, H * 0.3, -H * 0.6);
+      scene.add(key, fill, new THREE.HemisphereLight(0x8fa6c8, 0x0f1118, 0.2));
+      const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.05, 20000);
+      const mats = createMaterials();
+      const updates = [];
+
+      if (scene_ === "ignition") {
+        scene.fog = new THREE.Fog(0x0b0d12, H * 2.5, H * 7);
+        const pad = createPad({ baseRadius_u: bounds.baseRadius_u });
+        scene.add(pad.group);
+        const anchors = createAnchors({ baseRadius_u: bounds.baseRadius_u, stackHeight_u: H, manifest });
+        scene.add(anchors.object3d);
+        let plumes = [];
+        for (const spec of manifest) {
+          const part = createPart(spec, mats);
+          scene.add(part.group);
+          if (spec.id === "s0-engines") plumes = attachPlumes(part);
+        }
+        const padLight = createPadLight({ baseRadius_u: bounds.baseRadius_u, bellExitRadius_u: Math.max(...plumes.map((p) => p.exitRadius_u)) });
+        scene.add(padLight.object3d);
+        const L = pad.layout;
+        const steam = FX.createSteamCloud({ layout: L });
+        const deluge = FX.createDeluge({ layout: L });
+        const jet = FX.createTrenchJet({ layout: L });
+        const s1 = manifest.find((s) => s.id === "s0-interstage");
+        const vents = FX.createVents([{ position: new THREE.Vector3(s1.radius, s1.slotY + s1.height * 0.5, 0) }, { position: new THREE.Vector3(0, s1.slotY + s1.height + 2, s1.radius) }], { scale_u: 0.6 });
+        scene.add(steam.object3d, deluge.object3d, jet.object3d, vents.object3d);
+        updates.push((t, dt) => {
+          for (const p of plumes) p.update(dt, { throttle: k, cameraDistance: 20 });
+          padLight.update(dt, k, 0);
+          steam.update(dt, { t: tSteam + t, glow: k, intensity: k });
+          deluge.update(dt, { t: tSteam + 3 + t, intensity: k });
+          jet.update(dt, { throttle: k, bellHeight_m: 0 });
+          vents.update(dt, { intensity: 0.5 * k });
+          anchors.update(t);
+        });
+        camera.position.set(L.padR * 2.4, H * 0.12, L.padR * 4.4);
+        camera.lookAt(0, H * 0.12, 0);
+      } else if (scene_ === "entry") {
+        scene.fog = new THREE.Fog(0x0b0d12, 30, 400);
+        const booster = new THREE.Group();
+        for (const spec of manifest.filter((s) => s.stageIndex === 0)) {
+          const part = createPart(spec, mats);
+          for (const p of deployables(part)) {
+            if (spec.kind !== "interstage") continue; // grid fins out, legs stowed
+            const d = p.deploy;
+            const R = new THREE.Quaternion().setFromAxisAngle(d.axis, d.angle);
+            p.mesh.position.copy(p.rest.position).sub(d.pivot).applyQuaternion(R).add(d.pivot);
+            p.mesh.quaternion.copy(R).multiply(p.rest.quaternion);
+          }
+          booster.add(part.group);
+        }
+        const plasma = FX.createPlasmaGlow({ radius_u: bounds.baseRadius_u, length_u: 3.2 });
+        plasma.setBreakup(+(q.get("breakup") ?? 0));
+        booster.add(plasma.object3d);
+        booster.position.y = 60;
+        scene.add(booster);
+        const clouds = FX.createCloudLayer({ altitude_u: 35, radius_u: 70 });
+        const sea = FX.createSea({ radius_u: 300 });
+        sea.object3d.position.y = -40;
+        const ship = createDroneShip({ size_u: 22 });
+        ship.object3d.position.set(0, -40, 0);
+        scene.add(clouds.object3d, sea.object3d, ship.object3d);
+        updates.push((t, dt) => {
+          plasma.update(dt, { intensity: k });
+          clouds.update(dt, { intensity: k });
+          sea.update(dt);
+          const b = sea.bob(t);
+          ship.object3d.position.y = -40 + b.y;
+          ship.object3d.rotation.set(b.rx, 0, b.rz);
+        });
+        camera.position.set(7, 56, 9);
+        camera.lookAt(0, 61.5, 0);
+      } else if (scene_ === "impact") {
+        // Night: a dark sea or ground, the impact frozen `at` seconds in.
+        const sea = q.get("kind") !== "ground";
+        scene.background = new THREE.Color(0x020308);
+        scene.fog = new THREE.Fog(0x03050c, 200, 1600);
+        if (sea) {
+          const ocean = createOcean({ size_u: 4000, sunDir: new THREE.Vector3(0.3, 0.6, -0.7) });
+          ocean.setSky({ zenith: new THREE.Color(0.002, 0.003, 0.008), horizon: new THREE.Color(0.01, 0.02, 0.06) });
+          scene.add(ocean.object3d);
+          updates.push((t, dt) => ocean.update(dt));
+        } else {
+          const g = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000).rotateX(-Math.PI / 2), new THREE.MeshStandardMaterial({ color: 0x1a1814, roughness: 1 }));
+          scene.add(g);
+        }
+        const impact = FX.createImpact();
+        scene.add(impact.object3d);
+        const at = +(q.get("at") ?? 0.8);
+        let fired = false;
+        let tt = 0;
+        updates.push((t, dt) => {
+          if (!fired) impact.fire({ position: new THREE.Vector3(0, 0, 0), kind: sea ? "sea" : "ground", speed_ms: 400 }), (fired = true);
+          const step = Math.min(dt, Math.max(0, at - tt));
+          tt += step;
+          impact.update(step);
+        });
+        camera.position.set(70, 22, 110);
+        camera.lookAt(0, 18, 0);
+      } else {
+        // Gallery: every effect at intensity k, side by side.
+        const pad = createPad({ baseRadius_u: 0.46 });
+        const L = pad.layout;
+        const at = (x, z = 0) => (o) => (o.position.x += x, o.position.z += z, o);
+        const place = (fx, x, z) => (at(x, z)(fx.object3d), scene.add(fx.object3d), fx);
+        const deluge = place(FX.createDeluge({ layout: L }), -12, 0);
+        const jet = place(FX.createTrenchJet({ layout: L }), -6, 0);
+        const steam = place(FX.createSteamCloud({ layout: L }), 0, -8);
+        const vents = place(FX.createVents([{ position: new THREE.Vector3(0, 2, 0) }, { position: new THREE.Vector3(0, 3, 0), dir: new THREE.Vector3(0, 0, 1) }]), 6, 0);
+        const halo = place(FX.createCondensationHalo({ radius_u: 0.5, length_u: 2.5 }), 10, 0);
+        halo.object3d.position.y = 3;
+        const puffs = place(FX.createColdGasPuffs({ scale_u: 0.5 }), 13, 0);
+        const flash = place(FX.createIgnitionFlash(), 16, 0);
+        const plasma = place(FX.createPlasmaGlow({ radius_u: 0.5, length_u: 3 }), 19, 0);
+        plasma.object3d.position.y = 1;
+        const dust = place(FX.createLunarDust({ radius_u: 2 }), 23, 0);
+        const decal = createShadowDecal({ radius_u: 0.6 });
+        scene.add(decal.object3d);
+        const clouds = place(FX.createCloudLayer({ altitude_u: 7, radius_u: 10 }), 30, -6);
+        const sea = place(FX.createSea({ radius_u: 6 }), 30, 6);
+        const map = place(FX.createGroundMap({ size_u: 60, y_u: -0.6, scale: 0.002 }), 0, 12);
+        let last = -10;
+        updates.push((t, dt) => {
+          deluge.update(dt, { t: 4, intensity: k });
+          jet.update(dt, { throttle: k, bellHeight_m: 0 });
+          steam.update(dt, { t: tSteam + t, glow: k, intensity: k });
+          vents.update(dt, { intensity: k });
+          if (t - last > 0.6) {
+            last = t;
+            halo.fire();
+            puffs.fire({ position: new THREE.Vector3(0, 2, 0), dir: new THREE.Vector3(1, 0.3, 0) });
+            flash.fire({ position: new THREE.Vector3(0, 2, 0), kind: Math.floor(t / 0.6) % 2 ? "meco" : "tea-teb" });
+          }
+          halo.update(dt, { intensity: k });
+          puffs.update(dt);
+          flash.update(dt);
+          plasma.update(dt, { intensity: k });
+          dust.update(dt, { throttle: k, altitude_m: 6 });
+          decal.update({ position: new THREE.Vector3(23, 0, 3), altitude_u: 0.5, sunDir: new THREE.Vector3(-0.5, 0.7, 0.3).normalize() });
+          clouds.update(dt, { intensity: k });
+          sea.update(dt);
+        });
+        camera.position.set(9, 16, 34);
+        camera.lookAt(9, 1, 0);
+      }
+
+      const composer = new EffectComposer(renderer);
+      composer.addPass(new RenderPass(scene, camera));
+      composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.36, 0.55, 0.8));
+      composer.addPass(new OutputPass());
+      let frame = 0;
+      let time = 0;
+      function tick() {
+        const dt = 1 / 60;
+        time += dt;
+        for (const u of updates) u(time, dt);
+        composer.render();
+        if (q.get("debug") === "1") Object.assign(window, { __scene: scene, __renderer: renderer, __camera: camera });
+        if (++frame === 45) {
+          document.title = `ready ${scene_} k=${k} · ${renderer.info.render.calls} calls`;
+          window.__ready = true;
+        }
+        requestAnimationFrame(tick);
+      }
+      tick();
+    </script>
+  </body>
+</html>

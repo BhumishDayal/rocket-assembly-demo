@@ -8,6 +8,7 @@
   --holo: #5cc8ff;
   --select: #ffb020;
   --go: #2ee6b6;
+  --nogo: #ff6a3d;
   --font: "Inter", "SF Pro Text", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 }
@@ -37,6 +38,27 @@ body {
   touch-action: none;
 }
 
+/* Daylight in flight (main.js toggles body.bright-sky): a faint dark scrim behind the HUD line and the legend. */
+.hud,
+.brand p.keys {
+  transition: background 600ms ease, box-shadow 600ms ease;
+  border-radius: 8px;
+}
+body.bright-sky .hud,
+body.bright-sky .brand p.keys {
+  background: rgba(6, 8, 12, 0.42);
+  box-shadow: 0 0 0 6px rgba(6, 8, 12, 0.42);
+}
+
+/* The fade through black between the ending's scenes (opacity from choreo.state.cut). */
+.cut {
+  position: fixed;
+  inset: 0;
+  background: #000;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .brand {
   position: fixed;
   top: 28px;
@@ -58,6 +80,18 @@ body {
   color: var(--text-2);
 }
 
+/* Shortcut legend under the title: 2 rows of key + action. */
+.brand p.keys {
+  display: grid;
+  grid-template-columns: repeat(5, max-content);
+  gap: 7px 18px;
+  margin-top: 10px;
+}
+
+.brand p.keys span {
+  white-space: nowrap;
+}
+
 kbd {
   font-family: var(--mono);
   font-size: 11px;
@@ -69,119 +103,416 @@ kbd {
   color: var(--text);
 }
 
-/* Parts column */
-.parts {
+/* Detail card: one selected part. Same surface as the bar; slides in at the left, bottom sheet on phones. */
+.detail {
   position: fixed;
   left: 32px;
   top: 50%;
-  transform: translateY(-50%);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  width: 232px;
-}
-
-.card {
-  display: grid;
-  grid-template-columns: 34px 1fr auto;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--hairline);
-  border-radius: 12px;
+  width: 312px;
+  max-height: calc(100vh - 240px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 16px 16px 14px;
+  border: 1px solid rgba(255, 176, 32, 0.32);
+  border-radius: 14px;
   background: var(--surface);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   color: var(--text);
-  text-align: left;
-  cursor: pointer;
-  font: inherit;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translate(-18px, -50%);
   transition:
-    transform 180ms cubic-bezier(0.2, 0.7, 0.2, 1),
-    border-color 180ms,
-    background 180ms,
-    opacity 180ms;
+    opacity 200ms ease,
+    transform 280ms cubic-bezier(0.2, 0.7, 0.2, 1),
+    visibility 0s linear 280ms;
 }
 
-.card:hover,
-.card:focus-visible {
-  transform: translateX(4px);
-  border-color: rgba(92, 200, 255, 0.55);
-  background: var(--surface-2);
+.detail.open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translate(0, -50%);
+  transition:
+    opacity 200ms ease,
+    transform 280ms cubic-bezier(0.2, 0.7, 0.2, 1),
+    visibility 0s;
+}
+
+.detail .eyebrow {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 550;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.detail h2 {
+  margin: 4px 0 0;
+  font-size: 16px;
+  font-weight: 650;
+  line-height: 1.2;
+  letter-spacing: -0.005em;
+}
+
+.detail .sub {
+  margin: 3px 0 0;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.detail dl {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0 0;
+}
+
+.detail dl > div {
+  display: grid;
+  grid-template-columns: 104px 1fr;
+  gap: 10px;
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
+.detail dt {
+  color: var(--text-2);
+}
+
+.detail dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.detail .tag {
+  display: inline-block;
+  margin-left: 2px;
+  padding: 0 5px;
+  border: 1px solid var(--hairline);
+  border-radius: 5px;
+  font-size: 10px;
+  line-height: 15px;
+  color: var(--text-2);
+  white-space: nowrap;
+  vertical-align: 1px;
+}
+
+.detail .bad {
+  color: var(--nogo);
+}
+
+.detail .nw {
+  white-space: nowrap;
+}
+
+.detail .stage {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hairline);
+  font-size: 12.5px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+
+.detail .stage p {
+  margin: 0;
+}
+
+.detail .warn {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  color: var(--nogo);
+  font-size: 12px;
+}
+
+.detail .note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+.detail .src {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin: 12px 0 0;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+
+.detail .src a {
+  color: var(--holo);
+  text-decoration: none;
+}
+
+.detail .src a:hover,
+.detail .src a:focus-visible {
+  text-decoration: underline;
+}
+
+/* Sourced-number drawer: every number on the card is a quiet button; its evidence opens on a line below. */
+.detail .num {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  border-bottom: 1px dotted rgba(255, 255, 255, 0.28);
+  border-radius: 0;
+  padding: 0;
+  margin: 0;
+  line-height: inherit;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+
+.detail .num:hover,
+.detail .num:focus-visible,
+.detail .num[aria-expanded="true"] {
+  border-bottom-color: var(--select);
   outline: none;
 }
 
-.card:active {
-  transform: translateX(4px) scale(0.985);
-}
-
-.card .icon {
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
+.detail .drawer {
+  grid-column: 1 / -1;
   display: grid;
-  place-items: center;
-  background: rgba(92, 200, 255, 0.08);
-  color: var(--holo);
-}
-
-.card .icon svg {
-  width: 20px;
-  height: 20px;
-  stroke: currentColor;
-  fill: none;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.card .name {
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 1.15;
-}
-
-.card .sub {
-  display: block;
+  gap: 3px;
+  margin: 2px 0 4px;
+  padding: 6px 8px;
+  border-left: 2px solid rgba(255, 176, 32, 0.5);
+  border-radius: 0 6px 6px 0;
+  background: rgba(255, 255, 255, 0.035);
   font-size: 11.5px;
+  line-height: 1.45;
   color: var(--text-2);
-  margin-top: 2px;
-  font-weight: 450;
 }
 
-.card .key {
+.detail .drawer-q {
+  color: var(--text);
+  font-style: italic;
+}
+
+.detail .drawer-f {
+  color: var(--text);
   font-family: var(--mono);
   font-size: 11px;
-  color: var(--text-2);
-  border: 1px solid var(--hairline);
-  border-radius: 6px;
-  padding: 2px 6px;
 }
 
-.card.building {
-  border-color: rgba(92, 200, 255, 0.9);
-  box-shadow: 0 0 0 1px rgba(92, 200, 255, 0.35), 0 0 28px rgba(92, 200, 255, 0.18);
+.detail .drawer a {
+  color: var(--holo);
+  text-decoration: none;
+  justify-self: start;
 }
 
-.card.built .icon {
-  background: rgba(46, 230, 182, 0.12);
-  color: var(--go);
+.detail .drawer a:hover {
+  text-decoration: underline;
 }
 
-.card.built .key {
-  color: var(--go);
-  border-color: rgba(46, 230, 182, 0.4);
+/* Options: the card's one control; expands the slot's alternatives in place. */
+.detail .opts {
+  margin-top: 12px;
 }
 
-.card.locked {
-  opacity: 0.42;
+.detail .opt-toggle {
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  background: rgba(92, 200, 255, 0.12);
+  border: 1px solid rgba(92, 200, 255, 0.32);
+  border-radius: 9px;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: background 160ms, transform 160ms, opacity 160ms;
+}
+
+.detail .opt-toggle:hover {
+  background: rgba(92, 200, 255, 0.22);
+}
+
+.detail .opt-toggle:active {
+  transform: scale(0.97);
+}
+
+.detail .opts.open .opt-toggle {
+  background: rgba(255, 176, 32, 0.16);
+  border-color: rgba(255, 176, 32, 0.45);
+}
+
+.detail .opt-toggle:disabled,
+:is(.detail, .rockets) .opt:disabled {
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
-.card.locked:hover {
-  transform: none;
-  border-color: var(--hairline);
+.detail .opt-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 4px 0 0;
+  max-height: 232px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-top: 1px solid var(--hairline);
+}
+
+:is(.detail, .rockets) .opt {
+  display: grid;
+  gap: 1px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 140ms;
+}
+
+:is(.detail, .rockets) .opt:hover:not(:disabled),
+:is(.detail, .rockets) .opt:focus-visible {
+  background: rgba(255, 255, 255, 0.06);
+  outline: none;
+}
+
+:is(.detail, .rockets) .opt[aria-current="true"] {
+  cursor: default;
+  background: rgba(255, 176, 32, 0.08);
+}
+
+:is(.detail, .rockets) .opt-name {
+  font-size: 12.5px;
+  font-weight: 550;
+}
+
+:is(.detail, .rockets) .opt[aria-current="true"] .opt-name {
+  color: var(--select);
+}
+
+.detail .opt-group {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--hairline);
+}
+
+.detail .opt-why {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-2);
+}
+
+.detail .opt-incompatible .opt-why {
+  color: var(--nogo);
+}
+
+:is(.detail, .rockets) .opt-meta {
+  font-size: 11.5px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Rockets: the bar's preset list, opened in place above the bar (same rows as the card's Options). */
+.rockets {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  width: 340px;
+  max-height: min(52vh, 380px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 0;
+  padding: 6px;
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
   background: var(--surface);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.rockets ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.rockets .opt-meta {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Landing page: a big title and one button over the planet; the rest of the UI waits (body.landing, until the
+   dive passes 0.98). */
+.brand,
+.hud,
+.bar {
+  transition: opacity 600ms ease;
+}
+
+body.landing .brand,
+body.landing .hud,
+body.landing .bar,
+body.landing .detail {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* The atmosphere's glow during the landing dive (opacity from ui/landing.js); over the canvas, under the UI. */
+.landing-glow {
+  position: fixed;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  background: linear-gradient(to bottom, rgba(96, 140, 210, 0.42) 0%, rgba(60, 96, 160, 0.22) 45%, rgba(30, 50, 90, 0.1) 100%);
+}
+
+.landing-page {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  align-content: start;
+  justify-items: center;
+  padding: 16vh 16px 0;
+  text-align: center;
+  pointer-events: none; /* its opacity follows the scroll progress (ui/landing.js) */
+}
+
+.landing-page h1 {
+  margin: 0;
+  font-size: clamp(44px, 7.5vw, 104px);
+  font-weight: 650;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+
+.landing-go {
+  margin-top: 32px;
+  padding: 14px 30px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: background 160ms, transform 160ms;
+}
+
+.landing-go:hover,
+.landing-go:focus-visible {
+  background: rgba(255, 255, 255, 0.16);
+  outline: none;
+}
+
+.landing-go:active {
+  transform: scale(0.97);
 }
 
 /* Bottom bar */
@@ -237,6 +568,12 @@ kbd {
   color: var(--text);
 }
 
+.bar > button[aria-expanded="true"] {
+  background: rgba(255, 176, 32, 0.16);
+  border-color: rgba(255, 176, 32, 0.45);
+  color: var(--text);
+}
+
 .bar button.on {
   background: rgba(255, 176, 32, 0.18);
   border-color: rgba(255, 176, 32, 0.5);
@@ -244,6 +581,7 @@ kbd {
 
 /* HUD */
 .hud {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7); /* readable over the day side of the Earth in flight */
   position: fixed;
   right: 32px;
   top: 32px;
@@ -260,6 +598,14 @@ kbd {
   font-weight: 600;
 }
 
+.hud .go {
+  color: var(--go);
+}
+
+.hud .nogo {
+  color: var(--nogo);
+}
+
 @media (max-width: 760px) {
   .brand {
     top: 16px;
@@ -269,41 +615,46 @@ kbd {
   .brand h1 {
     font-size: 18px;
   }
-  .brand p {
+  .brand p,
+  .brand p.keys {
     display: none;
   }
   .hud {
     display: none;
   }
-  .parts {
+  .detail {
     left: 12px;
     right: 12px;
     top: auto;
     bottom: 84px;
-    transform: none;
     width: auto;
-    flex-direction: row;
-    overflow-x: auto;
-    padding-bottom: 4px;
+    max-height: 46vh;
+    transform: translateY(18px);
   }
-  .card {
-    min-width: 150px;
-    grid-template-columns: 28px 1fr;
-  }
-  .card .key {
-    display: none;
+  .detail.open {
+    transform: none;
   }
   .bar {
     bottom: 16px;
+    left: 12px;
+    right: 12px;
+    transform: none;
   }
-  .bar button {
-    padding: 8px 12px;
-    font-size: 12.5px;
+  .bar > button {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 8px 4px;
+    font-size: 12px;
+  }
+  .rockets {
+    width: auto;
+    right: 0;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .card,
+  .detail,
+  .detail.open,
   .bar button {
     transition: none;
   }
