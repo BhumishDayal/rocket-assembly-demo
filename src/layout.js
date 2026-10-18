@@ -252,7 +252,9 @@ export function buildManifest(build, catalog) {
           topD_m: topD,
           H_m: H,
           finish: look.interstage,
-          features: look.features.filter((f) => f === "grid-fins"),
+          // a stage with S-IC style engine fairings carries the next stage's ullage motors on this interstage
+          // (Saturn V); drawn as housings, a visual reading
+          features: [...look.features.filter((f) => f === "grid-fins"), ...(look.features.includes("engine-fairings") ? ["ullage-motors"] : [])],
         },
       });
       y += H;

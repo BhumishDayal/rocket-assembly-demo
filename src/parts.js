@@ -18,6 +18,11 @@
 //                 mesh.quaternion = R · rest.quaternion
 //               Rest poses stay translation-only (+ Y turn); the rotation exists only while deployed.
 //               deployables(part) lists them.
+//   followers   (round 18) pieces that track a deploying piece instead of having their own hinge: the
+//               telescoping leg pistons. They have no `deploy` (not in deployables); applyDeploy(leg, k)
+//               poses them from the leg's current pose: piece.follow = { leader, B, L, end } with B a fixed
+//               point on the body and L a point on the leader (part-local units, rest), end "B" (the outer
+//               tube, pinned at B) or "L" (the rod, pinned at L); both turn to aim along B → L.
 //
 // Geometry is authored in metres and scaled by SCALE once. Sizes come from the spec (dataset records via
 // layout.js). Every other proportion here (bell shape, pump size, leg length, panel layout, ...) is a visual
@@ -163,9 +168,28 @@ function textures() {
       (u, v) => {
         const n = fbm(u, v, 6, 3, 5);
         const ridged = 1 - Math.abs(2 * n - 1);
-        return [ridged ** 2, 0.55 + 0.45 * fbm(u, v, 4, 7), 1];
+        // Blanket seams every 0.6 m (two per tile each way): a sewn, taped groove, a little more matte.
+        const d = (t) => Math.min(t % 0.5, 0.5 - (t % 0.5)) / 0.5;
+        const seam = Math.max(Math.exp(-((d(u) / 0.02) ** 2)), Math.exp(-((d(v) / 0.02) ** 2)));
+        return [ridged ** 2 * (1 - 0.85 * seam), 0.55 + 0.45 * fbm(u, v, 4, 7) + 0.25 * seam, 1];
       },
       { tile_m: 1.2 },
+    ),
+    // Octaweb heat-shield "dance floor": 0.5 m plates with grooves and corner bolts, a shade per plate
+    // (colour, sRGB; R doubles as bump). 1 m tile on uv (metres).
+    plates: dataTexture(
+      W,
+      W,
+      (u, v) => {
+        const cu = (u * 2) % 1;
+        const cv = (v * 2) % 1;
+        const groove = Math.min(cu, 1 - cu, cv, 1 - cv) < 0.015 ? 1 : 0;
+        const bolt = [0.06, 0.94].some((x) => [0.06, 0.94].some((y) => Math.hypot(cu - x, cv - y) < 0.02)) ? 1 : 0;
+        const shade = 0.82 + 0.18 * hash2(Math.floor(u * 2), Math.floor(v * 2), 31) + 0.06 * (fbm(u, v, 8, 33, 3) - 0.5);
+        const k = groove ? 0.35 : bolt ? 1.0 : shade;
+        return [k, k, k];
+      },
+      { srgb: true, tile_m: 1 },
     ),
     // Solar cells: dark blue cells with thin bus-bar lines, 0.8 m tile (colour, sRGB).
     cells: dataTexture(
@@ -311,6 +335,10 @@ export function createMaterials() {
     gridFin: metal(0x4d5056, 0.46, 0.85),
     gold: mli(COLORS.gold),
     mliSilver: mli(0xc6c9ce),
+    // Gold-coated mirror segments (smooth, unlike the crinkled blankets).
+    mirror: std({ color: 0xd9ad55, metalness: 1, roughness: 0.12 }),
+    // Two-tone foil blankets (gold / black / silver per vertex colour), e.g. the LM descent stage.
+    foil: std({ color: 0xffffff, vertexColors: true, metalness: 1, roughness: 0.34, bumpMap: t.crinkle, bumpScale: 2.2, roughnessMap: t.crinkle }),
     panel: std({ color: 0xffffff, map: t.cells, metalness: 0.45, roughness: 0.28, emissive: 0x050b1a, emissiveIntensity: 1 }),
     // legacy keys (kept so older callers still find them)
     accent: std({ color: COLORS.accent, metalness: 0.5, roughness: 0.5 }),
@@ -473,7 +501,8 @@ function paintedMaterials(t, classic) {
     bronze: sooty(paint(0xa65f35, { metalness: 0.15, roughness: 0.45 })),
     silver: sooty(paint(0xb9bdc2, { metalness: 0.7, roughness: 0.35 })),
     composite: sooty(composite()),
-    heatShield: keep(classic.heatShield),
+    // Octaweb heat shield: dark plates with grooves and bolts (the "dance floor").
+    heatShield: phys({ color: 0x3a3b3e, metalness: 0.35, roughness: 0.72, map: t.plates, bumpMap: t.plates, bumpScale: 1.2, clearcoat: 0 }),
     raceway: paint(0xc4c6c1),
     skirt: keep(classic.skirt),
     metal: keep(classic.metal),
@@ -493,9 +522,12 @@ function paintedMaterials(t, classic) {
     pipe: keep(classic.pipe),
     actuator: keep(classic.actuator),
     gimbal: keep(classic.gimbal),
-    gridFin: keep(classic.gridFin),
+    // Cast titanium grid fins: grey metal, rough, a faint warm heat tint.
+    gridFin: phys({ color: 0x8a8580, metalness: 0.85, roughness: 0.52, roughnessMap: t.paint, clearcoat: 0 }),
     gold: keep(classic.gold),
     mliSilver: keep(classic.mliSilver),
+    foil: keep(classic.foil),
+    mirror: phys({ color: 0xe0b45a, metalness: 1, roughness: 0.08, clearcoat: 0 }),
     panel: keep(classic.panel),
     accent: keep(classic.accent),
     dark: keep(classic.dark),
@@ -572,6 +604,8 @@ function xrayMaterials(t, classic) {
     gridFin: dark,
     gold: asShell(steel(COLORS.gold, 0.34, 1, { bumpMap: t.crinkle, bumpScale: 2.2, roughnessMap: t.crinkle }), sh.gold),
     mliSilver: asShell(steel(0xc6c9ce, 0.34, 1, { bumpMap: t.crinkle, bumpScale: 2.2, roughnessMap: t.crinkle }), sh.silver),
+    foil: asShell(steel(0xffffff, 0.34, 1, { vertexColors: true, bumpMap: t.crinkle, bumpScale: 2.2, roughnessMap: t.crinkle }), sh.gold),
+    mirror: steel(0xd9ad55, 0.15, 1),
     panel: steel(0xffffff, 0.28, 0.45, { map: t.cells, emissive: 0x050b1a, emissiveIntensity: 1 }),
     accent: classic.accent,
     dark: dark,
@@ -804,7 +838,7 @@ function toUnits(geo) {
 //   sym  = axisymmetric piece on the axis (own alternating spin); off-axis pieces share the part's spin so a
 //          ring of shells / a cluster rotates rigidly in the exploded view (see assignSpins)
 //   kind = "shell" | "interior" | "detail"; engine = engine index or null
-function piece(geo, material, { x = 0, y = 0, z = 0, ry = 0, order = 0, dir = UP, dist = 0.4, side, ax = null, sym = false, kind = "detail", engine = null, edges = kind === "shell", lineGeo = null, fineGeo = null, deploy = null } = {}) {
+function piece(geo, material, { x = 0, y = 0, z = 0, ry = 0, order = 0, dir = UP, dist = 0.4, side, ax = null, sym = false, kind = "detail", engine = null, edges = kind === "shell", lineGeo = null, fineGeo = null, deploy = null, follow = null } = {}) {
   const g = toUnits(geo);
   g.computeBoundingBox();
   const xrayShell = XRAY && kind === "shell";
@@ -842,7 +876,14 @@ function piece(geo, material, { x = 0, y = 0, z = 0, ry = 0, order = 0, dir = UP
       order: deploy.order ?? 0,
     };
   }
-  return { mesh, order, explode: { dir: dir.clone().normalize(), dist }, ax, sym, kind, engine, deploy: dep };
+  // follow points are given like the deploy pivot (metres, the geometry's own frame).
+  let fol = null;
+  if (follow) {
+    const qy = new THREE.Quaternion().setFromAxisAngle(UP, ry);
+    const toPart = (p) => p.clone().multiplyScalar(S).applyQuaternion(qy).add(mesh.position);
+    fol = { leader: follow.leader, B: toPart(follow.B), L: toPart(follow.L), end: follow.end };
+  }
+  return { mesh, order, explode: { dir: dir.clone().normalize(), dist }, ax, sym, kind, engine, deploy: dep, follow: fol };
 }
 
 // ---------- engines ----------
@@ -939,7 +980,7 @@ function engineKit({ exitD_m, L, vacuum, chambers = 1, overall = false }) {
   const fl = 0.012 * L;
   const ext = [[Re * 1.025, 0.014 * L], [Re * 1.025, 0], ...prof.bell.filter((p) => p[1] > 0 && p[1] < ySplit), [rs, ySplit], [rs * 1.07, ySplit], [rs * 1.07, ySplit - fl]];
   const regen = [[rs * 1.07, ySplit], [rs * 1.07, ySplit + fl], [rAtBell(ySplit + fl), ySplit + fl], ...prof.bell.filter((p) => p[1] > ySplit + fl)];
-  const steel = vacuum ? [0.07, 0.07, 0.08] : [0.15, 0.15, 0.16];
+  const steel = vacuum ? [0.13, 0.112, 0.095] : [0.15, 0.15, 0.16]; // vacuum: niobium bronze-grey extension
   const regenBase = [0.15, 0.15, 0.16];
   const heat = [0.4, 0.25, 0.15];
   const flange = [0.48, 0.48, 0.5];
@@ -951,7 +992,9 @@ function engineKit({ exitD_m, L, vacuum, chambers = 1, overall = false }) {
   };
   for (const z of zs) {
     const ge = colorLathe(lathe(ext, 48), ext.length, (j) => (j < 2 || j >= ext.length - 2 ? flange : steel));
-    kit.push({ geo: ridgeUV(ge).translate(0, 0, z), mat: "engine", ax: [-1, 1], sym: !twin, ds: true, kind: "shell" });
+    // a radiatively cooled vacuum extension has no cooling tubes: flat uv.x, so no ridges
+    const extUV = vacuum ? (g) => (g.attributes.uv.array.forEach((_, i, a) => i % 2 === 0 && (a[i] = 0.5)), g) : ridgeUV;
+    kit.push({ geo: extUV(ge).translate(0, 0, z), mat: "engine", ax: [-1, 1], sym: !twin, ds: true, kind: "shell" });
     const gr = colorLathe(lathe(regen, 48), regen.length, (j, y) => {
       if (j < 2) return flange;
       const k = Math.pow(clamp(y / bellL, 0, 1), 3) * 0.55;
@@ -1273,72 +1316,106 @@ function buildTank(spec, mats) {
   return out;
 }
 
-// Falcon-style folded landing legs (tapered carbon struts hinged at the base, foot pad at the top end) and
-// their upper brackets on the skin.
+// Falcon-style folded landing legs: tapered carbon struts hinged at the base with a round footpad on a ball
+// joint at the tip (pre-tilted so it lies flat once the leg is out), a two-stage telescoping piston per leg
+// (outer tube pinned on the body, polished rod pinned on the leg; both follow the leg, see applyDeploy), hidden
+// inside the folded leg, and the upper brackets on the skin. Sizes are visual ratios.
 function legs(out, mats, R, H, D, shellDist, y0) {
   const len = Math.min(0.24 * H, 2.6 * D); // visual
   const w0 = 0.2 * D;
   const w1 = 0.11 * D;
   const t0 = 0.1 * D;
   const t1 = 0.06 * D;
+  const tAt = (k) => lerp(t0, t1, k);
   const strutGeo = new THREE.BoxGeometry(1, 1, 1, 1, 4, 1);
   const p = strutGeo.attributes.position;
   for (let i = 0; i < p.count; i++) {
     const k = p.getY(i) + 0.5;
-    p.setXYZ(i, R + (p.getX(i) + 0.5) * lerp(t0, t1, k), y0 + k * len, p.getZ(i) * lerp(w0, w1, k));
+    p.setXYZ(i, R + (p.getX(i) + 0.5) * tAt(k), y0 + k * len, p.getZ(i) * lerp(w0, w1, k));
   }
   strutGeo.computeVertexNormals();
-  const foot = box(t1 * 1.6, 0.05 * len, w1 * 1.25, R + t1 * 0.8, y0 + len - 0.025 * len, 0);
   const hinge = box(t0 * 1.2, 0.04 * len, w0 * 1.1, R + t0 * 0.6, y0 + 0.02 * len, 0);
-  const legGeo = projectUV(merge([strutGeo, foot, hinge]));
+  // Deploy: the folded leg (foot up) swings out and down about its base hinge, ending ~30° off vertical,
+  // feet below the engines (local frame: +X radial; axis −Z turns +Y toward +X).
+  const axis = v3(0, 0, -1);
+  const angle = (150 * Math.PI) / 180;
+  const pivot = v3(R + 0.5 * t0, y0 + 0.02 * len, 0);
+  const qOut = new THREE.Quaternion().setFromAxisAngle(axis, angle);
+  // Footpad: a shallow round pad below a ball joint; its axis at rest is the direction that turns vertical.
+  const tip = v3(R + 0.5 * t1, y0 + len, 0);
+  const padUp = UP.clone().applyQuaternion(qOut.clone().invert());
+  const pr = 0.16 * D;
+  const pad = lathe([[0.001, -0.075 * D], [pr, -0.075 * D], [pr * 1.03, -0.05 * D], [pr * 0.55, -0.025 * D], [0.06 * D, -0.012 * D], [0.001, -0.012 * D]], 28)
+    .applyQuaternion(new THREE.Quaternion().setFromUnitVectors(UP, padUp))
+    .translate(tip.x, tip.y, tip.z);
+  const ball = new THREE.SphereGeometry(0.045 * D, 12, 8).translate(tip.x, tip.y, tip.z);
+  const legGeo = projectUV(merge([strutGeo, hinge, pad, ball].map((g) => (g.index ? g : g.setIndex([...Array(g.attributes.position.count).keys()])))));
+  const legLines = merge([strutGeo.clone(), hinge.clone()]);
   const bracketGeo = merge([box(0.05 * D, 0.03 * len, 0.16 * D, R + 0.025 * D, y0 + len + 0.03 * len, 0), cyl(0.02 * D, 0.02 * D, 0.03 * len, 10, R + 0.06 * D, y0 + len + 0.015 * len)]);
+  // Piston: body pin B low on the skin, leg pin L three quarters up the leg; tube and rod each a little over
+  // half the deployed span so they still overlap when fully out.
+  const B = v3(R + 0.4 * t0, y0 + 0.3 * len, 0);
+  const Lp = v3(R + 0.5 * tAt(0.75), y0 + 0.75 * len, 0);
+  const L1 = Lp.clone().sub(pivot).applyQuaternion(qOut).add(pivot);
+  const lp = Math.min(0.68 * len, Math.max(Lp.distanceTo(B), 0.5 * L1.distanceTo(B) + 0.05 * len));
+  const u0 = Lp.clone().sub(B).normalize();
+  const along = (l, r, from, dir) => new THREE.CylinderGeometry(r, r, l, 12).translate(0, l / 2, 0).applyQuaternion(new THREE.Quaternion().setFromUnitVectors(UP, dir)).translate(from.x, from.y, from.z);
+  const tubeGeo = merge([along(lp, 0.026 * D, B, u0), along(0.04 * len, 0.032 * D, B.clone().addScaledVector(u0, lp - 0.04 * len), u0), new THREE.SphereGeometry(0.03 * D, 10, 8).translate(B.x, B.y, B.z)].map((g) => (g.index ? g : g.setIndex([...Array(g.attributes.position.count).keys()]))));
+  const rodGeo = merge([along(lp, 0.016 * D, Lp, u0.clone().negate()), new THREE.SphereGeometry(0.022 * D, 10, 8).translate(Lp.x, Lp.y, Lp.z)].map((g) => (g.index ? g : g.setIndex([...Array(g.attributes.position.count).keys()]))));
   for (let i = 0; i < 4; i++) {
     const a = Math.PI / 4 + (i * Math.PI) / 2;
-    // Deploy: the folded leg (foot up) swings out and down about its base hinge, ending ~30° off vertical,
-    // feet below the engines (local frame: +X radial; axis −Z turns +Y toward +X).
-    const deploy = { axis: v3(0, 0, -1), pivot: v3(R + 0.5 * t0, y0 + 0.02 * len, 0), angle: (150 * Math.PI) / 180, order: 1 };
-    out.push(piece(legGeo, mats.leg, { ry: -a, order: 3 + i * 0.02, dir: radial(a), dist: shellDist * 1.4, edges: true, deploy }));
+    const leg = piece(legGeo, mats.leg, { ry: -a, order: 3 + i * 0.02, dir: radial(a), dist: shellDist * 1.4, edges: true, lineGeo: legLines, deploy: { axis, pivot, angle, order: 1 } });
+    out.push(leg);
+    out.push(piece(projectUV(tubeGeo.clone()), mats.darkMetal, { ry: -a, order: 3.005 + i * 0.02, dir: radial(a), dist: shellDist * 1.3, follow: { leader: leg, B, L: Lp, end: "B" } }));
+    out.push(piece(projectUV(rodGeo.clone()), mats.pipe, { ry: -a, order: 3.006 + i * 0.02, dir: radial(a), dist: shellDist * 1.3, follow: { leader: leg, B, L: Lp, end: "L" } }));
     out.push(piece(bracketGeo, mats.darkMetal, { ry: -a, order: 3.1 + i * 0.02, dir: radial(a, 0.3), dist: shellDist * 1.2 }));
   }
 }
 
-// Folded grid fins standing against the body, lattice facing out. rBot/rTop: body radius at the fin's
-// bottom/top (frustum interstages); yTop: top of the fin.
+// Folded grid fins standing against the body, lattice facing out: cast titanium, a deep frame around a dense
+// waffle of thin plates crossing at ±45°, a hinge barrel and actuator housing at the root. Edge lines draw
+// the frame only. rBot/rTop: body radius at the fin's bottom/top (frustum interstages); yTop: top of the fin.
 function gridFins(out, mats, rBot, rTop, yTop, D, dist) {
   const h = 0.4 * D; // visual sizes
   const w = 0.33 * D;
-  const d = 0.06 * D;
-  const bar = 0.012 * D;
+  const d = 0.07 * D; // depth of the lattice
+  const fr = 0.016 * D; // frame wall
+  const web = 0.005 * D; // lattice plate
   const y0 = yTop - h;
   const r = (rBot + rTop) / 2 + 0.01 * D;
-  const geos = [
-    box(d, bar * 2, w, r + d / 2, y0 + bar, 0),
-    box(d, bar * 2, w, r + d / 2, yTop - bar, 0),
-    box(d, h, bar * 2, r + d / 2, y0 + h / 2, -w / 2 + bar),
-    box(d, h, bar * 2, r + d / 2, y0 + h / 2, w / 2 - bar),
-    box(d * 1.4, 0.12 * h, 0.3 * w, r + d * 0.7, y0 - 0.06 * h, 0), // actuator housing
+  const frame = [
+    box(d, fr, w, r + d / 2, y0 + fr / 2, 0),
+    box(d, fr, w, r + d / 2, yTop - fr / 2, 0),
+    box(d, h, fr, r + d / 2, y0 + h / 2, -w / 2 + fr / 2),
+    box(d, h, fr, r + d / 2, y0 + h / 2, w / 2 - fr / 2),
   ];
-  // Diagonal lattice: bars along ±45° in the fin plane (YZ), clipped to the frame.
-  const N = 6;
-  for (const s of [1, -1]) {
+  const root = [
+    new THREE.CylinderGeometry(0.03 * D, 0.03 * D, w * 0.9, 16).rotateX(Math.PI / 2).translate(r + d / 2, y0 - 0.02 * D, 0), // hinge barrel
+    box(d * 1.4, 0.12 * h, 0.3 * w, r + d * 0.7, y0 - 0.08 * h, 0), // actuator housing
+  ];
+  // Waffle: plates along ±45° in the fin plane (YZ), clipped to the inside of the frame.
+  const lattice = [];
+  const N = 9;
+  const hi = h - 2 * fr;
+  const wi = w - 2 * fr;
+  for (const sgn of [1, -1]) {
     for (let i = 1; i < 2 * N; i++) {
-      const c = -w / 2 - h / 2 + (i * (w + h)) / (2 * N); // z + s·(y − yc) = c
-      const zA = clamp(c + h / 2, -w / 2, w / 2);
-      const zB = clamp(c - h / 2, -w / 2, w / 2);
-      const yA = (c - zA) * s;
-      const yB = (c - zB) * s;
-      const len = Math.hypot(zA - zB, yA - yB);
-      if (len < bar * 3) continue;
-      const gb = new THREE.BoxGeometry(d * 0.9, len, bar);
-      gb.rotateX((s * -Math.PI) / 4);
-      geos.push(gb.translate(r + d / 2, y0 + h / 2 + (yA + yB) / 2, (zA + zB) / 2));
+      const c = -wi / 2 - hi / 2 + (i * (wi + hi)) / (2 * N); // z + s·(y − yc) = c
+      const zA = clamp(c + hi / 2, -wi / 2, wi / 2);
+      const zB = clamp(c - hi / 2, -wi / 2, wi / 2);
+      const yA = (c - zA) * sgn;
+      const yB = (c - zB) * sgn;
+      const l = Math.hypot(zA - zB, yA - yB);
+      if (l < web * 4) continue;
+      lattice.push(new THREE.BoxGeometry(d * 0.92, l, web).rotateX((sgn * -Math.PI) / 4).translate(r + d / 2, y0 + h / 2 + (yA + yB) / 2, (zA + zB) / 2));
     }
   }
-  const geo = merge(geos);
+  const frameGeo = merge(frame);
+  const geo = projectUV(merge([frameGeo.clone(), ...root, ...lattice]));
   for (let i = 0; i < 4; i++) {
     const a = Math.PI / 4 + (i * Math.PI) / 2;
     const deploy = { axis: v3(0, 0, -1), pivot: v3(r + d / 2, y0, 0), angle: Math.PI / 2, order: 0 }; // root hinge, +Y → +X
-    out.push(piece(geo, mats.gridFin, { ry: -a, order: 4 + i * 0.02, dir: radial(a, 0.2), dist: dist * 1.3, edges: true, deploy }));
+    out.push(piece(geo, mats.gridFin, { ry: -a, order: 4 + i * 0.02, dir: radial(a, 0.2), dist: dist * 1.3, edges: true, lineGeo: frameGeo, deploy }));
   }
 }
 
@@ -1407,6 +1484,20 @@ function buildInterstage(spec, mats) {
     const yTop = H - ringH - 0.04 * H;
     gridFins(out, mats, rAt(yTop - 0.4 * D), rAt(yTop), yTop, D, shellDist);
   }
+  if (g.features?.includes("ullage-motors")) {
+    // Eight ullage-motor housings: half-cone fairings on the skin, nose up, a nozzle cut-out at the bottom.
+    const hh = 0.55 * H;
+    const hr = 0.035 * D;
+    const housings = [];
+    for (let k = 0; k < 8; k++) {
+      const a = ((k + 0.5) * TAU) / 8;
+      const y = 0.18 * H;
+      const prof = [[hr * 0.8, 0], [hr, 0.08 * hh], [hr, 0.7 * hh], [hr * 0.5, 0.92 * hh], [0.001, hh]];
+      housings.push(projectUV(lathe(prof, 12, -Math.PI / 2, Math.PI).translate(0, y, 0).translate(rAt(y + hh / 2) - 0.2 * hr, 0, 0).rotateY(-a)));
+      housings.push(projectUV(new THREE.CylinderGeometry(hr * 0.55, hr * 0.75, 0.06 * hh, 12, 1, true).translate(rAt(y) + 0.45 * hr, y - 0.03 * hh, 0).rotateY(-a)));
+    }
+    out.push(piece(merge(housings), mats.trim, { order: 1.5, dir: UP, dist: shellDist * 1.1, side: DS, edges: true }));
+  }
   return out;
 }
 
@@ -1459,13 +1550,68 @@ function buildPayload(spec, mats) {
 }
 
 // All archetypes stay inside the record's envelope: radius R, height H, base at y0 (fractions are visual).
-// Telescope: bus (aft section), tube, aperture door, two solar arrays (with their masts).
+// Helpers for the close-up details: a uniform vertex colour (foil pieces read colour per vertex), a prism with
+// a colour per side face, an indexed copy of a non-indexed geometry, a cone nozzle pointing along dir.
+const FOIL = { gold: [0.58, 0.37, 0.07], black: [0.018, 0.018, 0.02], silver: [0.58, 0.6, 0.63] };
+function tint(geo, rgb) {
+  const n = geo.attributes.position.count;
+  const c = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) c.set(rgb, i * 3);
+  geo.setAttribute("color", new THREE.BufferAttribute(c, 3));
+  return geo;
+}
+function prism(r, h, sides, sideColor, capColor, rTop = r) {
+  const g = new THREE.CylinderGeometry(rTop, r, h, sides).toNonIndexed();
+  const p = g.attributes.position;
+  const c = new Float32Array(p.count * 3);
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const d = new THREE.Vector3();
+  for (let i = 0; i < p.count; i += 3) {
+    a.fromBufferAttribute(p, i);
+    b.fromBufferAttribute(p, i + 1);
+    d.fromBufferAttribute(p, i + 2);
+    const n = b.clone().sub(a).cross(d.clone().sub(a)).normalize();
+    const m = a.add(b).add(d).multiplyScalar(1 / 3);
+    const k = Math.floor((((Math.atan2(m.x, m.z) + TAU) % TAU) / TAU) * sides) % sides;
+    const col = Math.abs(n.y) > 0.6 ? capColor : sideColor(k);
+    for (let j = 0; j < 3; j++) c.set(col, (i + j) * 3);
+  }
+  g.setAttribute("color", new THREE.BufferAttribute(c, 3));
+  return g;
+}
+const indexed = (g) => (g.index ? g : g.setIndex([...Array(g.attributes.position.count).keys()]));
+function nozzle(at, dir, len, r) {
+  return new THREE.CylinderGeometry(r * 0.35, r, len, 10, 1, true).translate(0, len / 2, 0).applyQuaternion(new THREE.Quaternion().setFromUnitVectors(UP, dir.clone().normalize())).translate(at.x, at.y, at.z);
+}
+
+// Telescope (Hubble): aft shroud with bay doors and handrails, the light-shield tube with ring frames and
+// handrails, the aperture door on its hinge, two thin solar wings on masts.
 function telescope(P, mats, R, H, y0) {
-  P(projectUV(cyl(R * 0.97, R * 0.97, 0.36 * H, 12, 0, y0)), mats.mliSilver, { order: 1, dist: 0.2, ax: [-1, 0], sym: true, kind: "shell" });
+  const doors = [];
+  for (let k = 0; k < 8; k++) {
+    const a = ((k + 0.5) * TAU) / 8;
+    doors.push(box(0.012 * R, 0.2 * H, 0.42 * R, R * 0.97 + 0.004 * R, y0 + 0.17 * H, 0).rotateY(-a), box(0.02 * R, 0.012 * H, 0.08 * R, R * 0.985, y0 + 0.17 * H, 0).rotateY(-a));
+  }
+  const shroud = projectUV(cyl(R * 0.97, R * 0.97, 0.36 * H, 12, 0, y0));
+  P(projectUV(merge([shroud.clone(), ...doors])), mats.mliSilver, { order: 1, dist: 0.2, ax: [-1, 0], sym: true, kind: "shell", lineGeo: shroud });
   const tubeRings = [0.3, 0.55, 0.8, 0.94].map((f) => projectUV(new THREE.TorusGeometry(R * 0.745, 0.006 * R, 4, 32).rotateX(Math.PI / 2).translate(0, y0 + 0.36 * H + f * 0.6 * H, 0)));
-  P(projectUV(merge([cyl(R * 0.74, R * 0.74, 0.6 * H, 40, 0, y0 + 0.36 * H), ...tubeRings])), mats.mliSilver, { order: 1.1, dist: 0.35, sym: true, kind: "shell" });
+  const rails = [0, 1, 2, 3].map((k) => {
+    const a = (k * TAU) / 4 + 0.3;
+    return projectUV(cyl(0.008 * R, 0.008 * R, 0.55 * H, 6, Math.cos(a) * R * 0.77, y0 + 0.38 * H, Math.sin(a) * R * 0.77));
+  });
+  const tube = projectUV(cyl(R * 0.74, R * 0.74, 0.6 * H, 40, 0, y0 + 0.36 * H));
+  P(projectUV(merge([tube.clone(), ...tubeRings, ...rails])), mats.mliSilver, { order: 1.1, dist: 0.35, sym: true, kind: "shell", lineGeo: merge([tube, ...tubeRings]) });
   for (const s of [1, -1]) {
-    P(projectUV(merge([box(0.08 * R, 0.5 * H, 0.32 * R, 0, y0 + 0.62 * H, s * 0.86 * R), cyl(0.035 * R, 0.035 * R, 0.4 * H, 8, 0.2 * R, y0 + 0.4 * H, s * 0.86 * R)])), mats.panel, {
+    // a mast with two thin blankets either side of it, framed
+    const wing = [];
+    const yc = y0 + 0.62 * H;
+    for (const half of [-1, 1]) {
+      const zc = s * 0.86 * R + half * 0.085 * R;
+      wing.push(box(0.012 * R, 0.5 * H, 0.15 * R, 0, yc, zc), box(0.02 * R, 0.5 * H, 0.008 * R, 0, yc, zc + half * 0.075 * R));
+    }
+    wing.push(cyl(0.02 * R, 0.02 * R, 0.52 * H, 8, 0, y0 + 0.37 * H, s * 0.86 * R), cyl(0.035 * R, 0.035 * R, 0.06 * H, 8, 0.2 * R, y0 + 0.37 * H, s * 0.86 * R));
+    P(projectUV(merge(wing)), mats.panel, {
       order: 1.2 + (s > 0 ? 0 : 0.02),
       dir: v3(0, 0.3, s),
       dist: 0.4,
@@ -1473,49 +1619,111 @@ function telescope(P, mats, R, H, y0) {
       deploy: { axis: v3(s, 0, 0), pivot: v3(0, y0 + 0.37 * H, s * 0.7 * R), angle: Math.PI / 2, order: 1 },
     });
   }
-  P(projectUV(merge([cyl(R * 0.77, R * 0.77, 0.025 * H, 40, 0, y0 + 0.96 * H), box(0.12 * R, 0.04 * H, 0.2 * R, R * 0.74, y0 + 0.965 * H, 0)])), mats.machined, {
+  const door = merge([cyl(R * 0.77, R * 0.77, 0.025 * H, 40, 0, y0 + 0.96 * H), box(0.12 * R, 0.04 * H, 0.2 * R, R * 0.74, y0 + 0.965 * H, 0)]);
+  P(projectUV(merge([door.clone(), new THREE.TorusGeometry(R * 0.6, 0.012 * R, 6, 40).rotateX(Math.PI / 2).translate(0, y0 + 0.987 * H, 0)])), mats.machined, {
     order: 1.4,
     dist: 0.6,
     ax: [1, 0],
     edges: true,
+    lineGeo: door,
     // aperture door swings open 110° about its hinge on the +X rim (axis −Z lifts the far side)
     deploy: { axis: v3(0, 0, -1), pivot: v3(0.77 * R, y0 + 0.985 * H, 0), angle: (110 * Math.PI) / 180, order: 0 },
   });
 }
 
-// Stowed JWST read: spacecraft bus at the base, two folded sunshield pallets, gold mirror wall between,
-// secondary-mirror struts folded on top.
+// Stowed JWST: spacecraft bus at the base, two folded sunshield pallets (stacked membranes in a frame), the
+// primary mirror of 18 gold hexagonal segments (the centre section facing out, the two three-segment wings
+// folded back), its black backplane and the folded secondary-mirror struts.
 function webb(P, mats, R, H, y0) {
   P(projectUV(box(1.1 * R, 0.16 * H, 1.1 * R, 0, y0 + 0.08 * H)), mats.gold, { order: 1, dist: 0.2, ax: [-1, 0] });
-  P(projectUV(merge([box(0.95 * R, 0.66 * H, 0.12 * R, 0, y0 + 0.16 * H + 0.33 * H, 0.18 * R), box(0.5 * R, 0.5 * H, 0.4 * R, 0, y0 + 0.16 * H + 0.25 * H, -0.2 * R)])), mats.gold, { order: 1.1, dist: 0.5, edges: true });
+  // Hex segments, flat-topped: column spacing 1.5 s, row spacing √3 s; rings 1-2 around an empty centre.
+  const sH = 0.19 * R;
+  const zc = 0.24 * R;
+  const yc = y0 + 0.16 * H + 0.36 * H;
+  const segs = [];
+  const seg = () => new THREE.CylinderGeometry(sH * 0.96, sH * 0.96, 0.03 * R, 6).rotateY(Math.PI / 6).rotateX(Math.PI / 2);
+  for (let q = -2; q <= 2; q++) {
+    for (let r = -2; r <= 2; r++) {
+      const sum = -q - r;
+      if (Math.max(Math.abs(q), Math.abs(r), Math.abs(sum)) > 2 || (q === 0 && r === 0)) continue;
+      const x = 1.5 * sH * q;
+      const y = Math.sqrt(3) * sH * (r + q / 2);
+      const g = seg();
+      if (Math.abs(q) < 2) segs.push(g.translate(x, yc + y, zc));
+      else {
+        // side wing: hinged at x = ±2.25 s and folded back 100°
+        const sx = Math.sign(q);
+        const hingeX = sx * 2.25 * sH;
+        g.translate(x - hingeX, yc + y, 0).rotateY((sx * 100 * Math.PI) / 180).translate(hingeX, 0, zc);
+        segs.push(g);
+      }
+    }
+  }
+  P(projectUV(merge(segs)), mats.mirror, { order: 1.1, dist: 0.5, edges: true });
   for (const s of [1, -1]) {
-    // pallets unfold 90° about their bottom inner edge (axis ∓Z turns +Y toward ±X)
+    // pallets unfold 90° about their bottom inner edge (axis ∓Z turns +Y toward ±X): five membranes in a frame
     const deploy = { axis: v3(0, 0, -s), pivot: v3(s * 0.65 * R, y0 + 0.16 * H, 0), angle: Math.PI / 2, order: 0 };
-    P(projectUV(box(0.14 * R, 0.62 * H, 1.1 * R, s * 0.72 * R, y0 + 0.16 * H + 0.31 * H)), mats.mliSilver, { order: 1.2 + (s > 0 ? 0 : 0.02), dir: v3(s, 0.3, 0), dist: 0.45, deploy });
+    const layers = [0, 1, 2, 3, 4].map((k) => box(0.012 * R, 0.6 * H, 1.06 * R, s * (0.66 * R + k * 0.028 * R), y0 + 0.16 * H + 0.31 * H, 0));
+    const frame = [box(0.14 * R, 0.02 * H, 1.1 * R, s * 0.72 * R, y0 + 0.17 * H, 0), box(0.14 * R, 0.02 * H, 1.1 * R, s * 0.72 * R, y0 + 0.77 * H, 0)];
+    P(projectUV(merge([...layers, ...frame])), mats.mliSilver, { order: 1.2 + (s > 0 ? 0 : 0.02), dir: v3(s, 0.3, 0), dist: 0.45, edges: true, lineGeo: merge(frame), deploy });
   }
   P(
-    projectUV(merge([cyl(0.04 * R, 0.04 * R, 0.16 * H, 8, -0.3 * R, y0 + 0.82 * H, 0.3 * R), cyl(0.04 * R, 0.04 * R, 0.16 * H, 8, 0.3 * R, y0 + 0.82 * H, 0.3 * R), cyl(0.18 * R, 0.18 * R, 0.02 * H, 24, 0, y0 + 0.96 * H, 0.3 * R)])),
+    projectUV(
+      merge([
+        box(5 * sH, 5 * Math.sqrt(3) * sH, 0.08 * R, 0, yc, zc - 0.07 * R), // backplane, just behind the segments
+        box(0.5 * R, 0.3 * H, 0.4 * R, 0, y0 + 0.16 * H + 0.15 * H, -0.2 * R), // aft optics bench
+        cyl(0.04 * R, 0.04 * R, 0.16 * H, 8, -0.3 * R, y0 + 0.82 * H, 0.3 * R),
+        cyl(0.04 * R, 0.04 * R, 0.16 * H, 8, 0.3 * R, y0 + 0.82 * H, 0.3 * R),
+        cyl(0.18 * R, 0.18 * R, 0.02 * H, 24, 0, y0 + 0.96 * H, 0.3 * R),
+      ]),
+    ),
     mats.darkMetal,
     { order: 1.3, dist: 0.7, ax: [1, 0] },
   );
 }
 
-// Weather satellite: bus, folded solar array, instrument deck, dish, folded antenna boom (+ base ring).
+// Weather satellite (GOES-R): base ring with thrusters, the blanketed box bus, one large solar wing (five
+// framed panels on a yoke), the magnetometer boom as a folded lattice with its canister, the instrument deck
+// with apertures, and the dish.
 function weatherSat(P, mats, R, H, y0) {
   const s = 1.25 * R; // square bus inside the envelope (corner at 0.88 R)
   const nozzles = [0, 1, 2, 3].map((k) => lathe([[0.05 * R, 0], [0.025 * R, 0.03 * H], [0.03 * R, 0.035 * H]], 12).translate(0.35 * R * Math.cos((k * TAU) / 4 + Math.PI / 4), y0 + 0.002 * H, 0.35 * R * Math.sin((k * TAU) / 4 + Math.PI / 4)));
-  P(projectUV(merge([cyl(0.5 * R, 0.5 * R, 0.08 * H, 32, 0, y0 + 0.035 * H * 0), ...nozzles])), mats.machined, { order: 1, dist: 0.15, ax: [-1, 0], sym: true });
+  P(projectUV(merge([cyl(0.5 * R, 0.5 * R, 0.08 * H, 32, 0, y0), ...nozzles])), mats.machined, { order: 1, dist: 0.15, ax: [-1, 0], sym: true });
   P(projectUV(box(s, 0.55 * H, s, 0, y0 + 0.08 * H + 0.275 * H)), mats.gold, { order: 1.1, dist: 0.3, kind: "shell" });
-  // solar array unfolds 90° about its bottom edge on the bus side (axis −Z turns +Y toward +X)
-  P(projectUV(box(0.07 * R, 0.8 * H, 1.1 * R, 0.66 * R, y0 + 0.1 * H + 0.4 * H)), mats.panel, {
+  // solar wing: five panels up the hinge line with small gaps, a frame and a yoke down to the hinge
+  const wing = [];
+  const panelH = (0.8 * H - 4 * 0.012 * H) / 5;
+  for (let k = 0; k < 5; k++) {
+    const yc = y0 + 0.1 * H + 0.03 * H + k * (panelH + 0.012 * H) + panelH / 2;
+    wing.push(box(0.04 * R, panelH, 1.08 * R, 0.66 * R, yc, 0), box(0.05 * R, panelH, 0.02 * R, 0.66 * R, yc, 0.55 * R), box(0.05 * R, panelH, 0.02 * R, 0.66 * R, yc, -0.55 * R));
+  }
+  wing.push(strut(v3(0.625 * R, y0 + 0.1 * H, 0.2 * R), v3(0.66 * R, y0 + 0.13 * H, 0.45 * R), 0.03 * R, 0.03 * R, v3(1, 0, 0)), strut(v3(0.625 * R, y0 + 0.1 * H, -0.2 * R), v3(0.66 * R, y0 + 0.13 * H, -0.45 * R), 0.03 * R, 0.03 * R, v3(1, 0, 0)));
+  P(projectUV(merge(wing)), mats.panel, {
     order: 1.2,
     dir: v3(1, 0.3, 0),
     dist: 0.45,
+    // the wing unfolds 90° about its bottom edge on the bus side (axis −Z turns +Y toward +X)
     deploy: { axis: v3(0, 0, -1), pivot: v3(0.625 * R, y0 + 0.1 * H, 0), angle: Math.PI / 2, order: 0 },
   });
-  P(projectUV(cyl(0.03 * R, 0.03 * R, 0.7 * H, 8, -0.66 * R, y0 + 0.1 * H)), mats.darkMetal, { order: 1.25, dir: v3(-1, 0.3, 0), dist: 0.4 });
+  // magnetometer boom: a triangular lattice (three longerons, zigzag bracing), canister at the top
+  const boom = [];
+  const bx = -0.66 * R;
+  const br = 0.035 * R;
+  const corner = (i, y) => v3(bx + br * Math.cos((i * TAU) / 3), y, br * Math.sin((i * TAU) / 3));
+  const yb0 = y0 + 0.1 * H;
+  const yb1 = y0 + 0.78 * H;
+  for (let i = 0; i < 3; i++) boom.push(rod(corner(i, yb0), corner(i, yb1), 0.005 * R));
+  const bays = 10;
+  for (let k = 0; k < bays; k++) {
+    const ya = yb0 + ((yb1 - yb0) * k) / bays;
+    const yb = yb0 + ((yb1 - yb0) * (k + 1)) / bays;
+    for (let i = 0; i < 3; i++) boom.push(rod(corner(i, ya), corner((i + 1) % 3, yb), 0.0035 * R, 1));
+  }
+  boom.push(cyl(0.045 * R, 0.045 * R, 0.06 * H, 12, bx, yb1));
+  P(projectUV(merge(boom)), mats.darkMetal, { order: 1.25, dir: v3(-1, 0.3, 0), dist: 0.4 });
   const aperture = (z, r) => new THREE.CylinderGeometry(r, r, 0.08 * R, 24).rotateX(Math.PI / 2).translate(-0.15 * R, y0 + 0.75 * H, z);
-  P(projectUV(merge([box(0.9 * R, 0.25 * H, 0.7 * R, -0.05 * R, y0 + 0.63 * H + 0.125 * H, 0), aperture(0.37 * R, 0.12 * R), aperture(-0.37 * R, 0.08 * R)])), mats.mliSilver, { order: 1.3, dist: 0.5, ax: [1, 0], edges: true });
+  const deck = box(0.9 * R, 0.25 * H, 0.7 * R, -0.05 * R, y0 + 0.63 * H + 0.125 * H, 0);
+  P(projectUV(merge([deck.clone(), aperture(0.37 * R, 0.12 * R), aperture(-0.37 * R, 0.08 * R)])), mats.mliSilver, { order: 1.3, dist: 0.5, ax: [1, 0], edges: true, lineGeo: deck });
   const dish = [];
   for (let i = 0; i <= 10; i++) dish.push([0.28 * R * (i / 10), 0.06 * H * (i / 10) ** 2]);
   // dish tilts out 60° about its base (axis +X turns +Y toward +Z, away from the deck)
@@ -1528,14 +1736,22 @@ function weatherSat(P, mats, R, H, y0) {
   });
 }
 
-// Lander: engine, propellant tank sphere pair (inside the body), hex body, side panels, top deck + dish,
-// six legs, one piece each so each can splay outward about its own hinge.
+// Lander (Nova-C): main engine, two propellant tanks (domes above the top deck), the hexagonal body in gold
+// MLI, solar panels on three faces, top deck with the dish, six RCS clusters at the corners, six legs (one
+// piece each, splaying about their own hinge) with a footpad on a ball joint, level once deployed.
 function lander(P, mats, R, H, y0) {
   const rb = 0.62 * R;
-  P(projectUV(lathe([[0.16 * R, 0], [0.08 * R, 0.14 * H], [0.12 * R, 0.16 * H]], 24).translate(0, y0 + 0.12 * H, 0)), mats.darkMetal, { order: 0.9, dist: 0.25, side: DS, ax: [-1, 0], sym: true });
+  const bell = [];
+  for (let i = 0; i <= 12; i++) {
+    const f = i / 12;
+    bell.push([0.07 * R + 0.09 * R * (1 - f) ** 1.8, 0.14 * H * f]);
+  }
+  bell.push([0.1 * R, 0.15 * H], [0.1 * R, 0.17 * H], [0.06 * R, 0.18 * H]);
+  P(projectUV(lathe(bell, 28).translate(0, y0 + 0.12 * H, 0)), mats.darkMetal, { order: 0.9, dist: 0.25, side: DS, ax: [-1, 0], sym: true });
   const ts = 0.26 * R;
-  P(merge([new THREE.SphereGeometry(ts, 20, 14).translate(0.3 * R, y0 + 0.5 * H, 0), new THREE.SphereGeometry(ts, 20, 14).translate(-0.3 * R, y0 + 0.5 * H, 0)]), mats.interior, { order: 0.95, dist: 0.15, kind: "interior" });
-  P(projectUV(cyl(rb, rb, 0.5 * H, 6, 0, y0 + 0.28 * H)), mats.mliSilver, { order: 1, dist: 0.35, kind: "shell" });
+  const domes = [-1, 1].map((sx) => new THREE.SphereGeometry(0.16 * R, 20, 8, 0, TAU, 0, Math.PI / 2).translate(sx * 0.27 * R, y0 + 0.9 * H, -0.15 * R));
+  P(merge([new THREE.SphereGeometry(ts, 20, 14).translate(0.3 * R, y0 + 0.5 * H, 0), new THREE.SphereGeometry(ts, 20, 14).translate(-0.3 * R, y0 + 0.5 * H, 0), ...domes]), mats.interior, { order: 0.95, dist: 0.15, kind: "interior" });
+  P(projectUV(cyl(rb, rb, 0.5 * H, 6, 0, y0 + 0.28 * H)), mats.gold, { order: 1, dist: 0.35, kind: "shell" });
   const faces = [];
   for (let i = 0; i < 3; i++) {
     const a = ((2 * i + 0.5) * TAU) / 6;
@@ -1543,25 +1759,47 @@ function lander(P, mats, R, H, y0) {
   }
   P(projectUV(merge(faces)), mats.panel, { order: 1.1, dist: 0.4 });
   const dish = [];
-  for (let i = 0; i <= 8; i++) dish.push([0.22 * R * (i / 8), 0.05 * H * (i / 8) ** 2]);
-  const rcs = [0, 1, 2, 3].map((k) => box(0.08 * R, 0.05 * H, 0.08 * R, 0.36 * R * Math.cos((k * TAU) / 4), y0 + 0.8 * H, 0.36 * R * Math.sin((k * TAU) / 4)));
-  P(projectUV(merge([cyl(0.4 * R, 0.45 * R, 0.12 * H, 6, 0, y0 + 0.78 * H), lathe(dish, 24).translate(0.1 * R, y0 + 0.92 * H, 0), ...rcs])), mats.gold, { order: 1.3, dist: 0.6, ax: [1, 0], edges: true });
+  for (let i = 0; i <= 8; i++) dish.push([0.2 * R * (i / 8), 0.05 * H * (i / 8) ** 2]);
+  const deck = cyl(0.4 * R, 0.45 * R, 0.12 * H, 6, 0, y0 + 0.78 * H);
+  P(projectUV(merge([deck.clone(), cyl(0.015 * R, 0.015 * R, 0.03 * H, 8, 0, y0 + 0.9 * H, 0.24 * R), lathe(dish, 24).translate(0, y0 + 0.93 * H, 0.24 * R)])), mats.gold, { order: 1.3, dist: 0.6, ax: [1, 0], edges: true, lineGeo: deck });
+  // RCS: a block at each hex corner with thrusters up, down and to both sides.
+  const rcs = [];
+  for (let k = 0; k < 6; k++) {
+    const a = (k * TAU) / 6; // CylinderGeometry corners: x = r sin a, z = r cos a
+    const o = v3(Math.sin(a), 0, Math.cos(a));
+    const t = v3(Math.cos(a), 0, -Math.sin(a));
+    const c = o.clone().multiplyScalar(rb + 0.03 * R).setY(y0 + 0.74 * H);
+    const n = 0.05 * R;
+    rcs.push(indexed(box(0.06 * R, 0.06 * R, 0.06 * R, c.x, c.y, c.z)), nozzle(c.clone().addScaledVector(UP, 0.03 * R), UP, n, 0.018 * R), nozzle(c.clone().addScaledVector(DOWN, 0.03 * R), DOWN, n, 0.018 * R), nozzle(c.clone().addScaledVector(t, 0.03 * R), t, n, 0.016 * R), nozzle(c.clone().addScaledVector(t, -0.03 * R), t.clone().negate(), n, 0.016 * R));
+  }
+  P(projectUV(merge(rcs)), mats.darkMetal, { order: 1.32, dist: 0.5, side: DS });
+  const splay = (35 * Math.PI) / 180;
   for (let i = 0; i < 6; i++) {
     const a = ((i + 0.5) * TAU) / 6;
     const c = Math.cos(a);
     const s = Math.sin(a);
     const at = (r, y) => v3(r * R * c, y0 + y * H, r * R * s);
     const knee = at(0.82, 0.2);
-    const foot = at(0.94, 0.02);
-    const geo = projectUV(merge([tube(at(0.55, 0.5), at(0.75, 0.35), knee, 0.025 * R, 10), rod(knee, foot, 0.025 * R), rod(at(0.5, 0.3), knee, 0.02 * R), cyl(0.07 * R, 0.08 * R, 0.02 * H, 16, foot.x, y0, foot.z)]));
+    const foot = at(0.94, 0.04);
+    const axis = v3(-s, 0, c);
+    // footpad: a shallow dish below a ball joint, pre-turned by −splay so it is level when the leg is out
+    const pad = lathe([[0.001, -0.025 * H], [0.085 * R, -0.025 * H], [0.09 * R, -0.015 * H], [0.045 * R, -0.006 * H], [0.001, -0.006 * H]], 20)
+      .applyQuaternion(new THREE.Quaternion().setFromAxisAngle(axis, -splay))
+      .translate(foot.x, foot.y, foot.z);
+    const ball = new THREE.SphereGeometry(0.03 * R, 10, 8).translate(foot.x, foot.y, foot.z);
+    const strutGeo = merge([tube(at(0.55, 0.5), at(0.75, 0.35), knee, 0.025 * R, 10), rod(knee, foot, 0.025 * R), rod(at(0.5, 0.3), knee, 0.02 * R)]);
+    const geo = projectUV(merge([strutGeo.clone(), indexed(pad), ball].map(indexed)));
     // splay 35° outward about the attach point on the body (axis (−sin a, 0, cos a) swings the foot out)
-    P(geo, mats.metal, { order: 1.5 + i * 0.01, dir: radial(a, 0.2), dist: 0.35, edges: true, deploy: { axis: v3(-s, 0, c), pivot: at(0.55, 0.5), angle: (35 * Math.PI) / 180, order: 0 } });
+    P(geo, mats.metal, { order: 1.5 + i * 0.01, dir: radial(a, 0.2), dist: 0.35, edges: true, lineGeo: strutGeo, deploy: { axis, pivot: at(0.55, 0.5), angle: splay, order: 0 } });
   }
 }
 
 // Apollo-style stack from visuals dims (sourced) or visual fallbacks: spacecraft-LM adapter panels (stage D
-// → CSM D) around the folded lander and the SPS bell, service module, command module, and the escape tower
-// above the envelope when its height is sourced (placing it on the CM is a visual choice).
+// → CSM D, ring frames and longerons inside) around the folded lander (octagonal descent stage in gold and
+// black foil with its legs folded, faceted ascent stage) and the SPS bell, the service module (radiator panels,
+// four RCS quads), the command module in silver foil, and the launch escape system above the envelope when its
+// height is sourced (a lattice tower and the motor with its nozzles, canards and nose; placing it on the CM is
+// a visual choice).
 function capsule(P, mats, g, y0) {
   const H = g.H_m;
   const dims = g.dims ?? {};
@@ -1581,43 +1819,107 @@ function capsule(P, mats, g, y0) {
   const lmTop = Math.min(0.62 * slaH, slaH - spsH - 0.05 * slaH);
   const yAsc = 0.06 * slaH + 0.55 * (lmTop - 0.06 * slaH);
   const dR = 0.85 * rIn(yAsc);
-  P(projectUV(cyl(dR, dR, yAsc - 0.06 * slaH, 8, 0, y0 + 0.06 * slaH)), mats.gold, { order: 0.9, dist: 0.2, ax: [-1, 2], kind: "interior" });
-  P(projectUV(cyl(0.6 * dR, 0.72 * dR, lmTop - yAsc, 6, 0, y0 + yAsc)), mats.mliSilver, { order: 0.95, dist: 0.3, ax: [-1, 1], kind: "interior" });
-  const sla = latheUV(lathe([[Rb, y0], [Rs, y0 + slaH]], 16, 0, Math.PI / 2), { phiStart: 0, phiLength: Math.PI / 2, H: slaH, R: (Rb + Rs) / 2, y0 });
+  const dH = yAsc - 0.06 * slaH;
+  // descent stage: octagon, gold and black foil on alternate faces, four legs folded up its sides
+  const descent = [prism(dR, dH, 8, (kk) => (kk % 2 ? FOIL.black : FOIL.gold), FOIL.black).translate(0, y0 + 0.06 * slaH + dH / 2, 0)];
+  for (let i = 0; i < 4; i++) {
+    const a = (i * TAU) / 4 + Math.PI / 8;
+    const o = v3(Math.sin(a), 0, Math.cos(a));
+    const bot = o.clone().multiplyScalar(dR * 1.04).setY(y0 + 0.08 * slaH);
+    const top = o.clone().multiplyScalar(dR * 1.06).setY(y0 + 0.06 * slaH + 0.95 * dH);
+    descent.push(tint(indexed(rod(bot, top, 0.02 * dR)), FOIL.gold), tint(indexed(new THREE.CylinderGeometry(0.1 * dR, 0.1 * dR, 0.02 * dH, 12).translate(top.x, top.y, top.z)), FOIL.silver));
+  }
+  P(projectUV(merge(descent.map(indexed))), mats.foil, { order: 0.9, dist: 0.2, ax: [-1, 2], kind: "interior" });
+  // ascent stage: faceted cabin, black front facets, silver elsewhere; docking tunnel on top
+  const aH = lmTop - yAsc;
+  const ascent = [
+    prism(0.72 * dR, aH * 0.8, 6, (kk) => (kk === 0 || kk === 5 ? FOIL.black : FOIL.silver), FOIL.silver, 0.6 * dR).translate(0, y0 + yAsc + aH * 0.4, 0),
+    tint(indexed(cyl(0.2 * dR, 0.2 * dR, aH * 0.2, 16, 0, y0 + yAsc + aH * 0.8)), FOIL.silver),
+  ];
+  P(projectUV(merge(ascent.map(indexed))), mats.foil, { order: 0.95, dist: 0.3, ax: [-1, 1], kind: "interior" });
+  // SLA petals with their inner ring frames and longerons (seen when they open)
+  const slaSkin = latheUV(lathe([[Rb, y0], [Rs, y0 + slaH]], 16, 0, Math.PI / 2), { phiStart: 0, phiLength: Math.PI / 2, H: slaH, R: (Rb + Rs) / 2, y0 });
+  const inner = [];
+  for (const f of [0.25, 0.5, 0.75]) inner.push(projectUV(new THREE.TorusGeometry(rIn(f * slaH) * 0.985, 0.012 * Rb, 4, 16, Math.PI / 2).rotateX(Math.PI / 2).rotateY(-Math.PI / 2).translate(0, y0 + f * slaH, 0)));
+  for (const phi of [Math.PI / 6, Math.PI / 3]) {
+    const o = radialPhi(phi);
+    inner.push(projectUV(strut(o.clone().multiplyScalar(Rb * 0.975).setY(y0 + 0.02 * slaH), o.clone().multiplyScalar(Rs * 0.975).setY(y0 + 0.98 * slaH), 0.02 * Rb, 0.02 * Rb, o)));
+  }
+  const sla = merge([slaSkin.clone(), ...inner]);
   for (let q = 0; q < 4; q++) {
     const ry = (q * Math.PI) / 2;
     // the Apollo petals: each opens 45° outward about its bottom edge (quarter-0 frame: centre direction
     // o = (sin π/4, 0, cos π/4), hinge axis (cos π/4, 0, −sin π/4) turns +Y toward o)
     const o = radialPhi(Math.PI / 4);
     const deploy = { axis: v3(Math.cos(Math.PI / 4), 0, -Math.sin(Math.PI / 4)), pivot: o.clone().multiplyScalar(Rb).setY(y0), angle: Math.PI / 4, order: 0 };
-    P(sla, mats.silver, { ry, order: 1 + q * 0.02, dir: radialPhi(ry + Math.PI / 4, 0.4), dist: 0.25 + 0.5 * Rb * S, side: DS, ax: [-1, 3], kind: "shell", deploy });
+    P(sla, mats.silver, { ry, order: 1 + q * 0.02, dir: radialPhi(ry + Math.PI / 4, 0.4), dist: 0.25 + 0.5 * Rb * S, side: DS, ax: [-1, 3], kind: "shell", lineGeo: slaSkin, deploy });
   }
   const ySm = y0 + slaH;
-  P(projectUV(lathe([[0.6 * Rc, 0], [0.3 * Rc, 0.75 * spsH], [0.2 * Rc, spsH]], 32).translate(0, ySm - spsH, 0)), mats.darkMetal, { order: 1.2, dist: 0.45, side: DS, ax: [-1, 0], sym: true, edges: true });
-  const quads = [];
+  // SPS: a long bell (exit at the bottom), throat, chamber, and the gimbal ring under the SM
+  const sps = [];
+  for (let i = 0; i <= 14; i++) {
+    const f = i / 14;
+    sps.push([0.18 * Rc + 0.42 * Rc * (1 - f) ** 1.7, 0.86 * spsH * f]);
+  }
+  sps.push([0.24 * Rc, 0.9 * spsH], [0.24 * Rc, 0.97 * spsH], [0.12 * Rc, spsH]);
+  P(projectUV(merge([lathe(sps, 40).translate(0, ySm - spsH, 0), new THREE.TorusGeometry(0.3 * Rc, 0.02 * Rc, 6, 32).rotateX(Math.PI / 2).translate(0, ySm - 0.06 * spsH, 0)])), mats.darkMetal, { order: 1.2, dist: 0.45, side: DS, ax: [-1, 0], sym: true, edges: true, lineGeo: lathe(sps, 40).translate(0, ySm - spsH, 0) });
+  // SM: body, radiator panels (raised), four RCS quads with four nozzles each
+  const sm = [cyl(Rc, Rc, smH, 64, 0, ySm)];
+  for (const a0 of [0.35, 0.35 + Math.PI]) {
+    for (let j = 0; j < 4; j++) {
+      const a = a0 + j * 0.16;
+      sm.push(box(0.006 * Rc, 0.42 * smH, 0.14 * Rc, Rc + 0.003 * Rc, ySm + 0.45 * smH, 0).rotateY(-a));
+    }
+  }
   for (let i = 0; i < 4; i++) {
     const a = (i * TAU) / 4 + Math.PI / 4;
-    quads.push(box(0.12 * Rc, 0.1 * smH, 0.2 * Rc, Rc + 0.05 * Rc, ySm + 0.7 * smH, 0).rotateY(-a));
+    const o = v3(Math.cos(a), 0, Math.sin(a));
+    const t = v3(-Math.sin(a), 0, Math.cos(a));
+    const c = o.clone().multiplyScalar(Rc * 1.06).setY(ySm + 0.7 * smH);
+    sm.push(box(0.12 * Rc, 0.1 * smH, 0.2 * Rc, Rc + 0.05 * Rc, ySm + 0.7 * smH, 0).rotateY(-a));
+    for (const [dir, off] of [[UP, 0.05 * smH], [DOWN, 0.05 * smH], [t, 0.1 * Rc], [t.clone().negate(), 0.1 * Rc]]) sm.push(indexed(nozzle(c.clone().addScaledVector(dir, off), dir, 0.08 * Rc, 0.03 * Rc)));
   }
+  const smBody = projectUV(cyl(Rc, Rc, smH, 64, 0, ySm));
+  P(projectUV(merge(sm.map(indexed))), mats.silver, { order: 1.3, dist: 0.6, kind: "shell", lineGeo: smBody });
   const jb = Math.max(0.03, 0.012 * Rc);
-  P(projectUV(merge([cyl(Rc, Rc, smH, 64, 0, ySm), ...quads])), mats.silver, { order: 1.3, dist: 0.6, kind: "shell" });
   P(merge([boltRing(Rc * 1.01, ySm + jb / 2, 32, jb), boltRing(Rc * 1.01, ySm + smH - jb / 2, 32, jb)]), mats.machined, { order: 1.35, dist: 0.6, sym: true });
   const yCm = ySm + smH;
   const cm = [[Rc, 0], [Rc * 0.98, 0.04 * cmH], [0.24 * Rc, 0.86 * cmH], [0.16 * Rc, 0.95 * cmH], [0.001, cmH]];
-  P(projectUV(lathe(cm, 48).translate(0, yCm, 0)), mats.trim, { order: 1.4, dist: 0.8, ax: [1, 0], sym: true, edges: true });
+  P(projectUV(lathe(cm, 48).translate(0, yCm, 0)), mats.mliSilver, { order: 1.4, dist: 0.8, ax: [1, 0], sym: true, edges: true });
   const lesH = g.lesH_m ?? 0;
   if (lesH > 0) {
+    // tower: four tapering longerons, ring frames at five levels, X-bracing on every face of every bay
     const yL = yCm + cmH * 0.95;
     const tr = dims.les_base_diameter_m ? dims.les_base_diameter_m / 2 : 0.3 * Rc;
-    const truss = [];
-    for (let i = 0; i < 4; i++) {
+    const tH = 0.4 * lesH;
+    const corner = (i, f) => {
       const a = (i * TAU) / 4 + Math.PI / 4;
-      const c = (f, y) => v3(f * tr * Math.cos(a), y, f * tr * Math.sin(a));
-      truss.push(rod(c(1, yL), c(0.4, yL + 0.4 * lesH), 0.015 * Rc));
+      const r = tr * lerp(1, 0.4, f);
+      return v3(r * Math.cos(a), yL + f * tH, r * Math.sin(a));
+    };
+    const truss = [];
+    const lr = 0.015 * Rc;
+    for (let i = 0; i < 4; i++) truss.push(rod(corner(i, 0), corner(i, 1), lr));
+    const levels = [0, 0.25, 0.5, 0.75, 1];
+    for (const f of levels) for (let i = 0; i < 4; i++) truss.push(rod(corner(i, f), corner((i + 1) % 4, f), lr * 0.7, 1));
+    for (let b = 0; b < levels.length - 1; b++) {
+      for (let i = 0; i < 4; i++) {
+        truss.push(rod(corner(i, levels[b]), corner((i + 1) % 4, levels[b + 1]), lr * 0.5, 1), rod(corner((i + 1) % 4, levels[b]), corner(i, levels[b + 1]), lr * 0.5, 1));
+      }
     }
     P(projectUV(merge(truss)), mats.darkMetal, { order: 1.5, dist: 1.0, ax: [1, 1] });
-    const motor = [[0.13 * Rc, 0], [0.13 * Rc, 0.42 * lesH], [0.07 * Rc, 0.5 * lesH], [0.05 * Rc, 0.56 * lesH], [0.001, 0.6 * lesH]];
-    P(projectUV(lathe(motor, 24).translate(0, yL + 0.4 * lesH, 0)), mats.trim, { order: 1.6, dist: 1.1, ax: [1, 2], sym: true, edges: true });
+    // motor: four canted escape nozzles at its base, the long case, the canard section, the nose
+    const yM = yL + tH;
+    const motor = [[0.13 * Rc, 0], [0.13 * Rc, 0.42 * lesH], [0.09 * Rc, 0.46 * lesH], [0.09 * Rc, 0.5 * lesH], [0.06 * Rc, 0.54 * lesH], [0.03 * Rc, 0.58 * lesH], [0.001, 0.6 * lesH]];
+    const motorGeo = lathe(motor, 24).translate(0, yM, 0);
+    const extras = [];
+    for (let i = 0; i < 4; i++) {
+      const a = (i * TAU) / 4;
+      const o = v3(Math.cos(a), 0, Math.sin(a));
+      extras.push(indexed(nozzle(o.clone().multiplyScalar(0.1 * Rc).setY(yM + 0.02 * lesH), o.clone().multiplyScalar(0.55).add(DOWN), 0.06 * lesH, 0.045 * Rc)));
+      extras.push(box(0.08 * Rc, 0.03 * lesH, 0.006 * Rc, 0.12 * Rc, yM + 0.47 * lesH, 0).rotateY(-a)); // canards (folded)
+    }
+    P(projectUV(merge([motorGeo.clone(), ...extras.map(indexed)])), mats.trim, { order: 1.6, dist: 1.1, ax: [1, 2], sym: true, edges: true, lineGeo: motorGeo });
   }
 }
 
@@ -1722,7 +2024,8 @@ export function createPart(spec, mats) {
   const group = new THREE.Group();
   group.name = spec.id;
   group.position.y = spec.slotY;
-  const pieces = BUILDERS[spec.kind](spec, mats).map((p, i) => {
+  const built = BUILDERS[spec.kind](spec, mats);
+  const pieces = built.map((p, i) => {
     const bb = p.mesh.geometry.boundingBox;
     p.mesh.userData.partId = spec.id;
     p.mesh.name = `${spec.id}:${i}`;
@@ -1738,6 +2041,7 @@ export function createPart(spec, mats) {
       rest: { position: p.mesh.position.clone(), quaternion: p.mesh.quaternion.clone() },
       explode: p.explode,
       deploy: p.deploy,
+      follow: p.follow,
       ax: p.ax,
       sym: p.sym,
       axisOffset: 0,
@@ -1752,6 +2056,13 @@ export function createPart(spec, mats) {
     if (!m?.userData.soot) continue;
     const bb = p.mesh.geometry.boundingBox;
     m.soot = { value: new THREE.Vector4(bb.min.y, soot ? (soot[1] ?? bb.max.y - bb.min.y) : 1, soot ? soot[0] : 0, 0) };
+  }
+  // Followers: point each at its leader's part piece and list it on the leader (applyDeploy poses them).
+  for (const p of pieces) {
+    if (!p.follow) continue;
+    const leader = pieces[built.indexOf(p.follow.leader)];
+    p.follow = { ...p.follow, leader };
+    (leader.followers ??= []).push(p);
   }
   // Bell glow: each engine's bell pieces share a lip-to-throat range (part-local y), one uniform per piece
   // shared by both looks (setBellGlow).
@@ -1793,6 +2104,35 @@ export function createPart(spec, mats) {
 
 // Pieces with an articulated deploy (see the header for the hinge formula), in deploy order.
 export const deployables = (part) => part.pieces.filter((p) => p.deploy).sort((a, b) => a.deploy.order - b.deploy.order);
+
+// Poses a deployable at fraction k by the hinge formula and then its followers (the leg pistons) from the
+// leader's current pose, so they stay pinned whatever k does (springs, overshoot, staggered starts).
+const hingeQ = new THREE.Quaternion();
+const folQ = new THREE.Quaternion();
+const folInv = new THREE.Quaternion();
+const folL = new THREE.Vector3();
+const folU = new THREE.Vector3();
+const folU0 = new THREE.Vector3();
+export function applyDeploy(piece, k) {
+  const d = piece.deploy;
+  hingeQ.setFromAxisAngle(d.axis, k * d.angle);
+  piece.mesh.position.copy(piece.rest.position).sub(d.pivot).applyQuaternion(hingeQ).add(d.pivot);
+  piece.mesh.quaternion.copy(hingeQ).multiply(piece.rest.quaternion);
+  for (const f of piece.followers ?? []) poseFollower(f);
+}
+function poseFollower(f) {
+  const { leader, B, L, end } = f.follow;
+  // L now: the leader's rest → current motion applied to L
+  folInv.copy(leader.rest.quaternion).invert();
+  folL.copy(L).sub(leader.rest.position).applyQuaternion(folInv).applyQuaternion(leader.mesh.quaternion).add(leader.mesh.position);
+  folU0.copy(L).sub(B).normalize();
+  folU.copy(folL).sub(B).normalize();
+  folQ.setFromUnitVectors(folU0, folU);
+  const pin = end === "B" ? B : folL;
+  const pin0 = end === "B" ? B : L;
+  f.mesh.position.copy(f.rest.position).sub(pin0).applyQuaternion(folQ).add(pin);
+  f.mesh.quaternion.copy(folQ).multiply(f.rest.quaternion);
+}
 
 // Shell pieces of a part, and their look: value ≥ PAINT_AT shows the painted materials (opaque, every edge line
 // at LINE_PAINT / LINE_STRUCT of its built opacity); below it the x-ray materials, shells at opacity value and
@@ -2025,8 +2365,9 @@ export function disposeLooks(root) {
 // a raised hardstand with a deck of 8 plates (expansion joints between them) around an opening over the flame
 // trench; the trench as a recessed channel with side and back walls and a deflector wedge under the engines,
 // exiting through the plinth wall; the launch-mount ring with struts; four hold-down clamps with bolt rings;
-// the transporter-erector rails coming up a ramp; the holo rings, ground disc and polar grid.
-// Static; 16 draws; only the deck casts and receives shadows (and the ground receives).
+// the transporter-erector rails coming up a ramp; the holo rings, ground disc and polar grid. Returns
+// { group, ringMat, layout, clamps } (clamps: the four hinged hold-down arms, see below).
+// Static but for the clamp arms; only the deck casts and receives shadows (and the ground and markings receive).
 export function createPad({ baseRadius_u = 1, cameraAzimuth = 0.58 } = {}) {
   const L = padLayout({ baseRadius_u, cameraAzimuth });
   const { b, padR, plinthH: P, deckT, holeR, mountR, trenchPhi, railPhi } = L;
@@ -2098,21 +2439,42 @@ export function createPad({ baseRadius_u = 1, cameraAzimuth = 0.58 } = {}) {
   }
   add(merge([mountRing.clone(), ...struts]), mats.machined, { name: "pad-mount", paint: { key: "steel" } });
 
-  // Hold-down clamps at 0/90/180/270° (layout azimuths, clear of S-IC style fins at 45°): base plate with a
-  // bolt ring on the mount ring, an upright arm and a jaw against the vehicle's base.
+  // Hold-down clamps at 0/90/180/270° (layout azimuths, clear of S-IC style fins at 45°): a static base plate
+  // with a bolt ring on the mount ring (one mesh for all four) and four hinged arms (upright + jaw against the
+  // vehicle's base; one shared geometry). Each arm swings 70° outward about the outer bottom edge of its
+  // upright, a tangential axis at the deck: clamps[i] = { mesh, rest, deploy } with the legs' hinge formula
+  // (applyDeploy) in the pad frame. All under the group "pad-clamps".
   const ch = 0.45 * b + 0.05;
-  const clamps = [];
-  const clampLines = [];
+  const clampGroup = new THREE.Group();
+  clampGroup.name = "pad-clamps";
+  g.add(clampGroup);
+  const bs = 0.025 * b + 0.004;
+  const xb = (holeR * 1.01 + mountR) / 2;
+  const plate = box(0.3 * b, 0.03, 0.3 * b, xb, mh + 0.015, 0);
+  const bases = [];
+  const baseLines = [];
   for (let k = 0; k < 4; k++) {
     const a = (k * TAU) / 4;
-    const bs = 0.025 * b + 0.004;
-    const xb = (holeR * 1.01 + mountR) / 2;
-    const body = merge([box(0.3 * b, 0.03, 0.3 * b, xb, mh + 0.015, 0), box(0.09 * b, ch, 0.14 * b, b * 1.1, mh + ch / 2, 0), box(0.1 * b, 0.07 * b, 0.16 * b, b * 1.05, mh + ch - 0.035 * b, 0)]);
-    const bolts = boltRing(0.1 * b, mh + 0.03 + bs / 2, 8, bs).translate(xb, 0, 0);
-    clamps.push(merge([body.clone(), bolts]).rotateY(-a));
-    clampLines.push(body.rotateY(-a));
+    bases.push(merge([plate.clone(), boltRing(0.1 * b, mh + 0.03 + bs / 2, 8, bs).translate(xb, 0, 0)]).rotateY(-a));
+    baseLines.push(plate.clone().rotateY(-a));
   }
-  add(merge(clamps), mats.steelDark, { name: "pad-clamps", lineGeo: merge(clampLines), paint: { key: "steel" } });
+  const baseMesh = add(merge(bases), mats.steelDark, { name: "pad-clamp-bases", lineGeo: merge(baseLines), paint: { key: "steel" } });
+  clampGroup.add(baseMesh);
+  const armW = 0.09 * b;
+  const armGeo = merge([box(armW, ch, 0.14 * b, b * 1.1, mh + 0.03 + ch / 2, 0), box(0.1 * b, 0.07 * b, 0.16 * b, b * 1.05, mh + 0.03 + ch - 0.035 * b, 0)]);
+  const clampArms = [];
+  for (let k = 0; k < 4; k++) {
+    const a = (k * TAU) / 4;
+    const arm = add(armGeo, mats.steelDark, { ry: -a, name: `pad-clamp-arm-${k}`, paint: { key: "steel" } });
+    clampGroup.add(arm);
+    const qy = new THREE.Quaternion().setFromAxisAngle(UP, -a);
+    clampArms.push({
+      mesh: arm,
+      rest: { position: arm.position.clone(), quaternion: arm.quaternion.clone() },
+      // axis −Z (arm frame) turns +Y toward +X: the jaw swings out and away from the vehicle
+      deploy: { axis: v3(0, 0, -1).applyQuaternion(qy), pivot: v3(b * 1.1 + armW / 2, mh + 0.03, 0).applyQuaternion(qy), angle: (70 * Math.PI) / 180, order: 0 },
+    });
+  }
 
   // Transporter-erector rails (local +X runs out along railPhi): a ramp from the deck down to the ground,
   // rails on the ramp and on the ground, sleepers on the flat part.
@@ -2192,7 +2554,7 @@ export function createPad({ baseRadius_u = 1, cameraAzimuth = 0.58 } = {}) {
   grid.material.opacity = XRAY ? 0.08 : 0.55;
   g.add(grid);
 
-  return { group: g, ringMat, layout: L };
+  return { group: g, ringMat, layout: L, clamps: clampArms };
 }
 
 export function createStars(count = 1400) {

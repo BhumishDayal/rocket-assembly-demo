@@ -6,7 +6,8 @@
     /scripts/world-harness.html?view=moon      Nova-C (legs out) on lunar terrain, low sun, real shadows, Earth up
     /scripts/world-harness.html?view=mars      Nova-C on Mars terrain under a butterscotch sky with dust haze
     /scripts/world-harness.html?view=ocean     the drone ship bobbing on the ocean, sky reflection and sun glint
-  Params: kind (orbit: earth|moon|mars), t (seconds of self-rotation, orbit), seed (terrain).
+  Params: kind (orbit: earth|moon|mars), t (seconds of self-rotation, orbit), seed (terrain), close=1 (moon/mars:
+  camera close on the lander).
   window.__ready is set after ~45 frames once every texture has loaded.
 -->
 <html>
@@ -102,8 +103,13 @@
           earth.object3d.position.set(-14, 9, -60);
           scene.add(earth.object3d);
           updates.push((t) => earth.update(t + 40));
-          camera.position.set(6.5, 2.4, 5.5); // sun side, so the long shadow runs away from the camera
-          camera.lookAt(-2.5, 0.2, -0.5);
+          if (q.get("close") === "1") {
+            camera.position.set(1.7, 0.75, 1.6); // close-up on the lander
+            camera.lookAt(0, 0.38, 0);
+          } else {
+            camera.position.set(6.5, 2.4, 5.5); // sun side, so the long shadow runs away from the camera
+            camera.lookAt(-2.5, 0.2, -0.5);
+          }
         } else {
           const sky = skyAt(0, sunDir, "mars");
           const dome = createSkyDome({ radius_u: 2000 });

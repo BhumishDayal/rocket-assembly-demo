@@ -18,7 +18,7 @@ registerHooks({
 const THREE = await import("three");
 const { catalog, presetToBuild } = await import("../src/data/catalog.js");
 const { buildManifest, sceneBounds, SCALE } = await import("../src/layout.js");
-const { createPad, padLayout, setPropLook } = await import("../src/parts.js");
+const { applyDeploy, createPad, padLayout, setPropLook } = await import("../src/parts.js");
 const { createAnchors, createDroneShip } = await import("../src/anchors.js");
 
 const failures = [];
@@ -46,7 +46,7 @@ const draws = (...roots) => {
   for (const r of roots) r.traverseVisible((o) => (o.isMesh || o.isLine || o.isPoints || o.isSprite) && o.material?.visible !== false && n++);
   return n;
 };
-const PAINTED = /^(pad-(deck|plinth|trench|mount|clamps|rails)|anchor-(tower-frame|arm:.*|cable-tray|masts|human))$/;
+const PAINTED = /^(pad-(deck|plinth|trench|mount|clamp-bases|clamp-arm-\d|rails)|anchor-(tower-frame|arm:.*|cable-tray|masts|human))$/;
 
 const cases = catalog.presets.map((preset) => {
   const manifest = buildManifest(presetToBuild(preset), catalog);
@@ -76,7 +76,7 @@ for (const c of cases) {
   for (const root of roots) root.traverse((o) => o.isMesh && PAINTED.test(o.name) && looked.push(o));
   const lineK = 0.15 / 0.35;
   const linesOf = (o) => o.children.filter((e) => e.isLineSegments && e.userData.base0 !== undefined);
-  expect(looked.length === 10 + a.arms.length && looked.every((o) => o.userData.looks && o.material === o.userData.looks.painted), `${c.id}: props should start painted (${looked.filter((o) => !o.userData.looks).map((o) => o.name)})`);
+  expect(looked.length === 14 + a.arms.length && looked.every((o) => o.userData.looks && o.material === o.userData.looks.painted), `${c.id}: props should start painted (${looked.filter((o) => !o.userData.looks).map((o) => o.name)})`);
   expect(looked.every((o) => linesOf(o).every((e) => Math.abs(e.material.opacity - e.userData.base0 * (o.userData.paintLineK ?? lineK)) < 1e-9 && o.userData.paintLineK <= lineK)), `${c.id}: painted prop lines`);
   const figure = a.human.getObjectByName("anchor-human-lines");
   expect(a.human.material.visible && figure && !figure.visible, `${c.id}: painted person should be a silhouette`);
@@ -94,6 +94,26 @@ for (const c of cases) {
   expect(draws(...roots) === nPaint, `${c.id}: draws ${nPaint} painted vs ${draws(...roots)} x-ray`);
   for (const root of roots) setPropLook(root, "painted");
   expect(looked.every((o) => o.material === o.userData.looks.painted) && !figure.visible, `${c.id}: back to painted`);
+  // Clamp arms: four hinged pieces sharing one geometry under "pad-clamps", tangential axis, ~70° outward;
+  // at k = 1 the jaw has moved out and up, the arm stays above the mount, and k = 0 is rest again.
+  const cg = pad.group.getObjectByName("pad-clamps");
+  expect(cg && pad.clamps?.length === 4 && pad.clamps.every((c) => c.mesh.parent === cg && c.mesh.geometry === pad.clamps[0].mesh.geometry), `${c.id}: four clamp arms sharing one geometry under pad-clamps`);
+  for (const [i, cl] of (pad.clamps ?? []).entries()) {
+    const d = cl.deploy;
+    const radialDir = d.pivot.clone().setY(0).normalize();
+    expect(Math.abs(d.axis.length() - 1) < 1e-9 && Math.abs(d.axis.dot(radialDir)) < 1e-9 && Math.abs(d.axis.y) < 1e-9 && Math.abs(d.angle - (70 * Math.PI) / 180) < 1e-9, `${c.id}: clamp ${i} hinge`);
+    const jaw = () => {
+      cl.mesh.updateMatrixWorld(true);
+      return extent(cl.mesh);
+    };
+    const e0 = jaw();
+    applyDeploy(cl, 1);
+    const e1 = jaw();
+    expect(e1.box.max.y > 0 && Math.hypot((e1.box.min.x + e1.box.max.x) / 2, (e1.box.min.z + e1.box.max.z) / 2) > Math.hypot((e0.box.min.x + e0.box.max.x) / 2, (e0.box.min.z + e0.box.max.z) / 2), `${c.id}: clamp ${i} should swing outward`);
+    expect(e1.box.min.y > -0.01 && e1.minR > e0.minR, `${c.id}: clamp ${i} sinks into the deck or toward the vehicle`);
+    applyDeploy(cl, 0);
+    expect(cl.mesh.position.distanceTo(cl.rest.position) < 1e-9 && cl.mesh.quaternion.angleTo(cl.rest.quaternion) < 1e-9, `${c.id}: clamp ${i} not back at rest`);
+  }
   // Pad: deck top at y = 0, ground at −plinthH, trench below the deck.
   const deck = extent(pad.group.getObjectByName("pad-deck"));
   expect(near(deck.box.max.y, 0) && deck.box.max.x <= L.padR + 1e-6, `${c.id}: deck top ${deck.box.max.y}`);

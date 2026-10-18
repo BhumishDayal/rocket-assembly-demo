@@ -5,7 +5,7 @@
   Serve the repo root with Vite on a free port (never 5173), then open
     /scripts/plume-harness.html?build=falcon-9&p=101325&throttle=1      sea level
     /scripts/plume-harness.html?build=falcon-9&p=0                      vacuum
-  Params: build (preset id), stage (engines part to fire, default 0), p (ambient Pa), throttle (0..1),
+  Params: build (preset id), cam=x,y,z&look=x,y,z (absolute camera override, scene units), stage (engines part to fire, default 0), p (ambient Pa), throttle (0..1),
   alt (metres the stack is lifted off the pad, as in flight; on the pad the plume goes into the deck),
   ty / dist (camera target above the lifted base and distance, as fractions of the stack), twin=1 (adds a silhouette),
   anchors=1 (scale anchors: person, tower, trench, floodlight masts), deploy=0..1 (articulated deploys at that
@@ -32,7 +32,7 @@
       import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
       import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
       import { buildManifest, sceneBounds } from "../src/layout.js";
-      import { createMaterials, createPart, createPad, createStars, deployables, setBellGlow } from "../src/parts.js";
+      import { applyDeploy, createMaterials, createPart, createPad, createStars, deployables, setBellGlow } from "../src/parts.js";
       import { attachPlumes, createPadLight, P0 } from "../src/plume.js";
       import { createSilhouette } from "../src/silhouette.js";
       import { createAnchors } from "../src/anchors.js";
@@ -81,13 +81,8 @@
         const part = createPart(spec, mats);
         if (hide.has(spec.id)) continue;
         stack.add(part.group);
-        // p = pivot + R(axis, k·angle)·(rest − pivot), q = R·restQ
-        for (const piece of deployables(part)) {
-          const d = piece.deploy;
-          const R = new THREE.Quaternion().setFromAxisAngle(d.axis, k * d.angle);
-          piece.mesh.position.copy(piece.rest.position).sub(d.pivot).applyQuaternion(R).add(d.pivot);
-          piece.mesh.quaternion.copy(R).multiply(piece.rest.quaternion);
-        }
+        // p = pivot + R(axis, k·angle)·(rest − pivot), q = R·restQ; applyDeploy also poses the followers (pistons)
+        for (const piece of deployables(part)) applyDeploy(piece, k);
         if (spec.kind === "engines" && spec.stageIndex === stage) (plumes = attachPlumes(part)), (firing = part);
       }
       const padLight = createPadLight({ baseRadius_u: bounds.baseRadius_u, bellExitRadius_u: Math.max(0.01, ...plumes.map((p) => p.exitRadius_u)) });
@@ -109,6 +104,10 @@
       const el = (num("el", 10) * Math.PI) / 180;
       camera.position.set(Math.cos(el) * Math.sin(az) * dist, ty + Math.sin(el) * dist, Math.cos(el) * Math.cos(az) * dist);
       camera.lookAt(0, ty, 0);
+      if (q.get("cam")) {
+        camera.position.set(...q.get("cam").split(",").map(Number));
+        camera.lookAt(...(q.get("look") ?? "0,0,0").split(",").map(Number));
+      }
       const composer = new EffectComposer(renderer);
       composer.addPass(new RenderPass(scene, camera));
       composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.36, 0.55, 0.8));

@@ -55,7 +55,8 @@ for (const preset of catalog.presets) {
         if (s?.z > 0) sooty++;
         expect(!(s?.z > 0) || spec.kind === "engines" || (spec.kind === "tank" && spec.stageIndex === 0), `${id}: soot away from the base`);
       }
-      if (looks.xray.vertexColors && m.vertexColors && m.metalness === 1) expect(m.anisotropy > 0 && m.roughnessMap, `${id}: bell should be brushed metal`);
+      if (p.mesh.userData.role === "engine") expect(m.anisotropy > 0 && m.roughnessMap && m.metalness === 1, `${id}: bell should be brushed metal`);
+      for (const lm of [looks.painted, looks.xray]) if (lm.vertexColors) expect(p.mesh.geometry.attributes.color, `${id}: ${p.mesh.name} reads vertex colours it does not have (renders black)`);
     }
     // Bell glow: every bell piece of an engines part has one uniform shared by both looks, lip below throat;
     // setBellGlow sets it (clamped), per engine or all.

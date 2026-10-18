@@ -1,7 +1,9 @@
 // Check for the articulated deploys in src/parts.js (piece.deploy, deployables(part)): every deployable has a
 // unit axis, a pivot inside the piece's bounds and a nonzero angle; the expected pieces deploy on each preset;
 // the fully deployed pose is finite, rigid (vertex distances kept), and swings the piece outward from the stack
-// axis (catches a hinge with the wrong sense).
+// axis (catches a hinge with the wrong sense). Followers (the leg pistons): applyDeploy(leg, k) keeps the
+// outer tube pinned at the body point B and the rod pinned at the leg point L for k in [0, 1.15] (spring
+// overshoot), both aimed along B → L, still overlapping, and back at rest for k = 0.
 // Run: node scripts/check-deploy.mjs   (no deps; exits 1 on any failure)
 import { registerHooks } from "node:module";
 
@@ -15,7 +17,7 @@ registerHooks({
 const THREE = await import("three");
 const { catalog, presetToBuild } = await import("../src/data/catalog.js");
 const { buildManifest } = await import("../src/layout.js");
-const { createMaterials, createPart, deployables } = await import("../src/parts.js");
+const { applyDeploy, createMaterials, createPart, deployables } = await import("../src/parts.js");
 
 const failures = [];
 const expect = (ok, msg) => {
@@ -79,7 +81,39 @@ for (const preset of catalog.presets) {
     }
   }
 }
-console.log(`deployables checked: ${total} across ${catalog.presets.length} presets`);
+// Followers.
+let nFol = 0;
+for (const preset of catalog.presets) {
+  const mats = createMaterials();
+  for (const spec of buildManifest(presetToBuild(preset), catalog)) {
+    const part = createPart(spec, mats);
+    for (const leg of part.pieces.filter((p) => p.followers?.length)) {
+      const [tube, rod] = ["B", "L"].map((e) => leg.followers.find((f) => f.follow.end === e));
+      const name = `${preset.id}/${leg.mesh.name}`;
+      expect(tube && rod && !tube.deploy && !rod.deploy, `${name}: needs a tube (B) and a rod (L), neither deployable`);
+      if (!tube || !rod) continue;
+      nFol += 2;
+      const { B, L } = tube.follow;
+      const span = (g) => (g.computeBoundingBox(), g.boundingBox.getSize(new THREE.Vector3()).length());
+      const lt = span(tube.mesh.geometry);
+      const lr = span(rod.mesh.geometry);
+      const worldOf = (f, p) => p.clone().sub(f.rest.position).applyQuaternion(f.rest.quaternion.clone().invert()).applyQuaternion(f.mesh.quaternion).add(f.mesh.position);
+      for (const k of [0, 0.25, 0.5, 0.75, 1, 1.15]) {
+        applyDeploy(leg, k);
+        const Lk = worldOf(leg, L);
+        expect(worldOf(tube, B).distanceTo(B) < 1e-6 && worldOf(rod, L).distanceTo(Lk) < 1e-6, `${name}: piston pins slip at k ${k}`);
+        expect(tube.mesh.quaternion.angleTo(rod.mesh.quaternion) < 1e-6, `${name}: tube and rod not aligned at k ${k}`);
+        const d = Lk.distanceTo(B);
+        expect(lt + lr > d * 1.02, `${name}: piston parts separate at k ${k} (${(lt + lr).toFixed(3)} for ${d.toFixed(3)})`);
+        expect([tube, rod].every((f) => [f.mesh.position.x, f.mesh.position.y, f.mesh.position.z].every(Number.isFinite)), `${name}: NaN piston at k ${k}`);
+      }
+      applyDeploy(leg, 0);
+      expect([tube, rod].every((f) => f.mesh.position.distanceTo(f.rest.position) < 1e-9 && f.mesh.quaternion.angleTo(f.rest.quaternion) < 1e-9), `${name}: pistons not back at rest`);
+    }
+  }
+}
+expect(nFol === 16, `${nFol} piston pieces, want 16 (Falcon 9 and the demo build, 4 legs × 2)`);
+console.log(`deployables checked: ${total} across ${catalog.presets.length} presets; ${nFol} followers`);
 if (failures.length) {
   console.log(`FAIL (${failures.length})\n  ` + failures.join("\n  "));
   process.exitCode = 1;
