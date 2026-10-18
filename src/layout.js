@@ -174,6 +174,7 @@ export function buildManifest(build, catalog) {
         engineLength_m: L,
         chambers: Math.max(1, visuals?.engines?.[engine.id]?.chambers | 0), // e.g. RD-180: two bells in one envelope
         diameterKind: visuals?.engines?.[engine.id]?.diameterKind ?? null, // "overall": diameter_m is the envelope
+        bellFinish: visuals?.engines?.[engine.id]?.bellFinish ?? null, // "ablative": a composite nozzle, not bare metal
         exitD_m: engine.diameter_m,
         vacuum: vac,
         mountH_m: MOUNT_M,

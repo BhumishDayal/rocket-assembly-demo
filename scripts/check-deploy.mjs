@@ -17,7 +17,7 @@ registerHooks({
 const THREE = await import("three");
 const { catalog, presetToBuild } = await import("../src/data/catalog.js");
 const { buildManifest } = await import("../src/layout.js");
-const { applyDeploy, createMaterials, createPart, deployables } = await import("../src/parts.js");
+const { applyDeploy, createMaterials, createPart, deployables, landerOf } = await import("../src/parts.js");
 
 const failures = [];
 const expect = (ok, msg) => {
@@ -113,6 +113,44 @@ for (const preset of catalog.presets) {
   }
 }
 expect(nFol === 16, `${nFol} piston pieces, want 16 (Falcon 9 and the demo build, 4 legs × 2)`);
+
+// Landable sub-part: the Apollo payload has an LM (descent, ascent, 4 legs that are not payload deployables);
+// the copy shares geometry, folds inside the adapter, deploys its legs outward and down with the feet below
+// its base and outside its body; every other payload has none.
+for (const preset of catalog.presets) {
+  const mats = createMaterials();
+  for (const spec of buildManifest(presetToBuild(preset), catalog).filter((s) => s.kind === "payload")) {
+    const part = createPart(spec, mats);
+    const lm = landerOf(part);
+    const id = `${preset.id}/${spec.id}`;
+    if (spec.geom.archetype !== "capsule") {
+      expect(lm === null, `${id}: unexpected lander`);
+      continue;
+    }
+    expect(lm && lm.pieces.length === 6 && lm.deployables.length === 4, `${id}: LM should be descent + ascent + 4 legs`);
+    if (!lm) continue;
+    expect(deployables(part).every((p) => !p.mesh.userData.lander), `${id}: LM legs must not be payload deployables`);
+    expect(lm.pieces.every((p) => part.pieces.some((q) => q.mesh.geometry === p.mesh.geometry)), `${id}: LM copies should share geometry`);
+    const descentR = Math.max(...lm.pieces.filter((p) => p.mesh.userData.lander === "descent").map((p) => (p.mesh.geometry.computeBoundingBox(), p.mesh.geometry.boundingBox.max.x)));
+    expect(lm.feetY_u < -0.05 * lm.height_u && lm.footprint_u > descentR * 1.2, `${id}: LM feet ${lm.feetY_u.toFixed(3)} / footprint ${lm.footprint_u.toFixed(3)} (descent r ${descentR.toFixed(3)})`);
+    for (const d of lm.deployables) {
+      expect(Math.abs(d.deploy.axis.length() - 1) < 1e-9 && Math.abs(d.deploy.axis.y) < 1e-9, `${id}: LM leg axis`);
+      applyDeploy(d, 1);
+      const c = new THREE.Box3().setFromObject(d.mesh).getCenter(new THREE.Vector3());
+      applyDeploy(d, 0);
+      const c0 = new THREE.Box3().setFromObject(d.mesh).getCenter(new THREE.Vector3());
+      expect(Math.hypot(c.x, c.z) > Math.hypot(c0.x, c0.z) && c.y < c0.y, `${id}: LM leg should swing out and down`);
+    }
+    // folded inside the adapter: within the adapter's base radius, above its floor
+    const restBox = new THREE.Box3().setFromObject(lm.group).translate(lm.restPose.position);
+    const Rb = spec.geom.dims?.sla_base_diameter_m ? (spec.geom.dims.sla_base_diameter_m / 2) * 0.25 : spec.radius;
+    expect(Math.max(-restBox.min.x, restBox.max.x, -restBox.min.z, restBox.max.z) < Rb && restBox.min.y >= -1e-6, `${id}: folded LM outside the adapter`);
+    const dock = part.pieces.find((p) => p.mesh.userData.dock);
+    expect(dock && lm.detachPose.position.y > dock.topY && Math.abs(Math.abs(lm.detachPose.quaternion.x) - 1) < 1e-9, `${id}: detach pose should be inverted above the CM apex`);
+    lm.setPartLanderVisible(false);
+    expect(part.pieces.filter((p) => p.mesh.userData.lander).every((p) => !p.mesh.visible), `${id}: setPartLanderVisible(false)`);
+  }
+}
 console.log(`deployables checked: ${total} across ${catalog.presets.length} presets; ${nFol} followers`);
 if (failures.length) {
   console.log(`FAIL (${failures.length})\n  ` + failures.join("\n  "));

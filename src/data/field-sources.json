@@ -810,6 +810,11 @@
           "https://www.nasa.gov/wp-content/uploads/2016/08/174533main_shuttle_propulsion.pdf",
           "primary",
           "\"14 feet long and 7.5 feet in diameter at the nozzle exit\" (the record's diameter_m is this nozzle exit)"
+        ],
+        "bellFinish": [
+          "https://en.wikipedia.org/w/index.php?title=RS-25&oldid=1373882820",
+          "wikipedia",
+          "\"fuel flows through the main fuel valve into regenerative cooling systems for the nozzle and MCC\""
         ]
       },
       "rl10c-1": {
@@ -883,6 +888,11 @@
           "https://web.archive.org/web/20051221114403/http://history.msfc.nasa.gov/saturn_apollo/documents/F-1_Engine.pdf",
           "primary",
           "\"MAXIMUM NOZZLE EXIT DIAMETER 11 ft. 7 in.\" (the record's diameter_m is this nozzle exit)"
+        ],
+        "bellFinish": [
+          "https://en.wikipedia.org/w/index.php?title=Rocketdyne_F-1&oldid=1363029414",
+          "wikipedia",
+          "\"One notable challenge in the construction of the F-1 was regenerative cooling of the thrust chamber.\" (the lower nozzle extension was cooled by turbine exhaust: same page, \"the turbine exhaust mid-nozzle and the \\\"curtain\\\" cooling manifold\")"
         ]
       },
       "j-2": {
@@ -900,6 +910,11 @@
           "https://web.archive.org/web/20200808233218/https://www.nasa.gov/centers/marshall/pdf/499245main_J2_Engine_fs.pdf",
           "primary",
           "\"NOZZLE EXIT DIAMETER 6 ft. 5 in.\" (the record's diameter_m is this nozzle exit)"
+        ],
+        "bellFinish": [
+          "https://en.wikipedia.org/w/index.php?title=Rocketdyne_J-2&oldid=1358407782",
+          "wikipedia",
+          "\"The chamber was bell-shaped with a 27.5:1 expansion area ratio for efficient operation at altitude, and was regeneratively cooled by the fuel.\""
         ]
       },
       "rd-180": {
@@ -941,6 +956,18 @@
           "https://web.archive.org/web/2020/https://www.rocket.com/sites/default/files/documents/RS-68A_data_sheet.pdf",
           "primary",
           "\"Diameter: 8 ft\" (the engine's diameter; no separate nozzle exit figure)"
+        ],
+        "bellFinish": [
+          "https://en.wikipedia.org/w/index.php?title=RS-68&oldid=1366754349",
+          "wikipedia",
+          "\"the ablative nozzle of the RS-68\" (RS-68 family; the RS-68A is the upgraded RS-68). The thrust chamber itself is regenerative: https://www.ulalaunch.com/docs/default-source/rockets/delta-iv-user's-guide.pdf \"employs a gas generator, two turbopumps, and a regeneratively cooled thrust chamber\""
+        ]
+      },
+      "merlin-1d": {
+        "bellFinish": [
+          "https://www.spacex.com/assets/media/falcon-users-guide-2025-05-09.pdf",
+          "primary",
+          "\"The regeneratively cooled nozzle and thrust chamber use a milled copper alloy liner that provides large heat flux margins.\""
         ]
       }
     },

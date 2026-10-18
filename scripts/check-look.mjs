@@ -115,6 +115,22 @@ for (const preset of catalog.presets) {
   }
 }
 expect(sooty > 0, "no soot anywhere");
+
+// Ablative bells: visuals.engines[id].bellFinish "ablative" draws the bells in the tan matte composite (both
+// looks), still glowing. Tested by setting it on the Delta IV first-stage engine for this check.
+{
+  const preset = catalog.presets.find((p) => p.id === "delta-iv-m");
+  const engId = buildManifest(presetToBuild(preset), catalog).find((s) => s.id === "s0-engines").record.id;
+  catalog.visuals.engines ??= {};
+  const before = catalog.visuals.engines[engId];
+  catalog.visuals.engines[engId] = { ...(before ?? {}), bellFinish: before?.bellFinish ?? "ablative" };
+  const spec = buildManifest(presetToBuild(preset), catalog).find((s) => s.id === "s0-engines");
+  const part = createPart(spec, createMaterials());
+  const bells = part.pieces.filter((p) => p.mesh.userData.bellGlow);
+  expect(spec.geom.bellFinish === "ablative" && bells.length > 0 && bells.every((p) => p.mesh.userData.role === "ablative" && !p.mesh.userData.looks.painted.metalness && p.mesh.userData.looks.painted.roughness > 0.8), `ablative bells: ${bells.map((p) => p.mesh.userData.role)}`);
+  if (before) catalog.visuals.engines[engId] = before;
+  else delete catalog.visuals.engines[engId];
+}
 console.log(`looks checked: ${catalog.presets.length} presets, ${meshes} pieces, ${sooty} sooty`);
 if (failures.length) {
   console.log(`FAIL (${failures.length})\n  ` + failures.slice(0, 30).join("\n  "));

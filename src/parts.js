@@ -337,6 +337,8 @@ export function createMaterials() {
     mliSilver: mli(0xc6c9ce),
     // Gold-coated mirror segments (smooth, unlike the crinkled blankets).
     mirror: std({ color: 0xd9ad55, metalness: 1, roughness: 0.12 }),
+    // Ablative composite nozzle (visuals.engines[id].bellFinish "ablative"): tan, matte.
+    ablative: std({ color: 0xc9b597, metalness: 0, roughness: 0.9 }),
     // Two-tone foil blankets (gold / black / silver per vertex colour), e.g. the LM descent stage.
     foil: std({ color: 0xffffff, vertexColors: true, metalness: 1, roughness: 0.34, bumpMap: t.crinkle, bumpScale: 2.2, roughnessMap: t.crinkle }),
     panel: std({ color: 0xffffff, map: t.cells, metalness: 0.45, roughness: 0.28, emissive: 0x050b1a, emissiveIntensity: 1 }),
@@ -463,6 +465,7 @@ function addBellGlow(m, glow) {
   };
   m.customProgramCacheKey = () => `${prevKey}|bell-glow-v1`;
 }
+const BELL_ROLES = new Set(["engine", "ablative"]);
 // Bell glow for a part's engines: throttle 0..1 (clamped), every engine or only engine index `engine`
 // (piece.engine, e.g. plume.engine from attachPlumes). Drive it with the plume updates; 0 = cold metal.
 export function setBellGlow(part, throttle = 0, engine = null) {
@@ -529,6 +532,7 @@ function paintedMaterials(t, classic) {
     mliSilver: keep(classic.mliSilver),
     foil: keep(classic.foil),
     mirror: phys({ color: 0xe0b45a, metalness: 1, roughness: 0.08, clearcoat: 0 }),
+    ablative: phys({ color: 0xcdb99b, metalness: 0, roughness: 0.88, roughnessMap: t.paint, clearcoat: 0 }),
     panel: keep(classic.panel),
     accent: keep(classic.accent),
     dark: keep(classic.dark),
@@ -607,6 +611,7 @@ function xrayMaterials(t, classic) {
     mliSilver: asShell(steel(0xc6c9ce, 0.34, 1, { bumpMap: t.crinkle, bumpScale: 2.2, roughnessMap: t.crinkle }), sh.silver),
     foil: asShell(steel(0xffffff, 0.34, 1, { vertexColors: true, bumpMap: t.crinkle, bumpScale: 2.2, roughnessMap: t.crinkle }), sh.gold),
     mirror: steel(0xd9ad55, 0.15, 1),
+    ablative: asShell(steel(0xc9b597, 0.85, 0.05), sh.white),
     panel: steel(0xffffff, 0.28, 0.45, { map: t.cells, emissive: 0x050b1a, emissiveIntensity: 1 }),
     accent: classic.accent,
     dark: dark,
@@ -839,7 +844,7 @@ function toUnits(geo) {
 //   sym  = axisymmetric piece on the axis (own alternating spin); off-axis pieces share the part's spin so a
 //          ring of shells / a cluster rotates rigidly in the exploded view (see assignSpins)
 //   kind = "shell" | "interior" | "detail"; engine = engine index or null
-function piece(geo, material, { x = 0, y = 0, z = 0, ry = 0, order = 0, dir = UP, dist = 0.4, side, ax = null, sym = false, kind = "detail", engine = null, edges = kind === "shell", lineGeo = null, fineGeo = null, deploy = null, follow = null } = {}) {
+function piece(geo, material, { x = 0, y = 0, z = 0, ry = 0, order = 0, dir = UP, dist = 0.4, side, ax = null, sym = false, kind = "detail", engine = null, edges = kind === "shell", lineGeo = null, fineGeo = null, deploy = null, follow = null, lander = null, landerLeg = null, dock = false } = {}) {
   const g = toUnits(geo);
   g.computeBoundingBox();
   const xrayShell = XRAY && kind === "shell";
@@ -867,16 +872,21 @@ function piece(geo, material, { x = 0, y = 0, z = 0, ry = 0, order = 0, dir = UP
   // give a cleaner structural layer (e.g. a ring without its bolts) and a fine layer.
   if (XRAY && edges) addEdges(mesh, { kind, lineGeo: lineGeo && toUnits(lineGeo), fineGeo: fineGeo && toUnits(fineGeo) });
   // deploy is given in the geometry's own frame (metres, before the Y turn); store it part-local.
-  let dep = null;
-  if (deploy) {
+  const hingeOf = (h) => {
+    if (!h) return null;
     const qy = new THREE.Quaternion().setFromAxisAngle(UP, ry);
-    dep = {
-      axis: deploy.axis.clone().normalize().applyQuaternion(qy),
-      pivot: deploy.pivot.clone().multiplyScalar(S).applyQuaternion(qy).add(mesh.position),
-      angle: deploy.angle,
-      order: deploy.order ?? 0,
+    return {
+      axis: h.axis.clone().normalize().applyQuaternion(qy),
+      pivot: h.pivot.clone().multiplyScalar(S).applyQuaternion(qy).add(mesh.position),
+      angle: h.angle,
+      order: h.order ?? 0,
     };
-  }
+  };
+  const dep = hingeOf(deploy);
+  // Landable sub-part (landerOf): lander = "descent" | "ascent" | "leg"; a leg's hinge is landerLeg, kept out of
+  // `deploy` so the payload's own deploy (the SLA petals) does not swing it; dock marks the docking apex.
+  if (lander) mesh.userData.lander = lander;
+  if (dock) mesh.userData.dock = true;
   // follow points are given like the deploy pivot (metres, the geometry's own frame).
   let fol = null;
   if (follow) {
@@ -884,7 +894,7 @@ function piece(geo, material, { x = 0, y = 0, z = 0, ry = 0, order = 0, dir = UP
     const toPart = (p) => p.clone().multiplyScalar(S).applyQuaternion(qy).add(mesh.position);
     fol = { leader: follow.leader, B: toPart(follow.B), L: toPart(follow.L), end: follow.end };
   }
-  return { mesh, order, explode: { dir: dir.clone().normalize(), dist }, ax, sym, kind, engine, deploy: dep, follow: fol };
+  return { mesh, order, explode: { dir: dir.clone().normalize(), dist }, ax, sym, kind, engine, deploy: dep, follow: fol, landerLeg: hingeOf(landerLeg) };
 }
 
 // ---------- engines ----------
@@ -1134,7 +1144,7 @@ function buildEngines(spec, mats) {
     const dist = p.r > 0 ? d : 0.25 * d;
     kit.forEach((s, j) =>
       out.push(
-        piece(s.geo, mats[s.mat], { x: p.x, z: p.z, ry, order: i + j * 0.01, dir, dist, side: s.ds ? DS : undefined, ax: [`e${i}`, ...s.ax], sym: s.sym && p.r === 0, engine: i, kind: s.kind ?? "detail" }),
+        piece(s.geo, mats[s.mat === "engine" && g.bellFinish === "ablative" ? "ablative" : s.mat], { x: p.x, z: p.z, ry, order: i + j * 0.01, dir, dist, side: s.ds ? DS : undefined, ax: [`e${i}`, ...s.ax], sym: s.sym && p.r === 0, engine: i, kind: s.kind ?? "detail" }),
       ),
     );
   });
@@ -1821,23 +1831,42 @@ function capsule(P, mats, g, y0) {
   const yAsc = 0.06 * slaH + 0.55 * (lmTop - 0.06 * slaH);
   const dR = 0.85 * rIn(yAsc);
   const dH = yAsc - 0.06 * slaH;
-  // descent stage: octagon, gold and black foil on alternate faces, four legs folded up its sides
-  const descent = [prism(dR, dH, 8, (kk) => (kk % 2 ? FOIL.black : FOIL.gold), FOIL.black).translate(0, y0 + 0.06 * slaH + dH / 2, 0)];
+  // descent stage: octagon, gold and black foil on alternate faces
+  const yD = y0 + 0.06 * slaH; // base of the lander
+  P(projectUV(prism(dR, dH, 8, (kk) => (kk % 2 ? FOIL.black : FOIL.gold), FOIL.black).translate(0, yD + dH / 2, 0)), mats.foil, { order: 0.9, dist: 0.2, ax: [-1, 2], kind: "interior", lander: "descent" });
+  // four legs folded up its sides (footpad at the top, beside the ascent stage), hinged at a third of its
+  // height; landerOf deploys them 135° out and down, ending 45° off vertical with the pads level, wide and
+  // below the descent stage (visual proportions)
+  const legL = 0.85 * dH;
+  const legAngle = (135 * Math.PI) / 180;
   for (let i = 0; i < 4; i++) {
-    const a = (i * TAU) / 4 + Math.PI / 8;
+    const a = (i * TAU) / 4 + Math.PI / 8; // between the octagon's faces' centres: on the gold/black seams
     const o = v3(Math.sin(a), 0, Math.cos(a));
-    const bot = o.clone().multiplyScalar(dR * 1.04).setY(y0 + 0.08 * slaH);
-    const top = o.clone().multiplyScalar(dR * 1.06).setY(y0 + 0.06 * slaH + 0.95 * dH);
-    descent.push(tint(indexed(rod(bot, top, 0.02 * dR)), FOIL.gold), tint(indexed(new THREE.CylinderGeometry(0.1 * dR, 0.1 * dR, 0.02 * dH, 12).translate(top.x, top.y, top.z)), FOIL.silver));
+    const tan = v3(Math.cos(a), 0, -Math.sin(a)); // tangential, for the side braces
+    const axis = new THREE.Vector3().crossVectors(UP, o); // Y × o turns +Y toward o: out and down
+    const hinge = o.clone().multiplyScalar(dR * 1.05).setY(yD + 0.32 * dH);
+    const tip = hinge.clone().setY(hinge.y + legL);
+    const padUp = UP.clone().applyQuaternion(new THREE.Quaternion().setFromAxisAngle(axis, -legAngle));
+    const pad = lathe([[0.001, -0.05 * dH], [0.13 * dR, -0.05 * dH], [0.14 * dR, -0.03 * dH], [0.06 * dR, -0.012 * dH], [0.001, -0.012 * dH]], 20)
+      .applyQuaternion(new THREE.Quaternion().setFromUnitVectors(UP, padUp))
+      .translate(tip.x, tip.y, tip.z);
+    const probe = rod(tip.clone().addScaledVector(padUp, -0.05 * dH), tip.clone().addScaledVector(padUp, -0.11 * dH), 0.006 * dR, 1); // contact probe (short: feetY_u includes it)
+    const legGeo = merge([
+      tint(indexed(rod(hinge, tip, 0.03 * dR)), FOIL.gold),
+      tint(indexed(rod(hinge.clone().addScaledVector(tan, 0.12 * dR), tip.clone().lerp(hinge, 0.35), 0.015 * dR, 1)), FOIL.gold),
+      tint(indexed(rod(hinge.clone().addScaledVector(tan, -0.12 * dR), tip.clone().lerp(hinge, 0.35), 0.015 * dR, 1)), FOIL.gold),
+      tint(indexed(pad), FOIL.silver),
+      tint(indexed(probe), FOIL.silver),
+    ]);
+    P(projectUV(legGeo), mats.foil, { order: 0.92 + i * 0.005, dist: 0.25, ax: [-1, 2], kind: "interior", lander: "leg", landerLeg: { axis, pivot: hinge, angle: legAngle, order: 0 } });
   }
-  P(projectUV(merge(descent.map(indexed))), mats.foil, { order: 0.9, dist: 0.2, ax: [-1, 2], kind: "interior" });
   // ascent stage: faceted cabin, black front facets, silver elsewhere; docking tunnel on top
   const aH = lmTop - yAsc;
   const ascent = [
     prism(0.72 * dR, aH * 0.8, 6, (kk) => (kk === 0 || kk === 5 ? FOIL.black : FOIL.silver), FOIL.silver, 0.6 * dR).translate(0, y0 + yAsc + aH * 0.4, 0),
     tint(indexed(cyl(0.2 * dR, 0.2 * dR, aH * 0.2, 16, 0, y0 + yAsc + aH * 0.8)), FOIL.silver),
   ];
-  P(projectUV(merge(ascent.map(indexed))), mats.foil, { order: 0.95, dist: 0.3, ax: [-1, 1], kind: "interior" });
+  P(projectUV(merge(ascent.map(indexed))), mats.foil, { order: 0.95, dist: 0.3, ax: [-1, 1], kind: "interior", lander: "ascent" });
   // SLA petals with their inner ring frames and longerons (seen when they open)
   const slaSkin = latheUV(lathe([[Rb, y0], [Rs, y0 + slaH]], 16, 0, Math.PI / 2), { phiStart: 0, phiLength: Math.PI / 2, H: slaH, R: (Rb + Rs) / 2, y0 });
   const inner = [];
@@ -1886,7 +1915,7 @@ function capsule(P, mats, g, y0) {
   P(merge([boltRing(Rc * 1.01, ySm + jb / 2, 32, jb), boltRing(Rc * 1.01, ySm + smH - jb / 2, 32, jb)]), mats.machined, { order: 1.35, dist: 0.6, sym: true });
   const yCm = ySm + smH;
   const cm = [[Rc, 0], [Rc * 0.98, 0.04 * cmH], [0.24 * Rc, 0.86 * cmH], [0.16 * Rc, 0.95 * cmH], [0.001, cmH]];
-  P(projectUV(lathe(cm, 48).translate(0, yCm, 0)), mats.mliSilver, { order: 1.4, dist: 0.8, ax: [1, 0], sym: true, edges: true });
+  P(projectUV(lathe(cm, 48).translate(0, yCm, 0)), mats.mliSilver, { order: 1.4, dist: 0.8, ax: [1, 0], sym: true, edges: true, dock: true });
   const lesH = g.lesH_m ?? 0;
   if (lesH > 0) {
     // tower: four tapering longerons, ring frames at five levels, X-bracing on every face of every bay
@@ -2043,6 +2072,7 @@ export function createPart(spec, mats) {
       explode: p.explode,
       deploy: p.deploy,
       follow: p.follow,
+      landerLeg: p.landerLeg,
       ax: p.ax,
       sym: p.sym,
       axisOffset: 0,
@@ -2069,12 +2099,12 @@ export function createPart(spec, mats) {
   // shared by both looks (setBellGlow).
   const bellY = new Map();
   for (const p of pieces) {
-    if (p.mesh.userData.role !== "engine") continue;
+    if (!BELL_ROLES.has(p.mesh.userData.role)) continue;
     const r = bellY.get(p.engine) ?? [Infinity, -Infinity];
     bellY.set(p.engine, [Math.min(r[0], p.bottomY), Math.max(r[1], p.topY)]);
   }
   for (const p of pieces) {
-    const r = p.mesh.userData.role === "engine" && bellY.get(p.engine);
+    const r = BELL_ROLES.has(p.mesh.userData.role) && bellY.get(p.engine);
     if (!r) continue;
     const glow = { value: new THREE.Vector4(r[0] - p.mesh.position.y, r[1] - p.mesh.position.y, 0, 0) };
     p.mesh.userData.bellGlow = glow;
@@ -2121,6 +2151,71 @@ export function applyDeploy(piece, k) {
   piece.mesh.quaternion.copy(hingeQ).multiply(piece.rest.quaternion);
   for (const f of piece.followers ?? []) poseFollower(f);
 }
+// Landable sub-part of a payload (the Apollo LM: descent stage, ascent stage, four legs), or null. Returns a
+// separate group made of copies of those pieces (shared geometry, own materials, both looks) with its origin
+// at the centre of the descent stage's base:
+//   { group, pieces: [{ mesh, rest, deploy }], deployables (the legs; applyDeploy, same hinge formula),
+//     footprint_u (radius of the deployed footpads), feetY_u (lowest point, legs out, group frame: put the
+//     group at ground − feetY_u), height_u, restPose (where it sits inside the adapter, part frame),
+//     detachPose (after transposition: turned over and docked nose to nose on the command module's apex, part
+//     frame; the escape tower is gone by then in reality, hide it), setPartLanderVisible(on) (hides or shows the
+//     original pieces in the payload when the copy takes over) }.
+export function landerOf(part) {
+  const lm = part.pieces.filter((p) => p.mesh.userData.lander);
+  if (!lm.length) return null;
+  const box = new THREE.Box3();
+  const body = lm.find((p) => p.mesh.userData.lander === "descent") ?? lm[0];
+  body.mesh.geometry.computeBoundingBox();
+  box.copy(body.mesh.geometry.boundingBox).translate(body.rest.position);
+  const base = new THREE.Vector3((box.min.x + box.max.x) / 2, box.min.y, (box.min.z + box.max.z) / 2);
+  const group = new THREE.Group();
+  group.name = `${part.id}:lander`;
+  const pieces = lm.map((p) => {
+    const looks = p.mesh.userData.looks;
+    const mesh = new THREE.Mesh(p.mesh.geometry, cloneMat(p.mesh.material));
+    if (looks) {
+      mesh.userData.looks = { painted: cloneMat(looks.painted), xray: cloneMat(looks.xray) };
+      mesh.material = p.mesh.material === looks.xray ? mesh.userData.looks.xray : mesh.userData.looks.painted;
+    }
+    mesh.name = `${p.mesh.name}:lander`;
+    mesh.userData.lander = p.mesh.userData.lander;
+    mesh.position.copy(p.rest.position).sub(base);
+    mesh.quaternion.copy(p.rest.quaternion);
+    group.add(mesh);
+    const deploy = p.landerLeg ? { ...p.landerLeg, pivot: p.landerLeg.pivot.clone().sub(base), axis: p.landerLeg.axis.clone() } : null;
+    return { mesh, rest: { position: mesh.position.clone(), quaternion: mesh.quaternion.clone() }, deploy };
+  });
+  const deployables = pieces.filter((p) => p.deploy);
+  // Measure with the legs out, then fold them back.
+  for (const d of deployables) applyDeploy(d, 1);
+  group.updateMatrixWorld(true);
+  const all = new THREE.Box3().setFromObject(group);
+  let footprint = 0;
+  for (const d of deployables) {
+    const b = new THREE.Box3().setFromObject(d.mesh);
+    for (const x of [b.min.x, b.max.x]) for (const z of [b.min.z, b.max.z]) footprint = Math.max(footprint, Math.hypot(x, z));
+  }
+  for (const d of deployables) applyDeploy(d, 0);
+  group.updateMatrixWorld(true);
+  const folded = new THREE.Box3().setFromObject(group);
+  const height = folded.max.y - folded.min.y;
+  const dockP = part.pieces.find((p) => p.mesh.userData.dock);
+  const apex = dockP ? dockP.topY : folded.max.y + base.y;
+  return {
+    group,
+    pieces,
+    deployables,
+    footprint_u: footprint,
+    feetY_u: all.min.y,
+    height_u: height,
+    restPose: { position: base.clone(), quaternion: new THREE.Quaternion() },
+    detachPose: { position: new THREE.Vector3(base.x, apex + folded.max.y, base.z), quaternion: new THREE.Quaternion().setFromAxisAngle(v3(1, 0, 0), Math.PI) },
+    setPartLanderVisible(on) {
+      for (const p of lm) p.mesh.visible = !!on;
+    },
+  };
+}
+
 function poseFollower(f) {
   const { leader, B, L, end } = f.follow;
   // L now: the leader's rest → current motion applied to L
