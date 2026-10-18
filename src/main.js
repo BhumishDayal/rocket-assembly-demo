@@ -149,7 +149,7 @@ function placeShadow(dt, snap) {
   const ax = s.c.dot(SHADOW_AXES.x);
   const ay = s.c.dot(SHADOW_AXES.y);
   key.target.position.copy(s.c).addScaledVector(SHADOW_AXES.x, Math.round(ax / texel) * texel - ax).addScaledVector(SHADOW_AXES.y, Math.round(ay / texel) * texel - ay);
-  key.position.copy(key.target.position).addScaledVector(KEY_DIR, s.dist);
+  key.position.copy(key.target.position).addScaledVector(choreo.state.keyDir ?? KEY_DIR, s.dist); // a landing site's sun on its ground
 }
 
 // Contact shadow: a soft dark blob on the deck under the stack, where the key light's shadow map is too coarse to
@@ -839,7 +839,7 @@ async function launch({ countdown, brief = false } = {}) {
   const arrival = arrivalTimeline(current.build, catalog, sim.summary);
   // One timeline for the whole flight (UI 2's flight.js); the story runs it shorter.
   const flight = brief ? null : flightTimeline(current.build, catalog, { ascent: sim }); // the story keeps its short ascent
-  choreo.launch(sim, { pad: pad.group, clamps: pad.clamps, anchors, onTelemetry, arrival, countdown, brief, timeline: !flight || flight.blocked || flight.kind !== "earth" ? null : flight }); // Moon/Mars: next push
+  choreo.launch(sim, { pad: pad.group, clamps: pad.clamps, anchors, onTelemetry, arrival, countdown, brief, timeline: !flight || flight.blocked ? null : flight });
 }
 
 // ---------- twin compare (design B8/C10) ----------

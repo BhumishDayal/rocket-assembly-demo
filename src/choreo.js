@@ -1562,7 +1562,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     if (L.ground) {
       L.ground.place(fP.copy(L.V).sub(bodyCentre(L.landBody, smp))); // the near origin, body-relative km
       const alt = smp.body === L.landBody ? smp.alt_km : Infinity;
-      L.ground.object3d.visible = alt < 6; // under the vehicle below ~5 km (above that the far body is the ground)
+      showGround(alt < 6); // under the vehicle below ~5 km (above that the far body is the ground)
       if (L.ship && L.ground.inner.bob) {
         const b = L.ground.inner.bob(L.real);
         L.ship.object3d.position.y = -(L.ship.deckY ?? 0) + b.y; // the deck at the touchdown height, heaving
@@ -1575,6 +1575,21 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
   function viewer() {
     if (!L?.F) return null;
     return { pos_km: viewKm.copy(camera.position).applyQuaternion(L.Qn).divideScalar(NEAR_PER_KM).add(L.V), frame: L.Qn };
+  }
+  // The local ground's meshes show and hide; any light it carries (UI4's terrain shadow sun) stays in the scene
+  // with its intensity at 0 while hidden, so the scene's light count never changes mid-flight (a recompile of
+  // every material, the 1.3 s freeze this caused at ~6 km).
+  function showGround(on) {
+    if (L.groundShown === on) return;
+    L.groundShown = on;
+    state.keyDir = on ? L.groundKeyDir ?? null : null;
+    L.ground.object3d.traverse((o) => {
+      if (o === L.ground.object3d) return;
+      if (o.isLight) {
+        o.userData.i0 ??= o.intensity;
+        o.intensity = on ? o.userData.i0 : 0;
+      } else if (o.isMesh || o.isPoints || o.isLine || o.isSprite) o.visible = on;
+    });
   }
   // Prepare the landing (once the vehicle is in its parking orbit): the touchdown point from the timeline's last
   // sample, the local ground there (hidden until ~5 km), its frame for the near axes, the sun eased to light it.
@@ -1599,16 +1614,29 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
         L.ground.object3d.add(L.ship.object3d);
         L.ground.inner.object3d.position.y = -(L.ship.freeboard_u ?? 0); // the deck is the touchdown height; the sea below it
       }
-      L.ground.object3d.visible = false;
       root.add(L.ground.object3d);
+      showGround(false);
       L.siteFrame = L.ground.frame.clone();
       return;
     }
     const last = L.F.sampleAt(L.F.totalScreen_s);
     const pos = eciDir(last.pos_km); // body-relative km, world axes
     L.ground = world.createLocalGround({ body, pos_km: pos, size_km: 1.2 });
-    L.ground.object3d.visible = false;
+    // Its own shadow sun would add a light to the scene (every material recompiles: seconds). The scene's key
+    // light takes its direction instead while the ground shows (state.keyDir, main.js).
+    const lights = [];
+    L.ground.object3d.traverse((o) => o.isLight && lights.push(o));
+    for (const l of lights) {
+      if (l.isDirectionalLight) L.groundKeyDir = l.position.clone().sub(l.target.position).normalize();
+      l.target?.removeFromParent();
+      l.removeFromParent();
+    }
     root.add(L.ground.object3d);
+    // Compile it now, while it is first added (the countdown), not on the frame it first shows.
+    L.groundShown = null;
+    showGround(true);
+    warmRenderer?.compile(scene, camera);
+    showGround(false);
     L.siteFrame = L.ground.frame.clone();
     L.sun0 = world.sunDir.clone();
     L.sunSite = world.sunForSite(body, pos).clone();
@@ -1868,6 +1896,7 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
       maxDist0: controls.maxDistance,
     };
     retarget();
+    if (L.F) prepareLanding(); // its ground (and any light it carries) joins the scene now, in the countdown
     controls.autoRotate = false;
     controls.maxPolarAngle = Math.PI * 0.95; // the pad camera looks up from near the deck
     controls.maxDistance = Infinity; // the look-down aims at a pad kilometres below
@@ -2493,6 +2522,9 @@ export function createChoreographer({ parts, scene, root, camera, controls, sfx,
     }
     controls.maxPolarAngle = L.maxPolar0;
     controls.maxDistance = L.maxDist0;
+    state.keyDir = null;
+    L.ground?.dispose?.();
+    L.ground?.object3d.removeFromParent();
     if (L.cut) state.cut = 0;
     if (L.sky) {
       scene.remove(L.sky.object3d);
